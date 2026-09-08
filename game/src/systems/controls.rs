@@ -1,13 +1,13 @@
-//! Mouse and keyboard: pointer lock, spaceship flight, the dials (hold a key, turn the wheel), the
+//! Mouse and keyboard: pointer lock, piloting the shuttle, the dials (hold a key, turn the wheel), the
 //! toggles, the clearing chords, and the three mouse buttons that act on the crosshair.
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
-use crate::core::fly_camera::FlyCamera;
 use crate::core::units::Metres;
 use crate::core::web;
 use crate::systems::aim::Aim;
+use crate::systems::player::{PilotAxes, Player};
 use crate::systems::rafts::PLACEMENT_OFFSET;
 use crate::systems::settings::{Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -60,7 +60,7 @@ impl ClearAction {
     pub fn apply(self, sim: &mut Simulation) {
         match self {
             ClearAction::ClearWater => sim.fluid.clear(),
-            ClearAction::ClearRafts => sim.rafts.clear(),
+            ClearAction::ClearRafts => sim.clear_rafts(),
             ClearAction::ResetLandscape => sim.drum.landscape.reset(),
         }
     }
@@ -84,7 +84,7 @@ impl Plugin for ControlsPlugin {
         app.init_resource::<Controls>()
             .add_systems(
                 Update,
-                (pointer_lock, fly, keys, mouse)
+                (pointer_lock, pilot, keys, mouse)
                     .chain()
                     .in_set(SimSet::Command),
             )
@@ -120,31 +120,30 @@ fn pointer_lock(
     }
 }
 
-fn fly(
+fn pilot(
     controls: Res<Controls>,
-    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
-    mut cameras: Query<&mut Transform, With<FlyCamera>>,
+    mut player: ResMut<Player>,
+    mut sim: ResMut<Simulation>,
 ) {
     if !controls.active {
+        sim.shuttle_input = default();
         return;
     }
-    let dt = time.delta_secs();
+    player.turn(motion.delta);
     let axis =
         |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f32;
-    for mut transform in &mut cameras {
-        FlyCamera::look(&mut transform, motion.delta);
-        FlyCamera::roll(&mut transform, axis(KeyCode::KeyE, KeyCode::KeyQ), dt);
-        let up =
-            axis(KeyCode::ShiftLeft, KeyCode::Space) + axis(KeyCode::ShiftRight, KeyCode::Space);
-        let axes = Vec3::new(
+    let up = axis(KeyCode::ShiftLeft, KeyCode::Space) + axis(KeyCode::ShiftRight, KeyCode::Space);
+    let axes = PilotAxes {
+        motion: Vec3::new(
             axis(KeyCode::KeyA, KeyCode::KeyD),
             up.clamp(-1.0, 1.0),
             -axis(KeyCode::KeyS, KeyCode::KeyW),
-        );
-        FlyCamera::fly(&mut transform, axes, dt);
-    }
+        ),
+        roll: axis(KeyCode::KeyE, KeyCode::KeyQ),
+    };
+    sim.shuttle_input = player.input(sim.shuttle(), axes);
 }
 
 fn keys(

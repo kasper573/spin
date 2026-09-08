@@ -1,6 +1,6 @@
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::systems::drum::RADIUS;
-use game::systems::sim::Simulation;
+use game::systems::sim::{MAX_RAFTS, Simulation};
 
 fn fill(sim: &mut Simulation, spin: f32) {
     sim.drum.target_spin = RadiansPerSecond(spin);
@@ -26,7 +26,7 @@ fn rafts_float_and_ride_with_the_glass() {
         assert!(sim.spawn_raft([a.cos() * 3.1, 0.0, a.sin() * 3.1], n));
     }
     sim.advance_exact(Seconds(10.0));
-    for body in &sim.rafts {
+    for body in sim.rafts() {
         let r = (body.p[0] * body.p[0] + body.p[2] * body.p[2]).sqrt();
         assert!(r < RADIUS as f64 && r > 2.6, "raft radius {r}");
         assert!(body.p[1].abs() <= 0.6, "raft y {}", body.p[1]);
@@ -55,6 +55,6 @@ fn raft_count_is_capped() {
             spawned += 1;
         }
     }
-    assert_eq!(spawned, game::core::fluid::MAX_BODIES);
-    assert_eq!(sim.rafts.len(), game::core::fluid::MAX_BODIES);
+    assert_eq!(spawned, MAX_RAFTS);
+    assert_eq!(sim.rafts().len(), MAX_RAFTS);
 }

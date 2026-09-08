@@ -36,6 +36,6 @@ fn main() {
     let elapsed = start.elapsed().as_secs_f64();
     let per_step_ms = elapsed / steps as f64 * 1000.0;
     let per_particle_us = elapsed / steps as f64 / particles as f64 * 1e6;
-    println!("particles: {particles}, rafts: {}", sim.rafts.len());
+    println!("particles: {particles}, rafts: {}", sim.rafts().len());
     println!("substep: {per_step_ms:.2} ms, {per_particle_us:.3} us per particle");
 }

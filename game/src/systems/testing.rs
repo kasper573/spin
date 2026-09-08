@@ -3,11 +3,11 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::core::fly_camera::FlyCamera;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence;
+use crate::systems::player::Player;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -127,13 +127,13 @@ fn run(world: &mut World, command: ScriptCommand) {
             look_y,
             look_z,
         } => {
-            for mut camera in world
-                .query_filtered::<&mut Transform, With<FlyCamera>>()
-                .iter_mut(world)
-            {
-                *camera = Transform::from_xyz(x, y, z)
-                    .looking_at(Vec3::new(look_x, look_y, look_z), Vec3::Y);
-            }
+            world.resource_scope(|world, mut player: Mut<Player>| {
+                player.teleport(
+                    world.resource_mut::<Simulation>().shuttle_mut(),
+                    [x as f64, y as f64, z as f64],
+                    [look_x as f64, look_y as f64, look_z as f64],
+                );
+            });
         }
         ScriptCommand::Advance { seconds } => world
             .resource_mut::<Simulation>()
@@ -148,7 +148,7 @@ fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
         frame: frame.0,
         particles: sim.fluid.len(),
         litres: sim.water().0,
-        rafts: sim.rafts.len(),
+        rafts: sim.rafts().len(),
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
@@ -156,7 +156,7 @@ fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
         raft_slip: sim
-            .rafts
+            .rafts()
             .iter()
             .map(|b| {
                 let r = (b.p[0] * b.p[0] + b.p[2] * b.p[2]).sqrt().max(1e-9);

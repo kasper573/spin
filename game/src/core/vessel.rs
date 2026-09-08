@@ -26,7 +26,7 @@ impl Contact {
     }
 }
 
-/// How deep a point sits inside a wall and which way is out.
+/// How deep something sits inside a wall and which way is out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Penetration {
     pub depth: f64,
@@ -53,10 +53,14 @@ impl Penetrations {
 pub trait Vessel {
     /// Move a point that left the vessel back inside, `margin` away from the walls.
     fn confine(&self, p: &mut [f32; 3], margin: f32) -> Contact;
-    /// Every wall the point is currently inside of.
+    /// Every wall a point inside the vessel is currently inside of.
     fn penetrations(&self, p: [f64; 3]) -> Penetrations;
-    /// Velocity of the wall material (and of the air it drags along) at a point.
+    /// Every wall a sphere overlaps, from whichever side of the wall it is on.
+    fn sphere_penetrations(&self, centre: [f64; 3], radius: f64) -> Penetrations;
+    /// Velocity of the wall material at a point.
     fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3];
+    /// Velocity of the air at a point, or none where there is no air.
+    fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]>;
     /// Angular velocity of the vessel as a whole.
     fn angular_velocity(&self) -> [f64; 3];
 }

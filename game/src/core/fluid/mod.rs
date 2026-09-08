@@ -1,9 +1,9 @@
-//! Position-based fluid (Macklin & Müller 2013) with Akinci-style coupling to rigid boxes, confined
+//! Position-based fluid (Macklin & Müller 2013) with Akinci-style coupling to rigid bodies, confined
 //! by a [`Vessel`]. SI units throughout; the particle spacing fixes the kernel and the rest mass.
 use std::f32::consts::PI;
 
 use crate::core::math::Rng;
-use crate::core::rigid::{Body, BoxShape};
+use crate::core::rigid::{Body, BodyShape};
 use crate::core::units::{Hertz, Seconds};
 use crate::core::vessel::{Contact, Vessel};
 
@@ -243,16 +243,17 @@ impl Fluid {
         }
     }
 
-    /// Advance fluid and bodies together by one substep inside the vessel.
+    /// Advance fluid and bodies together by one substep inside the vessel. Each body names its
+    /// shape by index into `shapes`.
     pub fn step(
         &mut self,
         dt: f32,
         vessel: &impl Vessel,
-        shape: &BoxShape,
+        shapes: &[BodyShape],
         bodies: &mut [Body],
         params: &FluidParams,
     ) {
-        solver::step(self, dt, vessel, shape, bodies, params);
+        solver::step(self, dt, vessel, shapes, bodies, params);
     }
 }
 

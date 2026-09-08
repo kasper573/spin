@@ -8,7 +8,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::core::fly_camera::FlyCamera;
+use crate::systems::player::PlayerCamera;
 
 pub const SUN_DIRECTION: Vec3 = Vec3::new(0.5145, 0.7717, 0.3430);
 const FILL_DIRECTION: Vec3 = Vec3::new(-0.5976, -0.7171, -0.3586);
@@ -66,8 +66,7 @@ fn spawn(
         }),
         Tonemapping::None,
         Msaa::Sample4,
-        Transform::from_xyz(4.9, 5.5, 7.2).looking_at(Vec3::ZERO, Vec3::Y),
-        FlyCamera,
+        PlayerCamera,
     ));
     commands.spawn((
         DirectionalLight {

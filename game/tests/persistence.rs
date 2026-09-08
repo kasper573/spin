@@ -1,6 +1,6 @@
-use bevy::prelude::*;
 use game::core::units::{RadiansPerSecond, Seconds};
-use game::systems::persistence::{Snapshot, apply, pose_camera, snapshot};
+use game::systems::persistence::{Snapshot, apply, snapshot};
+use game::systems::player::Player;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
 
@@ -16,23 +16,29 @@ fn snapshot_round_trips_through_json() {
         flow: game::core::units::LitresPerSecond(900.0),
         ..Settings::default()
     };
-    let camera = Transform::from_xyz(1.0, 2.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y);
+    let mut player = Player::default();
+    player.teleport(sim.shuttle_mut(), [1.0, 2.0, 3.0], [0.0; 3]);
 
-    let json = serde_json::to_string(&snapshot(&settings, &sim, &camera)).unwrap();
+    let json = serde_json::to_string(&snapshot(&settings, &sim, &player)).unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
 
     let mut settings2 = Settings::default();
     let mut sim2 = Simulation::default();
-    let pose = apply(&restored, &mut settings2, &mut sim2);
-    let mut camera2 = Transform::default();
-    pose_camera(&pose, &mut camera2);
+    let mut player2 = Player::default();
+    apply(&restored, &mut settings2, &mut sim2, &mut player2);
 
     assert_eq!(settings2, settings);
     assert_eq!(sim2.fluid.len(), sim.fluid.len());
-    assert_eq!(sim2.rafts.len(), 1);
+    assert_eq!(sim2.rafts().len(), 1);
+    let (a, b) = (sim2.rafts()[0].p, sim.rafts()[0].p);
+    assert!(
+        (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5 && (a[2] - b[2]).abs() < 1e-5,
+        "raft {a:?} vs {b:?}"
+    );
     assert_eq!(sim2.drum.landscape.heights(), sim.drum.landscape.heights());
     assert!((sim2.drum.angle.0 - sim.drum.angle.0).abs() < 1e-9);
-    assert!((camera2.translation - camera.translation).length() < 1e-5);
+    assert_eq!(sim2.shuttle().p, sim.shuttle().p);
+    assert_eq!(player2, player);
     let a = sim.fluid.particle(7);
     let b = sim2.fluid.particle(7);
     assert_eq!(a.position, b.position);

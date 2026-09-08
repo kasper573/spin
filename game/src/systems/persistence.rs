@@ -1,25 +1,26 @@
-//! Everything worth keeping across a reload — settings, camera, drum, water, rafts, landscape — as
-//! one JSON snapshot in the browser's storage, written every couple of seconds.
+//! Everything worth keeping across a reload — settings, shuttle, drum, water, rafts, landscape —
+//! as one JSON snapshot in the browser's storage, written every couple of seconds.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::codec;
 use crate::core::fluid::{PARTICLE_SPACING, Particle};
-use crate::core::fly_camera::FlyCamera;
 use crate::core::rigid::Body;
+use crate::core::shuttle::Look;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 use crate::core::web;
+use crate::systems::player::Player;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
-const KEY: &str = "spin-gravity-wheel/v4";
+const KEY: &str = "spin-gravity-wheel/v5";
 const AUTOSAVE_INTERVAL: Seconds = Seconds(2.0);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub settings: Settings,
-    pub camera: CameraPose,
+    pub shuttle: ShuttlePose,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
     pub time: Seconds,
@@ -34,9 +35,12 @@ pub struct Snapshot {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct CameraPose {
-    pub position: [f32; 3],
-    pub rotation: [f32; 4],
+pub struct ShuttlePose {
+    pub position: [f64; 3],
+    pub rotation: [f64; 4],
+    pub velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+    pub look: Look,
 }
 
 pub struct PersistencePlugin;
@@ -52,12 +56,16 @@ impl Plugin for PersistencePlugin {
     }
 }
 
-pub fn snapshot(settings: &Settings, sim: &Simulation, camera: &Transform) -> Snapshot {
+pub fn snapshot(settings: &Settings, sim: &Simulation, player: &Player) -> Snapshot {
+    let shuttle = sim.shuttle();
     Snapshot {
         settings: settings.clone(),
-        camera: CameraPose {
-            position: camera.translation.to_array(),
-            rotation: camera.rotation.to_array(),
+        shuttle: ShuttlePose {
+            position: shuttle.p,
+            rotation: shuttle.q,
+            velocity: shuttle.v,
+            angular_velocity: shuttle.w,
+            look: player.look,
         },
         spin: sim.drum.spin,
         angle: sim.drum.angle,
@@ -72,7 +80,7 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, camera: &Transform) -> Sn
             })
             .collect(),
         rafts: sim
-            .rafts
+            .rafts()
             .iter()
             .flat_map(|b| {
                 [
@@ -86,7 +94,12 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, camera: &Transform) -> Sn
     }
 }
 
-pub fn apply(snapshot: &Snapshot, settings: &mut Settings, sim: &mut Simulation) -> CameraPose {
+pub fn apply(
+    snapshot: &Snapshot,
+    settings: &mut Settings,
+    sim: &mut Simulation,
+    player: &mut Player,
+) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-10.0, 10.0));
@@ -106,42 +119,25 @@ pub fn apply(snapshot: &Snapshot, settings: &mut Settings, sim: &mut Simulation)
         }
     }
     for chunk in snapshot.rafts.chunks_exact(13) {
-        if chunk.iter().all(|v| v.is_finite()) && sim.rafts.len() < crate::core::fluid::MAX_BODIES {
+        if chunk.iter().all(|v| v.is_finite()) {
             let f = |i: usize| chunk[i] as f64;
-            sim.rafts.push(Body::new(
-                &sim.raft_shape,
-                [f(0), f(1), f(2)],
-                [f(3), f(4), f(5), f(6)],
-                [f(7), f(8), f(9)],
-                [f(10), f(11), f(12)],
-            ));
+            sim.spawn_raft([f(0), f(1), f(2)], [0.0, 1.0, 0.0]);
+            if let Some(raft) = sim.rafts_mut().last_mut() {
+                raft.place([f(0), f(1), f(2)], [f(3), f(4), f(5), f(6)]);
+                raft.v = [f(7), f(8), f(9)];
+                raft.w = [f(10), f(11), f(12)];
+            }
         }
     }
-    snapshot.camera
-}
-
-pub fn pose_camera(pose: &CameraPose, camera: &mut Transform) {
-    let position = Vec3::from_array(pose.position);
-    let rotation = Quat::from_array(pose.rotation);
-    if position.is_finite() && rotation.is_finite() && rotation.length() > 0.5 {
-        camera.translation = position;
-        camera.rotation = rotation.normalize();
-    }
+    pose_shuttle(&snapshot.shuttle, sim.shuttle_mut(), player);
+    sim.shuttle_mut().solid = settings.collisions;
 }
 
 pub fn save_now(world: &mut World) {
-    let Some(camera) = world
-        .query_filtered::<&Transform, With<FlyCamera>>()
-        .iter(world)
-        .next()
-        .copied()
-    else {
-        return;
-    };
     let snapshot = snapshot(
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
-        &camera,
+        world.resource::<Player>(),
     );
     if let Ok(text) = serde_json::to_string(&snapshot) {
         web::storage_save(KEY, &text);
@@ -151,22 +147,38 @@ pub fn save_now(world: &mut World) {
 #[derive(Resource)]
 struct Autosave(Timer);
 
+fn pose_shuttle(pose: &ShuttlePose, shuttle: &mut Body, player: &mut Player) {
+    let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
+    let q_len = pose.rotation.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if !(finite(&pose.position)
+        && finite(&pose.rotation)
+        && finite(&pose.velocity)
+        && finite(&pose.angular_velocity)
+        && pose.look.yaw.is_finite()
+        && pose.look.pitch.is_finite()
+        && q_len > 0.5)
+    {
+        return;
+    }
+    shuttle.place(pose.position, pose.rotation.map(|x| x / q_len));
+    shuttle.v = pose.velocity;
+    shuttle.w = pose.angular_velocity;
+    player.look = pose.look;
+}
+
 fn restore(world: &mut World) {
     let Some(snapshot) =
         web::storage_load(KEY).and_then(|text| serde_json::from_str::<Snapshot>(&text).ok())
     else {
         return;
     };
-    let pose = world.resource_scope(|world, mut settings: Mut<Settings>| {
-        world
-            .resource_scope(|_, mut sim: Mut<Simulation>| apply(&snapshot, &mut settings, &mut sim))
+    world.resource_scope(|world, mut settings: Mut<Settings>| {
+        world.resource_scope(|world, mut sim: Mut<Simulation>| {
+            world.resource_scope(|_, mut player: Mut<Player>| {
+                apply(&snapshot, &mut settings, &mut sim, &mut player)
+            })
+        })
     });
-    for mut camera in world
-        .query_filtered::<&mut Transform, With<FlyCamera>>()
-        .iter_mut(world)
-    {
-        pose_camera(&pose, &mut camera);
-    }
 }
 
 fn autosave(world: &mut World) {

@@ -3,7 +3,7 @@ use super::{
     MAX_BOUNDARY_SAMPLES, MAX_DELTA, MAX_NEIGHBOURS, MAX_SPEED, PARTICLE_MASS, PARTICLE_SPACING,
     POLY6, REST_DENSITY, SCORR_K, SCORR_WQ, SPIKY, W0, WET_REF,
 };
-use crate::core::rigid::{Body, BoxShape, collide_pair, collide_vessel};
+use crate::core::rigid::{Body, BodyShape, Collider, collide_pair, collide_vessel};
 use crate::core::vessel::Vessel;
 
 const MARGIN: f32 = PARTICLE_SPACING * 0.5;
@@ -12,12 +12,12 @@ pub fn step(
     f: &mut Fluid,
     dt: f32,
     vessel: &impl Vessel,
-    shape: &BoxShape,
+    shapes: &[BodyShape],
     bodies: &mut [Body],
     p: &FluidParams,
 ) {
-    step_particles(f, dt, vessel, shape, bodies, p);
-    step_bodies(dt as f64, vessel, shape, bodies, p);
+    step_particles(f, dt, vessel, shapes, bodies, p);
+    step_bodies(dt as f64, vessel, shapes, bodies, p);
 }
 
 /// Predict, solve constraints, then derive velocities with wall contact and viscosity.
@@ -25,11 +25,11 @@ fn step_particles(
     f: &mut Fluid,
     dt: f32,
     vessel: &impl Vessel,
-    shape: &BoxShape,
+    shapes: &[BodyShape],
     bodies: &mut [Body],
     p: &FluidParams,
 ) {
-    gather_boundary(&mut f.boundary, bodies, shape);
+    gather_boundary(&mut f.boundary, bodies, shapes);
     let n = f.n;
     if n == 0 {
         return;
@@ -37,8 +37,9 @@ fn step_particles(
     let air_k = if p.air { dt / p.air_tau.0 } else { 0.0 };
     for i in 0..n {
         let (mut ux, mut uy, mut uz) = (f.vx[i], f.vy[i], f.vz[i]);
-        if air_k > 0.0 {
-            let a = vessel.wall_velocity([f.x[i] as f64, f.y[i] as f64, f.z[i] as f64]);
+        if air_k > 0.0
+            && let Some(a) = vessel.air_velocity([f.x[i] as f64, f.y[i] as f64, f.z[i] as f64])
+        {
             ux += (a[0] as f32 - ux) * air_k;
             uy += (a[1] as f32 - uy) * air_k;
             uz += (a[2] as f32 - uz) * air_k;
@@ -60,11 +61,11 @@ fn step_particles(
     find_neighbours(f);
     for _ in 0..ITERATIONS {
         compute_lambda(f);
-        apply_delta(f, vessel, bodies);
+        apply_delta(f, vessel, bodies, shapes);
     }
     update_velocities(f, dt, vessel, p);
     if f.boundary.n > 0 {
-        apply_buoyancy(f, bodies, shape, dt);
+        apply_buoyancy(f, bodies, shapes, dt);
     }
     apply_viscosity_and_drag(f, bodies, vessel, dt, p);
 }
@@ -73,37 +74,41 @@ fn step_particles(
 fn step_bodies(
     dt: f64,
     vessel: &impl Vessel,
-    shape: &BoxShape,
+    shapes: &[BodyShape],
     bodies: &mut [Body],
     p: &FluidParams,
 ) {
     let air_k = if p.air { dt / p.air_tau.0 as f64 } else { 0.0 };
     let spin = vessel.angular_velocity();
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
-    // water may change a body's velocity by a few times the vessel's artificial gravity per substep
-    let reach = shape.reach();
-    let max_dv = (20.0 + 4.0 * spin_mag * spin_mag * reach) * dt;
     for b in bodies.iter_mut() {
+        // water may change a body's velocity by a few times the vessel's artificial gravity per substep
+        let reach = shapes[b.shape].reach();
+        let max_dv = (20.0 + 4.0 * spin_mag * spin_mag * reach) * dt;
         b.apply_accumulated(max_dv);
         let wet_k = (b.wet * p.wet_spin_rate.0 as f64 * dt).min(1.0);
         if wet_k > 0.0 {
             relax(&mut b.w, &spin, wet_k);
         }
-        if air_k > 0.0 {
-            let a = vessel.wall_velocity(b.p);
+        if air_k > 0.0
+            && let Some(a) = vessel.air_velocity(b.p)
+        {
             relax(&mut b.v, &a, air_k);
             relax(&mut b.w, &spin, air_k);
         }
         b.integrate(dt);
     }
-    for b in bodies.iter_mut() {
-        collide_vessel(b, shape, vessel, p.restitution, p.body_friction);
+    for b in bodies.iter_mut().filter(|b| b.solid) {
+        collide_vessel(b, &shapes[b.shape], vessel, p.restitution, p.body_friction);
     }
     let n = bodies.len();
     for a in 0..n {
         for b in (a + 1)..n {
-            collide_pair(bodies, a, b, shape, p.restitution, p.body_friction);
-            collide_pair(bodies, b, a, shape, p.restitution, p.body_friction);
+            if !(bodies[a].solid && bodies[b].solid) {
+                continue;
+            }
+            collide_pair(bodies, a, b, shapes, p.restitution, p.body_friction);
+            collide_pair(bodies, b, a, shapes, p.restitution, p.body_friction);
         }
     }
 }
@@ -127,10 +132,10 @@ fn clamp_speed(ux: f32, uy: f32, uz: f32) -> (f32, f32, f32) {
     }
 }
 
-fn gather_boundary(b: &mut Boundary, bodies: &[Body], shape: &BoxShape) {
+fn gather_boundary(b: &mut Boundary, bodies: &[Body], shapes: &[BodyShape]) {
     b.n = 0;
-    for (bi, body) in bodies.iter().enumerate() {
-        for t in &shape.samples {
+    for (bi, body) in bodies.iter().enumerate().filter(|(_, b)| b.solid) {
+        for t in &shapes[body.shape].samples {
             if b.n >= MAX_BOUNDARY_SAMPLES {
                 return;
             }
@@ -253,7 +258,7 @@ fn compute_lambda(f: &mut Fluid) {
     }
 }
 
-fn apply_delta(f: &mut Fluid, vessel: &impl Vessel, bodies: &mut [Body]) {
+fn apply_delta(f: &mut Fluid, vessel: &impl Vessel, bodies: &mut [Body], shapes: &[BodyShape]) {
     let mr = PARTICLE_MASS / REST_DENSITY;
     for i in 0..f.n {
         let b = &f.boundary;
@@ -318,50 +323,93 @@ fn apply_delta(f: &mut Fluid, vessel: &impl Vessel, bodies: &mut [Body]) {
             f.contact[i].push(*n);
         }
     }
-    exclude_from_bodies(f, bodies);
+    exclude_from_bodies(f, bodies, shapes);
 }
 
 /// Hard exclusion of particles from body volumes (tunnelling guard); also counts submerged samples.
-fn exclude_from_bodies(f: &mut Fluid, bodies: &mut [Body]) {
-    let d = PARTICLE_SPACING as f64;
+fn exclude_from_bodies(f: &mut Fluid, bodies: &mut [Body], shapes: &[BodyShape]) {
     for body in bodies.iter_mut() {
-        let m = body.m;
-        let c = body.p;
-        let [hx, hy, hz] = body.half;
-        let (ex, ey, ez) = (hx + 0.3 * d, hy + 0.4 * d, hz + 0.3 * d);
-        let reach2 = ex * ex + ey * ey + ez * ez;
-        let mut sub = 0u32;
-        for i in 0..f.n {
-            let rx = f.px[i] as f64 - c[0];
-            let ry = f.py[i] as f64 - c[1];
-            let rz = f.pz[i] as f64 - c[2];
-            if rx * rx + ry * ry + rz * rz > reach2 {
-                continue;
-            }
-            let lx = m[0] * rx + m[3] * ry + m[6] * rz;
-            let ly = m[1] * rx + m[4] * ry + m[7] * rz;
-            let lz = m[2] * rx + m[5] * ry + m[8] * rz;
-            let (ax, ay, az) = (lx.abs(), ly.abs(), lz.abs());
-            if ax < hx + d && az < hz + d && ay < hy + 1.25 * d {
-                sub += 1;
-            }
-            if ax >= ex || ay >= ey || az >= ez {
-                continue;
-            }
-            let (pxn, pyn, pzn) = (ex - ax, ey - ay, ez - az);
-            let (k, amt) = if pyn <= pxn && pyn <= pzn {
-                (1, pyn * ly.signum())
-            } else if pxn <= pzn {
-                (0, pxn * lx.signum())
-            } else {
-                (2, pzn * lz.signum())
-            };
-            f.px[i] += (m[k] * amt) as f32;
-            f.py[i] += (m[3 + k] * amt) as f32;
-            f.pz[i] += (m[6 + k] * amt) as f32;
+        if !body.solid {
+            body.submerged = 0;
+            continue;
         }
-        body.submerged = sub;
+        match shapes[body.shape].collider {
+            Collider::Box { half } => exclude_from_box(f, body, half),
+            Collider::Sphere { radius, centre } => exclude_from_sphere(f, body, radius, centre),
+        }
     }
+}
+
+fn exclude_from_box(f: &mut Fluid, body: &mut Body, half: [f64; 3]) {
+    let d = PARTICLE_SPACING as f64;
+    let m = body.m;
+    let c = body.p;
+    let [hx, hy, hz] = half;
+    let (ex, ey, ez) = (hx + 0.3 * d, hy + 0.4 * d, hz + 0.3 * d);
+    let reach2 = ex * ex + ey * ey + ez * ez;
+    let mut sub = 0u32;
+    for i in 0..f.n {
+        let rx = f.px[i] as f64 - c[0];
+        let ry = f.py[i] as f64 - c[1];
+        let rz = f.pz[i] as f64 - c[2];
+        if rx * rx + ry * ry + rz * rz > reach2 {
+            continue;
+        }
+        let lx = m[0] * rx + m[3] * ry + m[6] * rz;
+        let ly = m[1] * rx + m[4] * ry + m[7] * rz;
+        let lz = m[2] * rx + m[5] * ry + m[8] * rz;
+        let (ax, ay, az) = (lx.abs(), ly.abs(), lz.abs());
+        if ax < hx + d && az < hz + d && ay < hy + 1.25 * d {
+            sub += 1;
+        }
+        if ax >= ex || ay >= ey || az >= ez {
+            continue;
+        }
+        let (pxn, pyn, pzn) = (ex - ax, ey - ay, ez - az);
+        let (k, amt) = if pyn <= pxn && pyn <= pzn {
+            (1, pyn * ly.signum())
+        } else if pxn <= pzn {
+            (0, pxn * lx.signum())
+        } else {
+            (2, pzn * lz.signum())
+        };
+        f.px[i] += (m[k] * amt) as f32;
+        f.py[i] += (m[3 + k] * amt) as f32;
+        f.pz[i] += (m[6 + k] * amt) as f32;
+    }
+    body.submerged = sub;
+}
+
+fn exclude_from_sphere(f: &mut Fluid, body: &mut Body, radius: f64, centre: [f64; 3]) {
+    let d = PARTICLE_SPACING as f64;
+    let c = body.to_world(&centre);
+    let keep_out = radius + 0.3 * d;
+    let count_in = radius + d;
+    let mut sub = 0u32;
+    for i in 0..f.n {
+        let rx = f.px[i] as f64 - c[0];
+        let ry = f.py[i] as f64 - c[1];
+        let rz = f.pz[i] as f64 - c[2];
+        let r2 = rx * rx + ry * ry + rz * rz;
+        if r2 > count_in * count_in {
+            continue;
+        }
+        sub += 1;
+        if r2 >= keep_out * keep_out {
+            continue;
+        }
+        let r = r2.sqrt();
+        let (nx, ny, nz) = if r > 1e-9 {
+            (rx / r, ry / r, rz / r)
+        } else {
+            (0.0, 1.0, 0.0)
+        };
+        let amt = keep_out - r;
+        f.px[i] += (nx * amt) as f32;
+        f.py[i] += (ny * amt) as f32;
+        f.pz[i] += (nz * amt) as f32;
+    }
+    body.submerged = sub;
 }
 
 /// Velocities from positions; wall contact = no penetration + viscous drag toward the wall's speed.
@@ -402,7 +450,7 @@ fn update_velocities(f: &mut Fluid, dt: f32, vessel: &impl Vessel, p: &FluidPara
 /// Hydrostatic buoyancy on bodies. PBF pressure is a per-step correction, not a depth-integrated
 /// pressure, so Archimedes is added explicitly: local water density at each sample point gives
 /// wetness, local water swirl gives the pressure gradient (rho * v_t^2 / r, pointing inward).
-fn apply_buoyancy(f: &mut Fluid, bodies: &mut [Body], shape: &BoxShape, dt: f32) {
+fn apply_buoyancy(f: &mut Fluid, bodies: &mut [Body], shapes: &[BodyShape], dt: f32) {
     let b = &mut f.boundary;
     for k in 0..b.n {
         b.rho[k] = 0.0;
@@ -435,7 +483,6 @@ fn apply_buoyancy(f: &mut Fluid, bodies: &mut [Body], shape: &BoxShape, dt: f32)
     for body in bodies.iter_mut() {
         body.wet = 0.0;
     }
-    let samples = shape.samples.len() as f64;
     for k in 0..b.n {
         let rho = b.rho[k];
         if rho < 1.0 {
@@ -445,7 +492,8 @@ fn apply_buoyancy(f: &mut Fluid, bodies: &mut [Body], shape: &BoxShape, dt: f32)
         }
         let wet = (rho / WET_REF).min(1.0);
         let body = &mut bodies[b.body[k] as usize];
-        body.wet += wet as f64 / samples;
+        let shape = &shapes[body.shape];
+        body.wet += wet as f64 / shape.samples.len() as f64;
         let (bx, bz) = (b.x[k], b.z[k]);
         let rr = (bx * bx + bz * bz).sqrt().max(1e-6);
         let (tx, tz) = (bz / rr, -bx / rr);

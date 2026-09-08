@@ -11,6 +11,8 @@ use crate::core::vessel::{Contact, Penetration, Penetrations, Vessel};
 
 pub const RADIUS: f32 = 3.5;
 pub const HALF_WIDTH: f32 = 0.6;
+/// The glass shell's thickness, felt only from outside.
+pub const GLASS_THICKNESS: f64 = 0.05;
 /// Maximum spin-up acceleration of the drum (rad/s²).
 const SPIN_ACCEL: f64 = 0.6;
 
@@ -41,6 +43,12 @@ impl Drum {
         self.angle.0 += self.spin.0 as f64 * dt;
     }
 
+    /// Whether a point is in the air the drum encloses.
+    pub fn encloses(&self, p: [f64; 3]) -> bool {
+        p[0] * p[0] + p[2] * p[2] < (RADIUS as f64) * (RADIUS as f64)
+            && p[1].abs() < HALF_WIDTH as f64
+    }
+
     /// Angle of a world point in the drum's own frame.
     pub fn wheel_angle(&self, x: f64, z: f64) -> f64 {
         wheel_angle(x, z, self.angle.0)
@@ -60,6 +68,69 @@ impl Drum {
         } else {
             [p[0], y, p[2]]
         }
+    }
+}
+
+impl Drum {
+    /// A sphere inside the drum against the rim, the landscape and the caps.
+    fn inner_sphere_penetrations(&self, c: [f64; 3], radius: f64) -> Penetrations {
+        let mut out = Penetrations::default();
+        let (depth, normal) = if self.landscape.is_empty() {
+            let r = (c[0] * c[0] + c[2] * c[2]).sqrt().max(1e-9);
+            (r + radius - RADIUS as f64, [-c[0] / r, 0.0, -c[2] / r])
+        } else {
+            self.landscape
+                .penetration(c[0], c[1], c[2], self.angle.0, radius)
+        };
+        if depth > 0.0 {
+            out.push(Penetration { depth, normal });
+        }
+        let cap = HALF_WIDTH as f64 - radius;
+        if c[1] > cap {
+            out.push(Penetration {
+                depth: c[1] - cap,
+                normal: [0.0, -1.0, 0.0],
+            });
+        } else if c[1] < -cap {
+            out.push(Penetration {
+                depth: -cap - c[1],
+                normal: [0.0, 1.0, 0.0],
+            });
+        }
+        out
+    }
+
+    /// A sphere outside the drum against the outer surface of the glass shell.
+    fn outer_sphere_penetrations(&self, c: [f64; 3], radius: f64) -> Penetrations {
+        let mut out = Penetrations::default();
+        let outer_radius = RADIUS as f64 + GLASS_THICKNESS;
+        let outer_half = HALF_WIDTH as f64 + GLASS_THICKNESS;
+        let r = (c[0] * c[0] + c[2] * c[2]).sqrt().max(1e-9);
+        let radial = [c[0] / r, 0.0, c[2] / r];
+        let axial = [0.0, c[1].signum(), 0.0];
+        let (dr, dy) = (r - outer_radius, c[1].abs() - outer_half);
+        let (distance, normal) = if dr > 0.0 && dy > 0.0 {
+            let d = (dr * dr + dy * dy).sqrt();
+            (
+                d,
+                [radial[0] * dr / d, axial[1] * dy / d, radial[2] * dr / d],
+            )
+        } else if dr > 0.0 {
+            (dr, radial)
+        } else if dy > 0.0 {
+            (dy, axial)
+        } else if dr > dy {
+            (dr, radial)
+        } else {
+            (dy, axial)
+        };
+        if distance < radius {
+            out.push(Penetration {
+                depth: radius - distance,
+                normal,
+            });
+        }
+        out
     }
 }
 
@@ -133,9 +204,21 @@ impl Vessel for Drum {
         out
     }
 
+    fn sphere_penetrations(&self, centre: [f64; 3], radius: f64) -> Penetrations {
+        if self.encloses(centre) {
+            self.inner_sphere_penetrations(centre, radius)
+        } else {
+            self.outer_sphere_penetrations(centre, radius)
+        }
+    }
+
     fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3] {
         let w = self.spin.0 as f64;
         [w * p[2], 0.0, -w * p[0]]
+    }
+
+    fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]> {
+        self.encloses(p).then(|| self.wall_velocity(p))
     }
 
     fn angular_velocity(&self) -> [f64; 3] {

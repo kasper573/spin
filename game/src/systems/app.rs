@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::core::web;
 use crate::systems::{
     aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
-    persistence::PersistencePlugin, rafts::RaftsPlugin, scene::ScenePlugin,
+    persistence::PersistencePlugin, player::PlayerPlugin, rafts::RaftsPlugin, scene::ScenePlugin,
     settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin, water::WaterPlugin,
 };
 
@@ -23,6 +23,7 @@ pub fn build() -> App {
         DrumPlugin,
         WaterPlugin,
         RaftsPlugin,
+        PlayerPlugin,
         AimPlugin,
         ControlsPlugin,
         HudPlugin,

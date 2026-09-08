@@ -15,6 +15,8 @@ pub struct Settings {
     pub wall_friction: f32,
     pub raft_friction: f32,
     pub air: bool,
+    /// Whether the shuttle is solid to the drum, the water and the rafts.
+    pub collisions: bool,
     pub brush_size: Metres,
     pub brush_rate: MetresPerSecond,
 }
@@ -28,6 +30,7 @@ impl Default for Settings {
             wall_friction: 0.5,
             raft_friction: 0.45,
             air: true,
+            collisions: false,
             brush_size: Metres(0.6),
             brush_rate: MetresPerSecond(0.8),
         }
@@ -183,38 +186,44 @@ impl Dial {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Toggle {
     Air,
+    Collisions,
 }
 
 impl Toggle {
-    pub const ALL: [Toggle; 1] = [Toggle::Air];
+    pub const ALL: [Toggle; 2] = [Toggle::Air, Toggle::Collisions];
 
     pub fn key(self) -> KeyCode {
         match self {
             Toggle::Air => KeyCode::KeyG,
+            Toggle::Collisions => KeyCode::Enter,
         }
     }
 
     pub fn key_label(self) -> &'static str {
         match self {
             Toggle::Air => "G",
+            Toggle::Collisions => "Enter",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Toggle::Air => "air drag",
+            Toggle::Collisions => "collisions",
         }
     }
 
     pub fn get(self, s: &Settings) -> bool {
         match self {
             Toggle::Air => s.air,
+            Toggle::Collisions => s.collisions,
         }
     }
 
     pub fn flip(self, s: &mut Settings) {
         match self {
             Toggle::Air => s.air = !s.air,
+            Toggle::Collisions => s.collisions = !s.collisions,
         }
     }
 }
@@ -238,4 +247,5 @@ fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
     sim.params.wall_friction = settings.wall_friction;
     sim.params.body_friction = settings.raft_friction as f64;
     sim.params.air = settings.air;
+    sim.shuttle_mut().solid = settings.collisions;
 }

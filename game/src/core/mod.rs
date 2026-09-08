@@ -1,8 +1,8 @@
 pub mod codec;
 pub mod fluid;
-pub mod fly_camera;
 pub mod math;
 pub mod rigid;
+pub mod shuttle;
 pub mod surface;
 pub mod units;
 pub mod vessel;

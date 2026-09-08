@@ -1,7 +1,7 @@
 //! Wooden boards: their shared shape and the meshes that follow the rigid bodies.
 use bevy::prelude::*;
 
-use crate::core::rigid::BoxShape;
+use crate::core::rigid::BodyShape;
 use crate::core::units::Metres;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -13,8 +13,8 @@ const SAMPLE_SPACING: f64 = 0.075;
 /// Gap between the surface a raft is placed on and the raft's centre.
 pub const PLACEMENT_OFFSET: Metres = Metres((THICKNESS / 2.0) as f32 + 0.04);
 
-pub fn shape() -> BoxShape {
-    BoxShape::new([LENGTH, THICKNESS, LENGTH], DENSITY, SAMPLE_SPACING)
+pub fn shape() -> BodyShape {
+    BodyShape::board([LENGTH, THICKNESS, LENGTH], DENSITY, SAMPLE_SPACING)
 }
 
 pub struct RaftsPlugin;
@@ -58,7 +58,7 @@ fn sync(
 ) {
     let mut existing: Vec<(Entity, Mut<Transform>)> = rafts.iter_mut().collect();
     existing.sort_by_key(|(entity, _)| *entity);
-    for (body, slot) in sim.rafts.iter().zip(existing.iter_mut()) {
+    for (body, slot) in sim.rafts().iter().zip(existing.iter_mut()) {
         slot.1.translation = Vec3::new(body.p[0] as f32, body.p[1] as f32, body.p[2] as f32);
         slot.1.rotation = Quat::from_xyzw(
             body.q[0] as f32,
@@ -67,10 +67,10 @@ fn sync(
             body.q[3] as f32,
         );
     }
-    for (entity, _) in existing.iter().skip(sim.rafts.len()) {
+    for (entity, _) in existing.iter().skip(sim.rafts().len()) {
         commands.entity(*entity).despawn();
     }
-    for body in sim.rafts.iter().skip(existing.len()) {
+    for body in sim.rafts().iter().skip(existing.len()) {
         commands.spawn((
             RaftMesh,
             Mesh3d(assets.mesh.clone()),

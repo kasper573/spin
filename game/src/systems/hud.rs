@@ -72,7 +72,7 @@ pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps:
     } else {
         "click the view to take control\n\n"
     });
-    out.push_str("fly      WASD move · Space/Shift up/down · Q/E roll\n");
+    out.push_str("fly      WASD thrust · Space/Shift up/down · Q/E roll · mouse look\n");
     out.push_str("mouse    LMB water · RMB raft · MMB raise land (Ctrl lowers)\n\n");
     out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
@@ -104,7 +104,7 @@ pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps:
     out.push_str(&format!(
         "\nwater {:.0} L · rafts {} · spin {:.2} rad/s · {:.0} fps · sim {:.0}%",
         sim.water().0,
-        sim.rafts.len(),
+        sim.rafts().len(),
         sim.drum.spin.0,
         fps,
         sim.rate * 100.0
