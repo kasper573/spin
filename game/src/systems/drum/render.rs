@@ -11,6 +11,9 @@ use bevy::shader::ShaderRef;
 
 use super::landscape::{ROWS, SEGMENTS};
 use super::{HALF_WIDTH, RADIUS};
+
+/// Ground never touches the glass; it stops this far short of it.
+const GLASS_INSET: f32 = 0.02;
 use crate::systems::scene::SUN_DIRECTION;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -168,7 +171,8 @@ fn rebuild_terrain(
 }
 
 /// The raised parts of the landscape in the wheel's frame, plus skirts down to the glass along
-/// both caps so raised ground reads as solid from the side. Bare glass gets no triangles.
+/// both caps so raised ground reads as solid from the side. Bare glass gets no triangles, and
+/// nothing is placed on the glass itself, which would fight it for depth.
 fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
     let dphi = std::f32::consts::TAU / SEGMENTS as f32;
     let dy = 2.0 * HALF_WIDTH / (ROWS as f32 - 1.0);
@@ -179,7 +183,8 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
         let phi = i as f32 * dphi;
         let (s, c) = phi.sin_cos();
         let mut push = |height: f32, y: f32| {
-            let r = RADIUS - height;
+            let r = RADIUS - height.max(GLASS_INSET);
+            let y = y.clamp(-HALF_WIDTH + GLASS_INSET, HALF_WIDTH - GLASS_INSET);
             positions.push([r * c, y, r * s]);
             colours.push(ground_colour(height));
         };
