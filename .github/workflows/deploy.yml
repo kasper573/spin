@@ -16,20 +16,48 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: extractions/setup-just@v2
+      - name: Install the pinned toolchain
+        run: rustup show
+      - name: Install wasm-bindgen-cli matching the lockfile
+        # `just wasm` post-processes the client with `wasm-bindgen`, whose version must match the
+        # `wasm-bindgen` crate exactly; grab that prebuilt release rather than compiling the CLI.
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = "|"/, ""); print}' Cargo.lock)
+          curl -sSfL "https://github.com/rustwasm/wasm-bindgen/releases/download/${version}/wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp
+          sudo install "/tmp/wasm-bindgen-${version}-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/wasm-bindgen
+          wasm-bindgen --version
+      - name: Install Linux system libraries
+        # `-sys` crates link system C libraries cargo can't supply: the x11 and gl libs the native
+        # desktop, bench and lint binaries need to compile.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft* /etc/apt/sources.list.d/azure*
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev \
+            libxrender-dev libxfixes-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm format:check
-      - run: pnpm build
-        env:
-          BASE_PATH: /spin/
+          cache-on-failure: "true"
+      - name: Lint and test
+        run: |
+          just lint
+          just test
+      - name: Build the page
+        run: just dist
+      - name: End-to-end test
+        run: just e2e
+      - name: Save e2e screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: target/e2e/*.png
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

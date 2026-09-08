@@ -1,0 +1,52 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+description = "Spin-gravity wheel: the simulation library and its browser client, desktop, bench and lint binaries"
+
+[package.metadata.lint]
+game = true
+
+# One dependency set for every target keeps the source tree free of #[cfg] gates: the browser-only
+# crates (web-sys, wasm-bindgen) also compile natively — their imports become panicking stubs that
+# the desktop binary never calls.
+[dependencies]
+bevy = { workspace = true, features = [
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "std",
+    "bevy_winit",
+    "default_font",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_light",
+    "bevy_camera",
+    "bevy_color",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "bevy_image",
+    "bevy_mesh",
+    "bevy_shader",
+    "bevy_material",
+    "bevy_text",
+    "bevy_window",
+    "bevy_ui",
+    "bevy_ui_render",
+    "webgl2",
+    "web",
+] }
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+console_error_panic_hook = "0.1"
+wasm-bindgen = "=0.2.126"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Storage"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { workspace = true, features = ["x11", "multi_threaded"] }
+cargo_metadata = "0.19"
+envy = "0.4"
+syn = { version = "2", features = ["full", "visit"] }

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spin-gravity wheel</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #05070d;
+      }
+      #glcanvas {
+        display: block;
+        width: 100vw !important;
+        height: 100vh !important;
+        outline: none;
+      }
+      #error-log {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        max-width: calc(100vw - 24px);
+        margin: 0;
+        padding: 8px 10px;
+        color: #ffb4b4;
+        background: rgba(20, 0, 0, 0.8);
+        font: 12px/1.4 monospace;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="glcanvas" tabindex="0"></canvas>
+    <pre id="error-log" hidden></pre>
+    <script>
+      // A Rust panic aborts the wasm and only reaches the console; surface it on the page too.
+      (function () {
+        const log = document.getElementById("error-log");
+        const consoleError = console.error.bind(console);
+        console.error = (...args) => {
+          const message = args
+            .map((value) => (value && (value.stack || value.message)) || String(value))
+            .join(" ");
+          if (message.includes("panicked")) {
+            log.hidden = false;
+            log.textContent += message + "\n\n";
+          }
+          consoleError(...args);
+        };
+      })();
+    </script>
+    <script type="module">
+      import init from "./spin.js";
+      try {
+        await init();
+      } catch (e) {
+        const log = document.getElementById("error-log");
+        log.hidden = false;
+        log.textContent += `startup failed: ${(e && e.stack) || e}\n\n`;
+      }
+    </script>
+  </body>
+</html>

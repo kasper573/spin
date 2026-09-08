@@ -1,0 +1,22 @@
+pub mod aim;
+pub mod app;
+pub mod controls;
+pub mod drum;
+pub mod hud;
+pub mod persistence;
+pub mod rafts;
+pub mod scene;
+pub mod settings;
+pub mod sim;
+pub mod testing;
+pub mod water;
+
+use bevy::asset::embedded_asset;
+use bevy::prelude::App;
+
+/// Bakes every shader under `shaders/` into the binary as `embedded://game/systems/shaders/*`.
+pub fn embed_shaders(app: &mut App) {
+    embedded_asset!(app, "shaders/water.wgsl");
+    embedded_asset!(app, "shaders/glass.wgsl");
+    embedded_asset!(app, "shaders/stars.wgsl");
+}
