@@ -83,40 +83,57 @@ try {
   const fresh = await status();
   check("starts empty", fresh.particles === 0 && fresh.rafts === 0, JSON.stringify(fresh));
 
-  await command({ cmd: "spin", value: 1.6 });
-  await command({ cmd: "advance", seconds: 4 });
+  check("stands on the ground under one g", Math.abs(fresh.weight - 1) < 0.05 && fresh.ground_speed < 0.1, `${fresh.weight} g, ${fresh.ground_speed} m/s`);
+  await screenshot("standing");
+
+  await command({ cmd: "walk", x: 0, z: -1, run: false, jump: false, seconds: 4 });
+  await command({ cmd: "advance", seconds: 2 });
+  const walking = await status();
+  check("walks at walking pace", walking.ground_speed > 1.2 && walking.ground_speed < 1.8, `${walking.ground_speed} m/s`);
+  await command({ cmd: "advance", seconds: 3 });
+  await command({ cmd: "walk", x: 0, z: 0, run: false, jump: true, seconds: 0.1 });
+  await command({ cmd: "advance", seconds: 0.3 });
+  const jumping = await status();
+  check("a jump leaves the ground", jumping.airborne && jumping.weight === 0, JSON.stringify({ airborne: jumping.airborne, weight: jumping.weight }));
+  await command({ cmd: "advance", seconds: 2 });
+  const landed = await status();
+  check("and lands again", !landed.airborne && Math.abs(landed.weight - 1) < 0.1 && landed.ground_speed < 0.2, JSON.stringify({ airborne: landed.airborne, weight: landed.weight, speed: landed.ground_speed }));
+
+  await command({ cmd: "spin", value: 1.0 });
+  await command({ cmd: "advance", seconds: 2 });
   for (let k = 0; k < 12; k++) {
     const a = k * 0.52;
-    await command({ cmd: "inject", x: Math.cos(a) * 2.7, y: (k % 3) * 0.3 - 0.3, z: Math.sin(a) * 2.7, count: 150 });
+    await command({ cmd: "inject", x: Math.cos(a) * 8.0, y: (k % 3) * 2.0 - 2.0, z: Math.sin(a) * 8.0, count: 150 });
     await command({ cmd: "advance", seconds: 0.2 });
   }
   for (let k = 0; k < 3; k++) {
     const a = k * 2.0;
-    await command({ cmd: "raft", x: Math.cos(a) * 3.1, y: 0, z: Math.sin(a) * 3.1, nx: -Math.cos(a), ny: 0, nz: -Math.sin(a) });
+    await command({ cmd: "raft", x: Math.cos(a) * 9.0, y: 0, z: Math.sin(a) * 9.0, nx: -Math.cos(a), ny: 0, nz: -Math.sin(a) });
   }
   await command({ cmd: "advance", seconds: 8 });
   const filled = await status();
   check("water injected", filled.particles === 1800, `${filled.particles} particles, ${filled.litres} L`);
   check("rafts placed", filled.rafts === 3, `${filled.rafts}`);
-  check("rafts ride with the glass", filled.raft_slip.every(([r, slip]) => r > 2.6 && Math.abs(slip) < 1.0), JSON.stringify(filled.raft_slip));
-  check("drum spinning", Math.abs(filled.spin - 1.6) < 1e-3, `${filled.spin}`);
+  check("rafts ride with the glass", filled.raft_slip.every(([r, slip]) => r > 7.5 && Math.abs(slip) < 1.5), JSON.stringify(filled.raft_slip));
+  check("drum spinning", Math.abs(filled.spin - 1.0) < 1e-3, `${filled.spin}`);
+  await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
   await screenshot("water");
 
-  await command({ cmd: "sculpt", phi: 0.8, y: 0, radius: 1.2, amount: 1.0 });
+  await command({ cmd: "sculpt", phi: 0.8, y: 0, radius: 3.0, amount: 1.0 });
   await command({ cmd: "advance", seconds: 3 });
   const land = await status();
-  check("landscape raised", land.landscape_max > 0.5, `${land.landscape_max}`);
+  check("landscape raised", land.landscape_max > 1.2, `${land.landscape_max}`);
   await command({ cmd: "spin", value: 0 });
   await command({ cmd: "advance", seconds: 4 });
   const still = await status();
   check("drum stopped", still.spin === 0, `${still.spin}`);
   const a = 0.8 - still.angle;
-  await command({ cmd: "camera", x: Math.cos(a) * 0.8, y: 0.9, z: Math.sin(a) * 0.8, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
+  await command({ cmd: "camera", x: Math.cos(a) * 3.0, y: 2.5, z: Math.sin(a) * 3.0, look_x: Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
   await screenshot("landscape-inside");
-  await command({ cmd: "camera", x: Math.cos(a) * 5.5, y: 2.5, z: Math.sin(a) * 5.5, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
+  await command({ cmd: "camera", x: Math.cos(a) * 16.0, y: 7.0, z: Math.sin(a) * 16.0, look_x: Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
   await screenshot("landscape-outside");
-  await command({ cmd: "camera", x: 4.9, y: 5.5, z: 7.2, look_x: 0, look_y: 0, look_z: 0 });
-  await command({ cmd: "spin", value: 1.6 });
+  await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
+  await command({ cmd: "spin", value: 1.0 });
   await command({ cmd: "advance", seconds: 4 });
 
   await sleep(2000);
@@ -129,7 +146,7 @@ try {
   await send("Page.reload");
   check("app restarts", await waitForApp());
   const restored = await status();
-  check("state persists across reload", restored.particles === live.particles && restored.rafts === 3 && restored.landscape_max > 0.5 && Math.abs(restored.spin - 1.6) < 1e-3, JSON.stringify({ particles: restored.particles, rafts: restored.rafts, land: restored.landscape_max, spin: restored.spin }));
+  check("state persists across reload", restored.particles === live.particles && restored.rafts === 3 && restored.landscape_max > 1.2 && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, rafts: restored.rafts, land: restored.landscape_max, spin: restored.spin }));
   await screenshot("restored");
 
   const errors = [...new Set(logs.filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];

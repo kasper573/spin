@@ -3,7 +3,7 @@
 mod body;
 mod contacts;
 
-pub use body::{Body, BodyShape, Collider, WaterCoupling};
+pub use body::{Body, BodyShape, Collider, Ground, WaterCoupling};
 pub use contacts::{collide_pair, collide_vessel};
 
 use crate::core::units::{Hertz, Seconds};
@@ -11,8 +11,6 @@ use crate::core::vessel::Vessel;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodyParams {
-    pub friction: f64,
-    pub restitution: f64,
     pub air: bool,
     /// Time constant for the vessel's air to drag free bodies along with its walls.
     pub air_tau: Seconds,
@@ -23,8 +21,6 @@ pub struct BodyParams {
 impl Default for BodyParams {
     fn default() -> Self {
         BodyParams {
-            friction: 0.45,
-            restitution: 0.2,
             air: true,
             air_tau: Seconds(12.0),
             wet_spin_rate: Hertz(20.0),
@@ -68,14 +64,11 @@ pub fn step(
         }
         b.integrate(dt);
     }
-    for b in bodies.iter_mut().filter(|b| b.solid) {
-        collide_vessel(
-            b,
-            &shapes[b.shape],
-            vessel,
-            params.restitution,
-            params.friction,
-        );
+    for b in bodies.iter_mut() {
+        b.ground = None;
+        if b.solid {
+            collide_vessel(b, &shapes[b.shape], vessel, dt);
+        }
     }
     let n = bodies.len();
     for a in 0..n {
@@ -83,8 +76,8 @@ pub fn step(
             if !(bodies[a].solid && bodies[b].solid) {
                 continue;
             }
-            collide_pair(bodies, a, b, shapes, params.restitution, params.friction);
-            collide_pair(bodies, b, a, shapes, params.restitution, params.friction);
+            collide_pair(bodies, a, b, shapes);
+            collide_pair(bodies, b, a, shapes);
         }
     }
 }

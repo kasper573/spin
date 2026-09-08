@@ -13,14 +13,14 @@ fn snapshot_round_trips_through_json() {
     {
         let mut sim = app.world_mut().resource_mut::<Simulation>();
         sim.drum.target_spin = RadiansPerSecond(1.5);
-        sim.spawn_raft([3.0, 0.0, 0.0], [-1.0, 0.0, 0.0]);
-        sim.drum.landscape.sculpt(0.3, 0.1, 0.5, 0.2);
+        sim.spawn_raft([9.0, 0.0, 0.0], [-1.0, 0.0, 0.0]);
+        sim.drum.landscape.sculpt(0.3, 0.1, 1.5, 0.2);
     }
     app.world_mut()
         .resource_scope(|world, mut fluid: Mut<Fluid>| {
             world
                 .resource::<Simulation>()
-                .inject(&mut fluid, [2.0, 0.1, 0.0], 40)
+                .inject(&mut fluid, [7.0, 0.1, 0.0], 40)
         });
     testing::run(&mut app, Seconds(1.0));
     let particles = testing::particles(&mut app);
@@ -32,7 +32,7 @@ fn snapshot_round_trips_through_json() {
     let mut player = Player::default();
     let world = app.world_mut();
     let mut sim = world.resource_mut::<Simulation>();
-    player.teleport(sim.shuttle_mut(), [1.0, 2.0, 3.0], [0.0; 3]);
+    player.teleport(sim.avatar_mut(), [1.0, 2.0, 3.0], [0.0; 3]);
     let sim = world.resource::<Simulation>();
     let fluid = world.resource::<Fluid>();
 
@@ -40,7 +40,7 @@ fn snapshot_round_trips_through_json() {
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
     let (raft, shuttle, angle, heights) = (
         sim.rafts()[0].p,
-        sim.shuttle().p,
+        sim.avatar().p,
         sim.drum.angle.0,
         sim.drum.landscape.heights().to_vec(),
     );
@@ -67,7 +67,7 @@ fn snapshot_round_trips_through_json() {
     );
     assert_eq!(sim2.drum.landscape.heights(), heights);
     assert!((sim2.drum.angle.0 - angle).abs() < 1e-9);
-    assert_eq!(sim2.shuttle().p, shuttle);
+    assert_eq!(sim2.avatar().p, shuttle);
     assert_eq!(player2, player);
     assert_eq!(restored.fluid.len(), 40 * 7);
     assert_eq!(restored.fluid[0], particles[0].position[0]);
@@ -89,9 +89,9 @@ fn dials_step_within_their_range() {
     for _ in 0..100 {
         Dial::Spin.adjust(&mut settings, 1);
     }
-    assert_eq!(settings.spin, RadiansPerSecond(3.0));
+    assert_eq!(settings.spin, RadiansPerSecond(2.0));
     Dial::Spin.adjust(&mut settings, -1);
-    assert_eq!(settings.spin, RadiansPerSecond(2.75));
+    assert_eq!(settings.spin, RadiansPerSecond(1.95));
     for _ in 0..100 {
         Dial::Flow.adjust(&mut settings, -1);
     }

@@ -5,13 +5,13 @@ use crate::core::rigid::BodyShape;
 use crate::core::units::Metres;
 use crate::systems::sim::{SimSet, Simulation};
 
-pub const LENGTH: f64 = 0.3;
-pub const THICKNESS: f64 = 0.09;
+pub const LENGTH: f64 = 1.6;
+pub const THICKNESS: f64 = 0.2;
 const DENSITY: f64 = 500.0;
-const SAMPLE_SPACING: f64 = 0.075;
+const SAMPLE_SPACING: f64 = 0.32;
 
 /// Gap between the surface a raft is placed on and the raft's centre.
-pub const PLACEMENT_OFFSET: Metres = Metres((THICKNESS / 2.0) as f32 + 0.04);
+pub const PLACEMENT_OFFSET: Metres = Metres((THICKNESS / 2.0) as f32 + 0.1);
 
 pub fn shape() -> BodyShape {
     BodyShape::board([LENGTH, THICKNESS, LENGTH], DENSITY, SAMPLE_SPACING)

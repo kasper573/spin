@@ -42,13 +42,13 @@ impl FluidReady {
 pub use surface::{MAX_INDICES, SurfaceBuffers};
 
 /// Rest spacing between particles (m); every kernel constant derives from it.
-pub const PARTICLE_SPACING: f32 = 0.10;
+pub const PARTICLE_SPACING: f32 = 0.32;
 pub const H: f32 = 2.0 * PARTICLE_SPACING;
 pub const H2: f32 = H * H;
 pub const REST_DENSITY: f32 = 1000.0;
 pub const PARTICLE_MASS: f32 =
     REST_DENSITY * PARTICLE_SPACING * PARTICLE_SPACING * PARTICLE_SPACING;
-pub const MAX_PARTICLES: usize = 32768;
+pub const MAX_PARTICLES: usize = 65536;
 /// Bodies the shaders reserve room for.
 pub const MAX_BODIES: usize = 16;
 /// Boundary samples over all solid bodies.
@@ -56,8 +56,9 @@ pub const MAX_SAMPLES: usize = 2048;
 /// Substeps a single frame may run; beyond that the simulation falls behind real time.
 pub const MAX_SUBSTEPS_PER_FRAME: usize = 4;
 pub const POLY6: f32 = 315.0 / (64.0 * PI * H * H * H * H * H * H * H * H * H);
-pub const MAX_SPEED: f32 = 15.0;
-pub const MAX_SPEED_BODY: f64 = 15.0;
+/// Safety clamps well above anything the drum's rim reaches.
+pub const MAX_SPEED: f32 = 40.0;
+pub const MAX_SPEED_BODY: f64 = 40.0;
 const SPIKY: f32 = -45.0 / (PI * H * H * H * H * H * H);
 const W0: f32 = POLY6 * H2 * H2 * H2;
 const EPS_LAMBDA: f32 = 0.02;

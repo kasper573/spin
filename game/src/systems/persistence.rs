@@ -1,13 +1,13 @@
-//! Everything worth keeping across a reload — settings, shuttle, drum, water, rafts, landscape —
+//! Everything worth keeping across a reload — settings, avatar, drum, water, rafts, landscape —
 //! as one JSON snapshot in the browser's storage, written every couple of seconds. The water
 //! lives on the GPU, so a save first asks for a copy and writes when it arrives.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::avatar::Look;
 use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, PARTICLE_SPACING, Particle};
 use crate::core::rigid::Body;
-use crate::core::shuttle::Look;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 use crate::core::web;
@@ -15,13 +15,13 @@ use crate::systems::player::Player;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
-const KEY: &str = "spin-gravity-wheel/v5";
+const KEY: &str = "spin-gravity-wheel/v6";
 const AUTOSAVE_INTERVAL: Seconds = Seconds(2.0);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub settings: Settings,
-    pub shuttle: ShuttlePose,
+    pub avatar: AvatarPose,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
     pub time: Seconds,
@@ -36,7 +36,7 @@ pub struct Snapshot {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct ShuttlePose {
+pub struct AvatarPose {
     pub position: [f64; 3],
     pub rotation: [f64; 4],
     pub velocity: [f64; 3],
@@ -66,14 +66,14 @@ impl Plugin for PersistencePlugin {
 }
 
 pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid, player: &Player) -> Snapshot {
-    let shuttle = sim.shuttle();
+    let avatar = sim.avatar();
     Snapshot {
         settings: settings.clone(),
-        shuttle: ShuttlePose {
-            position: shuttle.p,
-            rotation: shuttle.q,
-            velocity: shuttle.v,
-            angular_velocity: shuttle.w,
+        avatar: AvatarPose {
+            position: avatar.p,
+            rotation: avatar.q,
+            velocity: avatar.v,
+            angular_velocity: avatar.w,
             look: player.look,
         },
         spin: sim.drum.spin,
@@ -139,8 +139,8 @@ pub fn apply(
             }
         }
     }
-    pose_shuttle(&snapshot.shuttle, sim.shuttle_mut(), player);
-    sim.shuttle_mut().solid = settings.collisions;
+    pose_avatar(&snapshot.avatar, sim.avatar_mut(), player);
+    sim.avatar_mut().solid = settings.collisions;
 }
 
 /// Ask for the water and save once it has arrived.
@@ -157,7 +157,7 @@ pub fn save_soon(world: &mut World) {
 #[derive(Resource)]
 struct Autosave(Timer);
 
-fn pose_shuttle(pose: &ShuttlePose, shuttle: &mut Body, player: &mut Player) {
+fn pose_avatar(pose: &AvatarPose, avatar: &mut Body, player: &mut Player) {
     let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
     let q_len = pose.rotation.iter().map(|x| x * x).sum::<f64>().sqrt();
     if !(finite(&pose.position)
@@ -170,9 +170,9 @@ fn pose_shuttle(pose: &ShuttlePose, shuttle: &mut Body, player: &mut Player) {
     {
         return;
     }
-    shuttle.place(pose.position, pose.rotation.map(|x| x / q_len));
-    shuttle.v = pose.velocity;
-    shuttle.w = pose.angular_velocity;
+    avatar.place(pose.position, pose.rotation.map(|x| x / q_len));
+    avatar.v = pose.velocity;
+    avatar.w = pose.angular_velocity;
     player.look = pose.look;
 }
 

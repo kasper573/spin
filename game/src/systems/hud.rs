@@ -79,8 +79,9 @@ pub fn hud_text(
     } else {
         "click the view to take control\n\n"
     });
-    out.push_str("fly      WASD thrust · Space/Shift up/down · Q/E roll · mouse look\n");
-    out.push_str("mouse    LMB water · RMB raft · MMB raise land (Ctrl lowers)\n\n");
+    out.push_str("walk     WASD | Shift run | Space jump | mouse look\n");
+    out.push_str("ghost    WASD thrust | Space/Shift up/down | Q/E roll\n");
+    out.push_str("mouse    LMB water | RMB raft | MMB raise land (Ctrl lowers)\n\n");
     out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
         let held = if controls.held_dial == Some(dial) {
@@ -108,9 +109,20 @@ pub fn hud_text(
     for action in ClearAction::ALL {
         out.push_str(&format!("{:<8} {}\n", action.key_label(), action.label()));
     }
+    let footing = sim.footing();
+    let footing = if footing.airborne {
+        "airborne".to_owned()
+    } else if !sim.avatar().solid {
+        "ghost".to_owned()
+    } else {
+        format!(
+            "weight {:.2} g | ground speed {:.1} m/s",
+            footing.weight, footing.ground_speed
+        )
+    };
     out.push_str(&format!(
-        "\nwater {:.0} L · rafts {} · spin {:.2} rad/s · {:.0} fps · sim {:.0}%",
-        Simulation::water(fluid).0,
+        "\n{footing}\nwater {:.1} m3 | rafts {} | spin {:.3} rad/s | {:.0} fps | sim {:.0}%",
+        Simulation::water(fluid).0 / 1000.0,
         sim.rafts().len(),
         sim.drum.spin.0,
         fps,

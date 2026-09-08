@@ -59,7 +59,7 @@ fn spawn(
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
-            fov: 42f32.to_radians(),
+            fov: 60f32.to_radians(),
             near: 0.1,
             far: 600.0,
             ..default()

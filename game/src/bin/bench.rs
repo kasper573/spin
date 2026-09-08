@@ -1,19 +1,15 @@
-//! A fixed workload: a spinning drum a third full of water with a few rafts, then half full, run
-//! headless for a few hundred frames of one substep each and timed per frame, GPU included.
+//! A fixed workload: the ring world under one g a sixth full of water with a few rafts, then
+//! half full, run headless for a few hundred frames of one substep each and timed per frame, GPU
+//! included.
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
-use game::core::units::{RadiansPerSecond, Seconds};
+use game::core::units::Seconds;
 use game::systems::sim::{SUBSTEP_RATE, Simulation};
 use game::systems::testing;
 
 fn main() {
     let mut app = testing::headless();
-    {
-        let mut sim = app.world_mut().resource_mut::<Simulation>();
-        sim.drum.target_spin = RadiansPerSecond(1.6);
-        sim.drum.spin = RadiansPerSecond(1.6);
-    }
     for round in 0..40 {
         let a = round as f32 * 0.5;
         app.world_mut()
@@ -21,11 +17,11 @@ fn main() {
                 world.resource::<Simulation>().inject(
                     &mut fluid,
                     [
-                        a.cos() * 2.6,
-                        ((round % 3) as f32 - 1.0) * 0.3,
-                        a.sin() * 2.6,
+                        a.cos() * 8.0,
+                        ((round % 3) as f32 - 1.0) * 3.0,
+                        a.sin() * 8.0,
                     ],
-                    200,
+                    500,
                 )
             });
         testing::run(&mut app, Seconds(0.2));
@@ -35,10 +31,10 @@ fn main() {
         let n = [-a.cos(), 0.0, -a.sin()];
         app.world_mut()
             .resource_mut::<Simulation>()
-            .spawn_raft([a.cos() * 3.2, 0.0, a.sin() * 3.2], n);
+            .spawn_raft([a.cos() * 9.5, 0.0, a.sin() * 9.5], n);
     }
     testing::run(&mut app, Seconds(3.0));
-    measure(&mut app, "a third full");
+    measure(&mut app, "a sixth full");
 
     for round in 0..75 {
         let a = round as f32 * 0.7 + 0.3;
@@ -47,11 +43,11 @@ fn main() {
                 world.resource::<Simulation>().inject(
                     &mut fluid,
                     [
-                        a.cos() * 2.4,
-                        ((round % 5) as f32 - 2.0) * 0.2,
-                        a.sin() * 2.4,
+                        a.cos() * 7.0,
+                        ((round % 5) as f32 - 2.0) * 2.0,
+                        a.sin() * 7.0,
                     ],
-                    200,
+                    600,
                 )
             });
         testing::run(&mut app, Seconds(0.2));

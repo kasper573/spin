@@ -20,8 +20,9 @@
 @group(2) @binding(2) var<storage, read> boundary: array<Boundary>;
 @group(2) @binding(3) var<storage, read> sample_state: array<SampleState>;
 
-const SLOT_BITS: u32 = 18u;
-const SLOT_MASK: u32 = 0x3ffffu;
+// a sort slot packs the cell (high bits) with the particle's index within it (low bits)
+const SLOT_BITS: u32 = 16u;
+const SLOT_MASK: u32 = 0xffffu;
 
 struct Predicted {
     q: vec3<f32>,

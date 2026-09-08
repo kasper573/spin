@@ -3,8 +3,10 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::core::units::{LitresPerSecond, Metres, MetresPerSecond, RadiansPerSecond};
-use crate::systems::sim::{SimSet, Simulation};
+use crate::core::units::{
+    EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecond, RadiansPerSecond,
+};
+use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -15,7 +17,7 @@ pub struct Settings {
     pub wall_friction: f32,
     pub raft_friction: f32,
     pub air: bool,
-    /// Whether the shuttle is solid to the drum, the water and the rafts.
+    /// Whether the avatar is solid to the drum, the water and the rafts, or a ghost.
     pub collisions: bool,
     pub brush_size: Metres,
     pub brush_rate: MetresPerSecond,
@@ -24,15 +26,15 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            spin: RadiansPerSecond(0.0),
-            flow: LitresPerSecond(500.0),
+            spin: standing_spin(),
+            flow: LitresPerSecond(20_000.0),
             viscosity: 0.15,
             wall_friction: 0.5,
             raft_friction: 0.45,
             air: true,
-            collisions: false,
-            brush_size: Metres(0.6),
-            brush_rate: MetresPerSecond(0.8),
+            collisions: true,
+            brush_size: Metres(2.0),
+            brush_rate: MetresPerSecond(1.0),
         }
     }
 }
@@ -117,26 +119,28 @@ impl Dial {
             Dial::Spin | Dial::Flow | Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => {
                 0.0
             }
-            Dial::BrushSize | Dial::BrushRate => 0.1,
+            Dial::BrushSize => 0.5,
+            Dial::BrushRate => 0.1,
         }
     }
 
     pub fn max(self) -> f32 {
         match self {
-            Dial::Spin => 3.0,
-            Dial::Flow => 2000.0,
+            Dial::Spin => 2.0,
+            Dial::Flow => 200_000.0,
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 1.0,
-            Dial::BrushSize => 2.0,
-            Dial::BrushRate => 3.0,
+            Dial::BrushSize => 8.0,
+            Dial::BrushRate => 5.0,
         }
     }
 
     pub fn step(self) -> f32 {
         match self {
-            Dial::Spin => 0.25,
-            Dial::Flow => 100.0,
+            Dial::Spin => 0.05,
+            Dial::Flow => 5000.0,
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 0.05,
-            Dial::BrushSize | Dial::BrushRate => 0.1,
+            Dial::BrushSize => 0.5,
+            Dial::BrushRate => 0.1,
         }
     }
 
@@ -174,8 +178,11 @@ impl Dial {
     pub fn value_text(self, s: &Settings) -> String {
         let v = self.get(s);
         match self {
-            Dial::Spin => format!("{v:.2} rad/s"),
-            Dial::Flow => format!("{v:.0} L/s"),
+            Dial::Spin => format!(
+                "{v:.3} rad/s ({:.2} g standing)",
+                standing_gravity(s.spin).0 / EARTH_GRAVITY.0
+            ),
+            Dial::Flow => format!("{:.1} m3/s", v / 1000.0),
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => format!("{v:.2}"),
             Dial::BrushSize => format!("{v:.1} m"),
             Dial::BrushRate => format!("{v:.1} m/s"),
@@ -246,7 +253,7 @@ fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
     sim.params.viscosity = settings.viscosity;
     sim.params.wall_friction = settings.wall_friction;
     sim.params.air = settings.air;
-    sim.body_params.friction = settings.raft_friction as f64;
+    sim.set_raft_friction(settings.raft_friction as f64);
     sim.body_params.air = settings.air;
-    sim.shuttle_mut().solid = settings.collisions;
+    sim.avatar_mut().solid = settings.collisions;
 }

@@ -1,19 +1,23 @@
 //! Automation hooks: scripts push JSON commands through the platform and read back a status line;
 //! plus the headless app the bench and the tests drive frame by frame.
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::RenderTarget;
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
+use bevy::render::gpu_readback::{Readback, ReadbackComplete};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::storage::ShaderBuffer;
 use serde::{Deserialize, Serialize};
 
-use bevy::render::gpu_readback::{Readback, ReadbackComplete};
-use bevy::render::storage::ShaderBuffer;
-
+use crate::core::avatar::Look;
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::app;
+use crate::systems::controls::pilot;
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
-use crate::systems::player::Player;
+use crate::systems::player::{PilotAxes, Player, PlayerCamera};
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -43,6 +47,7 @@ pub enum ScriptCommand {
     Spin {
         value: f32,
     },
+    /// Make the avatar a ghost and put its eye somewhere, looking at a point.
     Camera {
         x: f32,
         y: f32,
@@ -50,6 +55,20 @@ pub enum ScriptCommand {
         look_x: f32,
         look_y: f32,
         look_z: f32,
+    },
+    /// Hold the movement keys for a while: `x` right and `z` backward in the head's level frame,
+    /// each in [-1, 1].
+    Walk {
+        x: f32,
+        z: f32,
+        run: bool,
+        jump: bool,
+        seconds: f32,
+    },
+    /// Turn the head to an absolute yaw and pitch relative to the hull.
+    Look {
+        yaw: f64,
+        pitch: f64,
     },
     Advance {
         seconds: f32,
@@ -75,13 +94,29 @@ pub struct ScriptStatus {
     pub saves: u32,
     /// Each raft's distance from the axis and its tangential speed relative to the glass.
     pub raft_slip: Vec<[f32; 2]>,
+    /// The avatar's weight in g as the ground pushes back, zero when nothing does.
+    pub weight: f32,
+    /// The avatar's speed over the ground it stands on, or through the air.
+    pub ground_speed: f32,
+    pub airborne: bool,
+}
+
+/// Movement keys a script holds down until a simulated time.
+#[derive(Resource, Default)]
+struct ScriptedWalk {
+    axes: PilotAxes,
+    until: Seconds,
 }
 
 pub struct TestingPlugin;
 
 impl Plugin for TestingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, drain.in_set(SimSet::Command))
+        app.init_resource::<ScriptedWalk>()
+            .add_systems(
+                Update,
+                (drain, steer).chain().in_set(SimSet::Command).after(pilot),
+            )
             .add_systems(Update, publish.in_set(SimSet::Observe));
     }
 }
@@ -139,13 +174,37 @@ fn execute(world: &mut World, command: ScriptCommand) {
             look_y,
             look_z,
         } => {
+            world.resource_mut::<Settings>().collisions = false;
             world.resource_scope(|world, mut player: Mut<Player>| {
+                let mut sim = world.resource_mut::<Simulation>();
+                sim.avatar_mut().solid = false;
                 player.teleport(
-                    world.resource_mut::<Simulation>().shuttle_mut(),
+                    sim.avatar_mut(),
                     [x as f64, y as f64, z as f64],
                     [look_x as f64, look_y as f64, look_z as f64],
                 );
             });
+        }
+        ScriptCommand::Walk {
+            x,
+            z,
+            run,
+            jump,
+            seconds,
+        } => {
+            let now = world.resource::<Simulation>().time;
+            *world.resource_mut::<ScriptedWalk>() = ScriptedWalk {
+                axes: PilotAxes {
+                    motion: Vec3::new(x, 0.0, z),
+                    roll: 0.0,
+                    run,
+                    jump,
+                },
+                until: Seconds(now.0 + seconds),
+            };
+        }
+        ScriptCommand::Look { yaw, pitch } => {
+            world.resource_mut::<Player>().look = Look { yaw, pitch };
         }
         ScriptCommand::Advance { seconds } => {
             world.resource_mut::<Simulation>().request(Seconds(seconds))
@@ -158,6 +217,13 @@ fn execute(world: &mut World, command: ScriptCommand) {
     }
 }
 
+/// Keep the scripted keys held until their time is up.
+fn steer(walk: Res<ScriptedWalk>, player: Res<Player>, mut sim: ResMut<Simulation>) {
+    if sim.time < walk.until {
+        sim.avatar_input = player.input(sim.avatar(), walk.axes);
+    }
+}
+
 fn publish(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
@@ -165,6 +231,7 @@ fn publish(
     fps: Res<FrameRate>,
     frame: Res<FrameCount>,
 ) {
+    let footing = sim.footing();
     let status = ScriptStatus {
         frame: frame.0,
         particles: fluid.len(),
@@ -186,6 +253,9 @@ fn publish(
                 [r as f32, (tangential - sim.drum.spin.0 as f64 * r) as f32]
             })
             .collect(),
+        weight: footing.weight,
+        ground_speed: footing.ground_speed,
+        airborne: footing.airborne,
     };
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);
@@ -235,6 +305,37 @@ pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
     app.world().resource::<Fluid>().particles().collect()
 }
 
+/// Point the player's camera at an offscreen image of this size, for reading frames back.
+pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> {
+    app.update();
+    let mut image = Image::new_fill(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
+    let handle = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    let mut cameras = app
+        .world_mut()
+        .query_filtered::<&mut RenderTarget, With<PlayerCamera>>();
+    for mut target in cameras.iter_mut(app.world_mut()) {
+        *target = RenderTarget::from(handle.clone());
+    }
+    handle
+}
+
+/// Run frames until the image has been rendered and read back: RGBA bytes, row by row.
+pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
+    read_back(app, Readback::texture(image.clone()))
+}
+
 /// How many triangles the water's surface currently has, read back from the GPU.
 pub fn surface_triangles(app: &mut App) -> u32 {
     let counters = app
@@ -247,13 +348,20 @@ pub fn surface_triangles(app: &mut App) -> u32 {
 }
 
 #[derive(Resource, Default)]
-struct ReadResult(Option<Vec<u32>>);
+struct ReadResult(Option<Vec<u8>>);
 
 fn read_u32s(app: &mut App, buffer: Handle<ShaderBuffer>) -> Vec<u32> {
+    read_back(app, Readback::buffer(buffer))
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+fn read_back(app: &mut App, readback: Readback) -> Vec<u8> {
     app.world_mut().insert_resource(ReadResult::default());
-    app.world_mut().spawn(Readback::buffer(buffer)).observe(
+    app.world_mut().spawn(readback).observe(
         |event: On<ReadbackComplete>, mut result: ResMut<ReadResult>, mut commands: Commands| {
-            result.0 = Some(event.to_shader_type());
+            result.0 = Some(event.data.clone());
             commands.entity(event.entity).try_despawn();
         },
     );

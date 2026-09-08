@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use game::core::fluid::{Fluid, PARTICLE_MASS, Particle, REST_DENSITY};
 use game::core::units::{RadiansPerSecond, Seconds};
-use game::systems::drum::{HALF_WIDTH, RADIUS};
+use game::systems::drum::{FLOOR_RADIUS, HALF_WIDTH, RADIUS};
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing;
@@ -23,7 +23,7 @@ fn set_spin(app: &mut App, spin: f32) {
 #[test]
 fn injection_counts_litres() {
     let mut app = testing::headless();
-    let added = inject(&mut app, [2.0, 0.0, 0.0], 500);
+    let added = inject(&mut app, [6.0, 0.0, 0.0], 500);
     assert_eq!(added, 500);
     let fluid = app.world().resource::<Fluid>();
     assert_eq!(fluid.len(), 500);
@@ -34,10 +34,10 @@ fn injection_counts_litres() {
 #[test]
 fn water_stays_inside_the_drum() {
     let mut app = testing::headless();
-    set_spin(&mut app, 1.2);
+    set_spin(&mut app, 0.8);
     for k in 0..6 {
         let a = k as f32;
-        inject(&mut app, [a.cos() * 2.5, 0.0, a.sin() * 2.5], 300);
+        inject(&mut app, [a.cos() * 7.5, 0.0, a.sin() * 7.5], 300);
         testing::run(&mut app, Seconds(0.3));
     }
     testing::run(&mut app, Seconds(4.0));
@@ -55,13 +55,13 @@ fn water_stays_inside_the_drum() {
 #[test]
 fn spinning_drum_throws_water_onto_the_glass() {
     let mut app = testing::headless();
-    set_spin(&mut app, 1.6);
+    set_spin(&mut app, 1.0);
     inject(&mut app, [0.0, 0.0, 0.0], 800);
-    testing::run(&mut app, Seconds(8.0));
+    testing::run(&mut app, Seconds(12.0));
     let particles = testing::particles(&mut app);
     let near_glass = particles
         .iter()
-        .filter(|p| (p.position[0].powi(2) + p.position[2].powi(2)).sqrt() > RADIUS - 0.6)
+        .filter(|p| (p.position[0].powi(2) + p.position[2].powi(2)).sqrt() > FLOOR_RADIUS - 1.5)
         .count();
     assert!(
         near_glass as f32 > particles.len() as f32 * 0.8,
@@ -74,7 +74,7 @@ fn spinning_drum_throws_water_onto_the_glass() {
             let [x, _, z] = p.position;
             let r = (x * x + z * z).sqrt().max(1e-6);
             let tangential = (p.velocity[0] * z - p.velocity[2] * x) / r;
-            (tangential - 1.6 * r).abs() < 1.0
+            (tangential - 1.0 * r).abs() < 1.5
         })
         .count();
     assert!(
@@ -87,17 +87,17 @@ fn spinning_drum_throws_water_onto_the_glass() {
 #[test]
 fn reset_keeps_parameters_and_target_spin() {
     let mut app = testing::headless();
-    inject(&mut app, [2.0, 0.0, 0.0], 100);
+    inject(&mut app, [6.0, 0.0, 0.0], 100);
     {
         let mut settings = app.world_mut().resource_mut::<Settings>();
         settings.viscosity = 0.4;
-        settings.spin = RadiansPerSecond(2.0);
+        settings.spin = RadiansPerSecond(1.5);
     }
     testing::run(&mut app, Seconds(1.0));
     let mut sim = app.world_mut().resource_mut::<Simulation>();
     sim.reset();
     assert_eq!(sim.params.viscosity, 0.4);
-    assert_eq!(sim.drum.target_spin, RadiansPerSecond(2.0));
+    assert_eq!(sim.drum.target_spin, RadiansPerSecond(1.5));
     assert_eq!(sim.time, Seconds(0.0));
     let mut fluid = app.world_mut().resource_mut::<Fluid>();
     fluid.clear();
@@ -110,7 +110,7 @@ fn reset_keeps_parameters_and_target_spin() {
 fn water_grows_a_surface() {
     let mut app = testing::headless();
     assert_eq!(testing::surface_triangles(&mut app), 0);
-    inject(&mut app, [2.0, 0.0, 0.0], 400);
+    inject(&mut app, [6.0, 0.0, 0.0], 400);
     testing::run(&mut app, Seconds(0.5));
     let triangles = testing::surface_triangles(&mut app);
     assert!(triangles > 200, "{triangles} triangles");

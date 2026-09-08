@@ -1,5 +1,5 @@
-//! Mouse and keyboard: pointer lock, piloting the shuttle, the dials (hold a key, turn the wheel), the
-//! toggles, the clearing chords, and the three mouse buttons that act on the crosshair.
+//! Mouse and keyboard: pointer lock, piloting the avatar, the dials (hold a key, turn the wheel),
+//! the toggles, the clearing chords, and the three mouse buttons that act on the crosshair.
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -8,25 +8,28 @@ use crate::core::fluid::Fluid;
 use crate::core::units::Metres;
 use crate::core::web;
 use crate::systems::aim::Aim;
+use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotAxes, Player};
 use crate::systems::rafts::PLACEMENT_OFFSET;
 use crate::systems::settings::{Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
 /// Water appears this far in front of the surface the crosshair rests on.
-const INJECT_DEPTH: Metres = Metres(0.4);
-const MARKER_RADIUS: Metres = Metres(0.12);
+const INJECT_DEPTH: Metres = Metres(1.0);
+const MARKER_RADIUS: Metres = Metres(0.3);
 
 /// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearAction {
+    ResetAll,
     ClearWater,
     ClearRafts,
     ResetLandscape,
 }
 
 impl ClearAction {
-    pub const ALL: [ClearAction; 3] = [
+    pub const ALL: [ClearAction; 4] = [
+        ClearAction::ResetAll,
         ClearAction::ClearWater,
         ClearAction::ClearRafts,
         ClearAction::ResetLandscape,
@@ -36,6 +39,7 @@ impl ClearAction {
 
     pub fn key(self) -> KeyCode {
         match self {
+            ClearAction::ResetAll => KeyCode::Digit0,
             ClearAction::ClearWater => KeyCode::Digit1,
             ClearAction::ClearRafts => KeyCode::Digit2,
             ClearAction::ResetLandscape => KeyCode::Digit3,
@@ -44,6 +48,7 @@ impl ClearAction {
 
     pub fn key_label(self) -> &'static str {
         match self {
+            ClearAction::ResetAll => "Backspace+0",
             ClearAction::ClearWater => "Backspace+1",
             ClearAction::ClearRafts => "Backspace+2",
             ClearAction::ResetLandscape => "Backspace+3",
@@ -52,17 +57,30 @@ impl ClearAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            ClearAction::ResetAll => "reset everything to the initial state",
             ClearAction::ClearWater => "remove all water",
             ClearAction::ClearRafts => "remove all rafts",
             ClearAction::ResetLandscape => "flatten landscape",
         }
     }
 
-    pub fn apply(self, sim: &mut Simulation, fluid: &mut Fluid) {
+    pub fn apply(
+        self,
+        settings: &mut Settings,
+        sim: &mut Simulation,
+        fluid: &mut Fluid,
+        player: &mut Player,
+    ) {
         match self {
+            ClearAction::ResetAll => {
+                *settings = Settings::default();
+                *sim = Simulation::default();
+                *player = Player::default();
+                fluid.clear();
+            }
             ClearAction::ClearWater => fluid.clear(),
             ClearAction::ClearRafts => sim.clear_rafts(),
-            ClearAction::ResetLandscape => sim.drum.landscape.reset(),
+            ClearAction::ResetLandscape => sim.drum.landscape.flatten(GROUND_DEPTH),
         }
     }
 }
@@ -121,7 +139,8 @@ fn pointer_lock(
     }
 }
 
-fn pilot(
+/// Reads the mouse and the movement keys into the avatar's input; scripted input comes after.
+pub fn pilot(
     controls: Res<Controls>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
@@ -129,22 +148,25 @@ fn pilot(
     mut sim: ResMut<Simulation>,
 ) {
     if !controls.active {
-        sim.shuttle_input = default();
+        sim.avatar_input = default();
         return;
     }
     player.turn(motion.delta);
     let axis =
         |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f32;
-    let up = axis(KeyCode::ShiftLeft, KeyCode::Space) + axis(KeyCode::ShiftRight, KeyCode::Space);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let space = keys.pressed(KeyCode::Space);
     let axes = PilotAxes {
         motion: Vec3::new(
             axis(KeyCode::KeyA, KeyCode::KeyD),
-            up.clamp(-1.0, 1.0),
+            (space as i32 - shift as i32) as f32,
             -axis(KeyCode::KeyS, KeyCode::KeyW),
         ),
         roll: axis(KeyCode::KeyE, KeyCode::KeyQ),
+        run: shift,
+        jump: space,
     };
-    sim.shuttle_input = player.input(sim.shuttle(), axes);
+    sim.avatar_input = player.input(sim.avatar(), axes);
 }
 
 fn keys(
@@ -154,6 +176,7 @@ fn keys(
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
     mut fluid: ResMut<Fluid>,
+    mut player: ResMut<Player>,
 ) {
     controls.held_dial = Dial::ALL.into_iter().find(|dial| keys.pressed(dial.key()));
     if let Some(dial) = controls.held_dial
@@ -169,7 +192,7 @@ fn keys(
     if keys.pressed(ClearAction::CHORD) {
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
-                action.apply(&mut sim, &mut fluid);
+                action.apply(&mut settings, &mut sim, &mut fluid, &mut player);
             }
         }
     }

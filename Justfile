@@ -13,6 +13,15 @@ test:
 bench:
     cargo run --release -p game --bin bench
 
+# A short first-person video of the avatar walking and jumping on the ring, rendered headless
+# into target/record/ and stitched by ffmpeg with the avatar's readouts as subtitles.
+record:
+    cargo run --release -p game --bin record
+    ffmpeg -y -loglevel error -framerate 30 -i target/record/frame_%04d.png \
+      -vf "subtitles=target/record/readout.srt:force_style='FontName=DejaVu Sans Mono,FontSize=14,Alignment=7,MarginL=16,MarginV=12,Outline=1'" \
+      -c:v libx264 -pix_fmt yuv420p -crf 20 target/record/ring-walk.mp4
+    @echo "wrote target/record/ring-walk.mp4"
+
 # The browser client: a wasm binary post-processed by wasm-bindgen into the bundle the page loads.
 # The `wasm` profile is the small, slow-to-build deploy; `release` is the fast local loop.
 wasm profile="wasm":

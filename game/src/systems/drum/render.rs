@@ -14,6 +14,10 @@ use super::{DrumFrame, DrumUniform, HALF_WIDTH, RADIUS};
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f32 = 0.02;
+const STRUTS: usize = 24;
+/// The ground is tiled in patches of this many segments and rows, alternately tinted, so that
+/// walking over it reads as motion and distance.
+const PATCH: usize = 8;
 use crate::systems::scene::SUN_DIRECTION;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -79,7 +83,7 @@ fn spawn(
             meshes.add(
                 Cylinder::new(RADIUS, 2.0 * HALF_WIDTH)
                     .mesh()
-                    .resolution(128),
+                    .resolution(256),
             ),
         ),
         MeshMaterial3d(glass.add(GlassMaterial {
@@ -95,11 +99,11 @@ fn spawn(
         ..default()
     });
     let ring = meshes.add(
-        Torus::new(RADIUS + 0.02, RADIUS + 0.1)
+        Torus::new(RADIUS + 0.05, RADIUS + 0.35)
             .mesh()
-            .major_resolution(128),
+            .major_resolution(256),
     );
-    let strut = meshes.add(Cuboid::new(0.07, 2.0 * HALF_WIDTH + 0.16, 0.07));
+    let strut = meshes.add(Cuboid::new(0.25, 2.0 * HALF_WIDTH + 0.6, 0.25));
     let terrain_material = standard.add(StandardMaterial {
         perceptual_roughness: 0.95,
         double_sided: true,
@@ -113,12 +117,12 @@ fn spawn(
                 frame.spawn((
                     Mesh3d(ring.clone()),
                     MeshMaterial3d(metal.clone()),
-                    Transform::from_xyz(0.0, side * (HALF_WIDTH + 0.04), 0.0),
+                    Transform::from_xyz(0.0, side * (HALF_WIDTH + 0.15), 0.0),
                 ));
             }
-            for k in 0..12 {
-                let a = k as f32 / 12.0 * std::f32::consts::TAU;
-                let r = RADIUS + 0.06;
+            for k in 0..STRUTS {
+                let a = k as f32 / STRUTS as f32 * std::f32::consts::TAU;
+                let r = RADIUS + 0.2;
                 frame.spawn((
                     Mesh3d(strut.clone()),
                     MeshMaterial3d(metal.clone()),
@@ -186,17 +190,18 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
     for i in 0..SEGMENTS {
         let phi = i as f32 * dphi;
         let (s, c) = phi.sin_cos();
-        let mut push = |height: f32, y: f32| {
+        let mut push = |height: f32, y: f32, j: usize| {
             let r = RADIUS - height.max(GLASS_INSET);
             let y = y.clamp(-HALF_WIDTH + GLASS_INSET, HALF_WIDTH - GLASS_INSET);
             positions.push([r * c, y, r * s]);
-            colours.push(ground_colour(height));
+            let light = (i / PATCH + j / PATCH).is_multiple_of(2);
+            colours.push(ground_colour(height, light));
         };
-        push(0.0, -HALF_WIDTH);
+        push(0.0, -HALF_WIDTH, 0);
         for j in 0..ROWS {
-            push(landscape.height_at(i, j), -HALF_WIDTH + j as f32 * dy);
+            push(landscape.height_at(i, j), -HALF_WIDTH + j as f32 * dy, j);
         }
-        push(0.0, HALF_WIDTH);
+        push(0.0, HALF_WIDTH, ROWS - 1);
     }
     let raised = |i: usize, j: usize| {
         let row = j.clamp(1, ROWS) - 1;
@@ -227,11 +232,16 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
     mesh
 }
 
-/// Bare dirt at the glass, grass once the ground has risen a little.
-fn ground_colour(height: f32) -> [f32; 4] {
+/// Bare dirt where the ground has been dug toward the glass, grass at the initial depth and
+/// above, in two tints for the patches.
+fn ground_colour(height: f32, light: bool) -> [f32; 4] {
     let dirt = LinearRgba::from(Color::srgb(0.45, 0.32, 0.2));
-    let grass = LinearRgba::from(Color::srgb(0.32, 0.58, 0.22));
-    let t = ((height - 0.05) / 0.45).clamp(0.0, 1.0);
+    let grass = LinearRgba::from(if light {
+        Color::srgb(0.36, 0.62, 0.24)
+    } else {
+        Color::srgb(0.3, 0.54, 0.2)
+    });
+    let t = ((height - 0.15) / 0.3).clamp(0.0, 1.0);
     let t = t * t * (3.0 - 2.0 * t);
     let mix = |a: f32, b: f32| a + (b - a) * t;
     [

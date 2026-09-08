@@ -1,9 +1,10 @@
 use std::f64::consts::PI;
 
 use super::{HALF_WIDTH, RADIUS};
+use crate::core::units::Metres;
 
-pub const SEGMENTS: usize = 256;
-pub const ROWS: usize = 32;
+pub const SEGMENTS: usize = 512;
+pub const ROWS: usize = 64;
 pub const MAX_HEIGHT: f32 = RADIUS - 1.0;
 
 const TWO_PI: f64 = PI * 2.0;
@@ -40,6 +41,21 @@ impl Landscape {
         }
     }
 
+    /// Ground of one depth everywhere.
+    pub fn flat(depth: Metres) -> Self {
+        let mut land = Landscape::new();
+        land.flatten(depth);
+        land
+    }
+
+    /// Make the ground one depth everywhere.
+    pub fn flatten(&mut self, depth: Metres) {
+        let depth = depth.0.clamp(0.0, MAX_HEIGHT);
+        self.heights.fill(depth);
+        self.empty = depth <= 0.0;
+        self.version += 1;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.empty
     }
@@ -59,12 +75,6 @@ impl Landscape {
 
     pub fn max_height(&self) -> f32 {
         self.heights.iter().copied().fold(0.0, f32::max)
-    }
-
-    pub fn reset(&mut self) {
-        self.heights.fill(0.0);
-        self.empty = true;
-        self.version += 1;
     }
 
     pub fn load(&mut self, data: &[f32]) {

@@ -1,15 +1,25 @@
 //! Sequential impulses with Coulomb friction against the moving vessel walls and other bodies.
-use super::{Body, BodyShape, Collider};
+use super::{Body, BodyShape, Collider, Ground};
 use crate::core::math::{Vec3d, add_scaled, cross, dot, mat3mul, norm};
+use crate::core::units::Newtons;
 use crate::core::vessel::Vessel;
 
-pub fn collide_vessel(
-    body: &mut Body,
-    shape: &BodyShape,
-    vessel: &impl Vessel,
-    restitution: f64,
-    friction: f64,
-) {
+/// Resolve the body's contacts with the vessel over a substep of `dt`, and remember the wall it
+/// stood on as its ground.
+pub fn collide_vessel(body: &mut Body, shape: &BodyShape, vessel: &impl Vessel, dt: f64) {
+    let (restitution, friction) = (shape.restitution, shape.friction);
+    let mut support = 0.0;
+    let mut ground: Option<Ground> = None;
+    let mut stand = |ground: &mut Option<Ground>, point: Vec3d, normal: Vec3d, impulse: f64| {
+        support += impulse;
+        if ground.is_none_or(|g| impulse > g.support.0) {
+            *ground = Some(Ground {
+                point,
+                normal,
+                support: Newtons(impulse),
+            });
+        }
+    };
     match shape.collider {
         Collider::Box { .. } => {
             for _pass in 0..2 {
@@ -17,7 +27,16 @@ pub fn collide_vessel(
                     let mut wp = body.to_world(lp);
                     for pen in vessel.penetrations(wp).iter() {
                         let wall = vessel.wall_velocity(wp);
-                        resolve_wall_contact(body, &wp, &pen, &wall, restitution, friction, true);
+                        let j = resolve_wall_contact(
+                            body,
+                            &wp,
+                            &pen,
+                            &wall,
+                            restitution,
+                            friction,
+                            true,
+                        );
+                        stand(&mut ground, wp, pen.normal, j);
                         wp = body.to_world(lp);
                     }
                 }
@@ -33,26 +52,26 @@ pub fn collide_vessel(
                         c[2] - pen.normal[2] * radius,
                     ];
                     let wall = vessel.wall_velocity(at);
-                    resolve_wall_contact(body, &at, &pen, &wall, restitution, friction, false);
+                    let j =
+                        resolve_wall_contact(body, &at, &pen, &wall, restitution, friction, false);
+                    stand(&mut ground, at, pen.normal, j);
                 }
             }
         }
     }
+    body.ground = ground.map(|g| Ground {
+        support: Newtons(support / dt),
+        ..g
+    });
 }
 
-/// Body `a` against body `b`. Called twice with the roles swapped.
-pub fn collide_pair(
-    bodies: &mut [Body],
-    a: usize,
-    b: usize,
-    shapes: &[BodyShape],
-    restitution: f64,
-    friction: f64,
-) {
-    let (ca, cb) = (
-        shapes[bodies[a].shape].collider,
-        shapes[bodies[b].shape].collider,
-    );
+/// Body `a` against body `b`, with the grippier and the less bouncy of the two materials.
+/// Called twice with the roles swapped.
+pub fn collide_pair(bodies: &mut [Body], a: usize, b: usize, shapes: &[BodyShape]) {
+    let (sa, sb) = (&shapes[bodies[a].shape], &shapes[bodies[b].shape]);
+    let (ca, cb) = (sa.collider, sb.collider);
+    let restitution = sa.restitution.min(sb.restitution);
+    let friction = sa.friction.max(sb.friction);
     match (ca, cb) {
         (Collider::Box { .. }, Collider::Box { half }) => {
             for lp in &shapes[bodies[a].shape].points {
@@ -176,7 +195,7 @@ fn resolve_pair_contact(
 }
 
 /// `friction_at_hull` applies the tangential impulse where the wall touches (a box can roll over);
-/// otherwise it goes through the centre of mass and the body slides.
+/// otherwise it goes through the centre of mass and the body slides. Returns the normal impulse.
 fn resolve_wall_contact(
     body: &mut Body,
     wp: &Vec3d,
@@ -185,7 +204,8 @@ fn resolve_wall_contact(
     restitution: f64,
     friction: f64,
     friction_at_hull: bool,
-) {
+) -> f64 {
+    let mut normal_impulse = 0.0;
     let n = &pen.normal;
     let r = [wp[0] - body.p[0], wp[1] - body.p[1], wp[2] - body.p[2]];
     let relative = |body: &Body| {
@@ -198,6 +218,7 @@ fn resolve_wall_contact(
         let kn = eff_mass(body, &r, n);
         let rest = if vn < -0.5 { restitution } else { 0.0 };
         let j = -(1.0 + rest) * vn / kn;
+        normal_impulse = j;
         body.apply_impulse(&[j * n[0], j * n[1], j * n[2]], wp);
         let rv = relative(body);
         let vn2 = dot(&rv, n);
@@ -216,4 +237,5 @@ fn resolve_wall_contact(
         }
     }
     add_scaled(&mut body.p, n, pen.depth.min(0.05) * 0.4);
+    normal_impulse
 }

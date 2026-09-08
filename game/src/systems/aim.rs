@@ -6,7 +6,7 @@ use crate::systems::drum::{Drum, HALF_WIDTH, RADIUS};
 use crate::systems::sim::{SimSet, Simulation};
 
 const EPS: f32 = 1e-6;
-const MARCH_STEP: f32 = 0.04;
+const MARCH_STEP: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AimPoint {

@@ -1,25 +1,32 @@
-//! The running simulation: the drum, the shuttle and the rafts are stepped on the CPU and the
+//! The running simulation: the drum, the avatar and the rafts are stepped on the CPU and the
 //! water follows on the GPU with the same substeps. Real time takes one substep per frame, no
 //! longer than a sixtieth of a second, so a fast display gets smooth water and a slow frame is
 //! split into a few substeps; beyond that, time stretches rather than the frame. Requested time
 //! (the tests, the bench, scripts) always steps at exactly sixty hertz.
+//!
+//! The initial state is a ring world: ground all the way round the drum, spinning exactly fast
+//! enough that the avatar standing on it weighs what it would on Earth, and nothing else.
 use bevy::prelude::*;
 
+use crate::core::avatar::{self, AvatarInput};
 use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_BODIES, MAX_SUBSTEPS_PER_FRAME,
     PARTICLE_MASS, REST_DENSITY,
 };
-use crate::core::math::basis_from_normal;
+use crate::core::math::{basis_from_normal, norm, quat_from_basis};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
-use crate::core::shuttle::{self, ShuttleInput};
-use crate::core::units::{Hertz, Litres, Radians, RadiansPerSecond, Seconds};
+use crate::core::units::{
+    EARTH_GRAVITY, Hertz, Litres, Metres, MetresPerSecondSquared, Radians, RadiansPerSecond,
+    Seconds,
+};
 use crate::core::vessel::Vessel;
-use crate::systems::drum::Drum;
-use crate::systems::player;
+use crate::systems::drum::{Drum, FLOOR_RADIUS};
 use crate::systems::rafts;
 
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 pub const MAX_RAFTS: usize = MAX_BODIES - 1;
+/// Distance from the axis to the avatar's centre of mass when it stands on the initial ground.
+pub const STANDING_RADIUS: Metres = Metres(FLOOR_RADIUS - (avatar::RADIUS - 0.2) as f32);
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -28,7 +35,7 @@ const MAX_FRAME_TIME: Seconds = Seconds(0.1);
 /// an unbounded backlog would let the bodies chase water that has long moved on.
 const MAX_FRAMES_AHEAD: u32 = 3;
 const RATE_WINDOW: Seconds = Seconds(1.0);
-const SHUTTLE_SHAPE: usize = 0;
+const AVATAR_SHAPE: usize = 0;
 const RAFT_SHAPE: usize = 1;
 
 #[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -39,6 +46,15 @@ pub enum SimSet {
     Step,
     /// Everything that reads the stepped state.
     Observe,
+}
+
+/// The avatar's weight as the ground pushes back, in g, its speed over that ground (or through
+/// the air), and whether it is a solid body with nothing under its feet.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Footing {
+    pub weight: f32,
+    pub ground_speed: f32,
+    pub airborne: bool,
 }
 
 /// One substep the CPU took, for the GPU to take too.
@@ -53,8 +69,8 @@ pub struct SubstepRecord {
 #[derive(Resource)]
 pub struct Simulation {
     pub drum: Drum,
-    /// What the pilot asks of the shuttle during the coming substeps.
-    pub shuttle_input: ShuttleInput,
+    /// What the pilot asks of the avatar during the coming substeps.
+    pub avatar_input: AvatarInput,
     pub params: FluidParams,
     pub body_params: BodyParams,
     /// Simulated time since the last reset.
@@ -63,7 +79,7 @@ pub struct Simulation {
     pub rate: f32,
     /// The substeps of the last frame.
     pub substeps: Vec<SubstepRecord>,
-    /// The shuttle first, then the rafts.
+    /// The avatar first, then the rafts.
     bodies: Vec<Body>,
     shapes: [BodyShape; 2],
     accumulator: f32,
@@ -73,31 +89,66 @@ pub struct Simulation {
 
 impl Default for Simulation {
     fn default() -> Self {
-        let shapes = [shuttle::shape(), rafts::shape()];
-        let mut shuttle = Body::new(
-            SHUTTLE_SHAPE,
-            &shapes[SHUTTLE_SHAPE],
-            shuttle::centre_for_eye(player::START_EYE),
-            [0.0, 0.0, 0.0, 1.0],
-            [0.0; 3],
-            [0.0; 3],
-        );
-        shuttle.solid = false;
+        let shapes = [avatar::shape(), rafts::shape()];
+        let mut drum = Drum::default();
+        drum.spin = standing_spin();
+        drum.target_spin = drum.spin;
+        let avatar = standing_avatar(&shapes[AVATAR_SHAPE], &drum);
         Simulation {
-            drum: Drum::default(),
-            shuttle_input: ShuttleInput::default(),
+            drum,
+            avatar_input: AvatarInput::default(),
             params: FluidParams::default(),
             body_params: BodyParams::default(),
             time: Seconds(0.0),
             rate: 1.0,
             substeps: Vec::new(),
-            bodies: vec![shuttle],
+            bodies: vec![avatar],
             shapes,
             accumulator: 0.0,
             queued: 0.0,
             window: (0.0, 0.0),
         }
     }
+}
+
+/// The spin at which the standing avatar's centre of mass is carried round at exactly one g.
+pub fn standing_spin() -> RadiansPerSecond {
+    RadiansPerSecond((EARTH_GRAVITY.0 / STANDING_RADIUS.0 as f64).sqrt() as f32)
+}
+
+/// The artificial gravity felt at the standing avatar's centre of mass under `spin`.
+pub fn standing_gravity(spin: RadiansPerSecond) -> MetresPerSecondSquared {
+    let w = spin.0 as f64;
+    MetresPerSecondSquared(w * w * STANDING_RADIUS.0 as f64)
+}
+
+/// The avatar upright on the ground at wheel angle zero, facing spinward and moving with the
+/// ground, so that it starts out standing rather than falling.
+fn standing_avatar(shape: &BodyShape, drum: &Drum) -> Body {
+    let r = FLOOR_RADIUS as f64 - avatar::standing_height();
+    let p = [r, 0.0, 0.0];
+    let up = [-1.0, 0.0, 0.0];
+    let ground_velocity = drum.wall_velocity(p);
+    let forward = if ground_velocity[2] < 0.0 {
+        [0.0, 0.0, -1.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let back = [-forward[0], -forward[1], -forward[2]];
+    let right = [
+        up[1] * back[2] - up[2] * back[1],
+        up[2] * back[0] - up[0] * back[2],
+        up[0] * back[1] - up[1] * back[0],
+    ];
+    let q = quat_from_basis(&right, &up, &back);
+    Body::new(
+        AVATAR_SHAPE,
+        shape,
+        p,
+        q,
+        ground_velocity,
+        drum.angular_velocity(),
+    )
 }
 
 impl Simulation {
@@ -131,9 +182,9 @@ impl Simulation {
         };
         for k in 0..steps {
             self.drum.advance(dt as f64);
-            shuttle::drive(
+            avatar::drive(
                 &mut self.bodies[0],
-                &self.shuttle_input,
+                &self.avatar_input,
                 &self.drum,
                 dt as f64,
             );
@@ -172,17 +223,24 @@ impl Simulation {
         Seconds(self.queued)
     }
 
-    /// Empty the drum and flatten the landscape; the settings and the shuttle stay as they are.
+    /// Back to the initial ring world, but the settings, the target spin and the avatar stay as
+    /// they are.
     pub fn reset(&mut self) {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
+        let raft_shape = self.shapes[RAFT_SHAPE].friction;
         let target = self.drum.target_spin;
-        let shuttle = std::mem::take(&mut self.bodies).swap_remove(0);
+        let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
         *self = Simulation::default();
         self.params = params;
         self.body_params = body_params;
+        self.shapes[RAFT_SHAPE].friction = raft_shape;
         self.drum.target_spin = target;
-        self.bodies[0] = shuttle;
+        self.bodies[0] = avatar;
+    }
+
+    pub fn set_raft_friction(&mut self, friction: f64) {
+        self.shapes[RAFT_SHAPE].friction = friction;
     }
 
     pub fn water(fluid: &Fluid) -> Litres {
@@ -193,11 +251,40 @@ impl Simulation {
         &self.shapes
     }
 
-    pub fn shuttle(&self) -> &Body {
+    pub fn avatar(&self) -> &Body {
         &self.bodies[0]
     }
 
-    pub fn shuttle_mut(&mut self) -> &mut Body {
+    /// What the avatar's feet feel right now.
+    pub fn footing(&self) -> Footing {
+        let avatar = self.avatar();
+        match avatar.ground {
+            Some(ground) => {
+                let wall = self.drum.wall_velocity(ground.point);
+                let feet = avatar.point_velocity(&ground.point);
+                Footing {
+                    weight: (ground.support.0 * avatar.inv_m / EARTH_GRAVITY.0) as f32,
+                    ground_speed: norm(&[feet[0] - wall[0], feet[1] - wall[1], feet[2] - wall[2]])
+                        as f32,
+                    airborne: false,
+                }
+            }
+            None => {
+                let air = self.drum.air_velocity(avatar.p).unwrap_or([0.0; 3]);
+                Footing {
+                    weight: 0.0,
+                    ground_speed: norm(&[
+                        avatar.v[0] - air[0],
+                        avatar.v[1] - air[1],
+                        avatar.v[2] - air[2],
+                    ]) as f32,
+                    airborne: avatar.solid,
+                }
+            }
+        }
+    }
+
+    pub fn avatar_mut(&mut self) -> &mut Body {
         &mut self.bodies[0]
     }
 

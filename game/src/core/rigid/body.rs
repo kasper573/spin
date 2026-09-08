@@ -1,5 +1,6 @@
 use crate::core::fluid::{H2, MAX_SPEED_BODY, POLY6, REST_DENSITY};
 use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve};
+use crate::core::units::Newtons;
 
 /// What the water did to a body over a frame: the buoyancy impulse and torque, and the flow
 /// around the hull weighted by how strongly each wetted sample coupled to it, as a fraction of
@@ -77,6 +78,19 @@ impl WaterCoupling {
     }
 }
 
+const DEFAULT_FRICTION: f64 = 0.45;
+const DEFAULT_RESTITUTION: f64 = 0.2;
+
+/// The wall a body stood on during the last substep: where it touched, which way is up there,
+/// and how hard the wall pushed back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ground {
+    pub point: Vec3d,
+    /// Unit normal pointing from the wall into the vessel.
+    pub normal: Vec3d,
+    pub support: Newtons,
+}
+
 /// What a body is made of, for contacts. Positions are local to the body's centre of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Collider {
@@ -88,11 +102,15 @@ pub enum Collider {
     Sphere { radius: f64, centre: Vec3d },
 }
 
-/// Mass properties, fluid boundary samples and contact points shared by every body of one kind.
+/// Mass properties, material, fluid boundary samples and contact points shared by every body of
+/// one kind.
 pub struct BodyShape {
     pub collider: Collider,
     pub mass: f64,
     pub inv_inertia: Vec3d,
+    /// Coulomb friction and bounciness against walls and other bodies.
+    pub friction: f64,
+    pub restitution: f64,
     /// Boundary sample points [x, y, z, Ψ] for fluid coupling.
     pub samples: Vec<[f32; 4]>,
     pub volume_per_sample: f64,
@@ -117,6 +135,8 @@ impl BodyShape {
             collider: Collider::Box { half },
             mass,
             inv_inertia,
+            friction: DEFAULT_FRICTION,
+            restitution: DEFAULT_RESTITUTION,
             samples,
             volume_per_sample,
             points: box_contact_points(half),
@@ -139,6 +159,8 @@ impl BodyShape {
             collider: Collider::Sphere { radius, centre },
             mass,
             inv_inertia,
+            friction: DEFAULT_FRICTION,
+            restitution: DEFAULT_RESTITUTION,
             volume_per_sample: volume / samples.len() as f64,
             samples,
             points: Vec::new(),
@@ -175,6 +197,8 @@ pub struct Body {
     pub iw: [f64; 9],
     /// Fraction of boundary samples in water, in [0, 1].
     pub wet: f64,
+    /// The vessel wall the body stood on during the last substep, if any.
+    pub ground: Option<Ground>,
 }
 
 impl Body {
@@ -193,6 +217,7 @@ impl Body {
             m: [0.0; 9],
             iw: [0.0; 9],
             wet: 0.0,
+            ground: None,
         };
         body.update_rotation();
         body

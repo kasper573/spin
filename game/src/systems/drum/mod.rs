@@ -1,5 +1,6 @@
 //! The glass drum: a solid cylinder spinning about its axis (world y), with a sculptable landscape
-//! on the inside of its floor. Implements the vessel the fluid and rafts live in.
+//! on the inside of its floor that starts as a layer of ground around the whole ring. Implements
+//! the vessel the fluid and the bodies live in.
 mod gpu;
 mod landscape;
 mod render;
@@ -8,13 +9,17 @@ pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{Landscape, wheel_angle};
 pub use render::DrumPlugin;
 
-use crate::core::units::{Radians, RadiansPerSecond};
+use crate::core::units::{Metres, Radians, RadiansPerSecond};
 use crate::core::vessel::{Contact, Penetration, Penetrations, Vessel};
 
-pub const RADIUS: f32 = 3.5;
-pub const HALF_WIDTH: f32 = 0.6;
+pub const RADIUS: f32 = 10.5;
+pub const HALF_WIDTH: f32 = 6.0;
+/// The ground that covers the glass all the way round in the initial state.
+pub const GROUND_DEPTH: Metres = Metres(0.5);
+/// Distance from the axis to the top of the initial ground.
+pub const FLOOR_RADIUS: f32 = RADIUS - GROUND_DEPTH.0;
 /// The glass shell's thickness, felt only from outside.
-pub const GLASS_THICKNESS: f64 = 0.05;
+pub const GLASS_THICKNESS: f64 = 0.1;
 /// Maximum spin-up acceleration of the drum (rad/s²).
 const SPIN_ACCEL: f64 = 0.6;
 
@@ -32,7 +37,7 @@ impl Default for Drum {
             spin: RadiansPerSecond(0.0),
             target_spin: RadiansPerSecond(0.0),
             angle: Radians(0.0),
-            landscape: Landscape::new(),
+            landscape: Landscape::flat(GROUND_DEPTH),
         }
     }
 }
@@ -58,7 +63,7 @@ impl Drum {
 
     /// Pull a point inside the drum, clear of the caps and above the landscape.
     pub fn place_inside(&self, p: [f32; 3]) -> [f32; 3] {
-        let margin = 0.1;
+        let margin = 0.3;
         let y = p[1].clamp(-HALF_WIDTH + margin, HALF_WIDTH - margin);
         let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
         let (h, _, _) = self
