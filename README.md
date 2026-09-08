@@ -16,6 +16,7 @@ and the water is drawn as an isosurface with a cel-shaded material and foam.
 | `just wasm`  | the browser client through `wasm-bindgen` into `target/wasm/`  |
 | `just dist`  | the page plus the wasm bundle in `dist/`                       |
 | `just serve` | build `dist/` and serve it on http://localhost:8000            |
+| `just dev`   | the same with a fast plain-release build, for local iteration  |
 | `just e2e`   | build `dist/` and drive it in headless Chrome                  |
 
 Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pages.

@@ -14,19 +14,24 @@ bench:
     cargo run --release -p game --bin bench
 
 # The browser client: a wasm binary post-processed by wasm-bindgen into the bundle the page loads.
-wasm:
-    cargo build --profile wasm -p game --bin client --target wasm32-unknown-unknown
+# The `wasm` profile is the small, slow-to-build deploy; `release` is the fast local loop.
+wasm profile="wasm":
+    cargo build --profile {{profile}} -p game --bin client --target wasm32-unknown-unknown
     wasm-bindgen --target web --no-typescript --out-name spin --out-dir target/wasm \
-      target/wasm32-unknown-unknown/wasm/client.wasm
+      target/wasm32-unknown-unknown/{{profile}}/client.wasm
 
 # Everything the static host serves: the page plus the wasm bundle.
-dist: wasm
+dist profile="wasm": (wasm profile)
     rm -rf dist && mkdir -p dist
     cp static/index.html dist/
     cp target/wasm/spin.js target/wasm/spin_bg.wasm dist/
 
 # Serve dist/ locally.
 serve: dist
+    python3 -m http.server --directory dist 8000
+
+# Local development: a plain release build served on :8000. No hot reload — rerun and refresh.
+dev: (dist "release")
     python3 -m http.server --directory dist 8000
 
 # Load dist/ in headless Chrome and drive it through the page's script hooks.
