@@ -1,4 +1,4 @@
-use game::core::units::{RadiansPerSecond, Seconds};
+use game::core::units::{Radians, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
 use game::systems::drum::{Drum, Landscape, RADIUS, wheel_angle};
 use game::systems::sim::Simulation;
@@ -31,7 +31,7 @@ fn heights_are_clamped_on_load() {
 #[test]
 fn terrain_pushes_particles_out_and_turns_with_the_drum() {
     let mut drum = Drum {
-        angle: 0.7,
+        angle: Radians(0.7),
         ..Drum::default()
     };
     for _ in 0..20 {
@@ -70,7 +70,7 @@ fn water_settles_on_top_of_raised_ground() {
                 p.position[0] as f64,
                 p.position[1] as f64,
                 p.position[2] as f64,
-                sim.drum.angle,
+                sim.drum.angle.0,
                 0.0,
             );
             pen > 0.06

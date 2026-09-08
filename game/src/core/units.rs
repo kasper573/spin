@@ -10,6 +10,9 @@ pub struct Metres(pub f32);
 pub struct MetresPerSecond(pub f32);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct Radians(pub f64);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct RadiansPerSecond(pub f32);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]

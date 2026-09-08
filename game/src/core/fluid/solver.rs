@@ -34,7 +34,7 @@ fn step_particles(
     if n == 0 {
         return;
     }
-    let air_k = if p.air { dt / p.air_tau } else { 0.0 };
+    let air_k = if p.air { dt / p.air_tau.0 } else { 0.0 };
     for i in 0..n {
         let (mut ux, mut uy, mut uz) = (f.vx[i], f.vy[i], f.vz[i]);
         if air_k > 0.0 {
@@ -77,7 +77,7 @@ fn step_bodies(
     bodies: &mut [Body],
     p: &FluidParams,
 ) {
-    let air_k = if p.air { dt / p.air_tau as f64 } else { 0.0 };
+    let air_k = if p.air { dt / p.air_tau.0 as f64 } else { 0.0 };
     let spin = vessel.angular_velocity();
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
     // water may change a body's velocity by a few times the vessel's artificial gravity per substep
@@ -85,7 +85,7 @@ fn step_bodies(
     let max_dv = (20.0 + 4.0 * spin_mag * spin_mag * reach) * dt;
     for b in bodies.iter_mut() {
         b.apply_accumulated(max_dv);
-        let wet_k = (b.wet * p.wet_spin_tau * dt).min(1.0);
+        let wet_k = (b.wet * p.wet_spin_rate.0 as f64 * dt).min(1.0);
         if wet_k > 0.0 {
             relax(&mut b.w, &spin, wet_k);
         }

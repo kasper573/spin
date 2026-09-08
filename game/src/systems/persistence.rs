@@ -1,15 +1,15 @@
 //! Everything worth keeping across a reload — settings, camera, drum, water, rafts, landscape — as
-//! one JSON snapshot in the platform's storage, written every couple of seconds.
+//! one JSON snapshot in the browser's storage, written every couple of seconds.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::codec;
 use crate::core::fluid::{PARTICLE_SPACING, Particle};
 use crate::core::fly_camera::FlyCamera;
-use crate::core::platform::ClientPlatform;
 use crate::core::rigid::Body;
-use crate::core::units::{MetresPerSecond, RadiansPerSecond, Seconds};
+use crate::core::units::{MetresPerSecond, Radians, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
+use crate::core::web;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -21,8 +21,8 @@ pub struct Snapshot {
     pub settings: Settings,
     pub camera: CameraPose,
     pub spin: RadiansPerSecond,
-    pub angle: f64,
-    pub time: f64,
+    pub angle: Radians,
+    pub time: Seconds,
     /// Seven floats per particle: position, velocity, foam.
     #[serde(with = "codec::f32s")]
     pub fluid: Vec<f32>,
@@ -98,8 +98,8 @@ pub fn apply(snapshot: &Snapshot, settings: &mut Settings, sim: &mut Simulation)
     sim.reset();
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-10.0, 10.0));
     sim.drum.target_spin = settings.spin;
-    sim.drum.angle = finite_f64(snapshot.angle);
-    sim.time = finite_f64(snapshot.time);
+    sim.drum.angle = Radians(finite_f64(snapshot.angle.0));
+    sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
     for chunk in snapshot.fluid.chunks_exact(7) {
         if chunk.iter().all(|v| v.is_finite()) {
@@ -155,7 +155,7 @@ pub fn save_now(world: &mut World) {
         &fly,
     );
     if let Ok(text) = serde_json::to_string(&snapshot) {
-        world.resource::<ClientPlatform>().0.save(KEY, &text);
+        web::storage_save(KEY, &text);
     }
 }
 
@@ -163,11 +163,8 @@ pub fn save_now(world: &mut World) {
 struct Autosave(Timer);
 
 fn restore(world: &mut World) {
-    let Some(snapshot) = world
-        .resource::<ClientPlatform>()
-        .0
-        .load(KEY)
-        .and_then(|text| serde_json::from_str::<Snapshot>(&text).ok())
+    let Some(snapshot) =
+        web::storage_load(KEY).and_then(|text| serde_json::from_str::<Snapshot>(&text).ok())
     else {
         return;
     };

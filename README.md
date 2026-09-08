@@ -24,12 +24,12 @@ Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pag
 ## Layout
 
 - `game/src/core/` — reusable primitives: the fluid solver and rigid boxes confined by a `Vessel`,
-  the fly camera, isosurface extraction, unit newtypes, the platform adapter trait.
+  the fly camera, isosurface extraction, unit newtypes, the browser page glue.
 - `game/src/systems/` — the drum (geometry, landscape, rendering), the running simulation, water
   and raft rendering, crosshair aim, controls, the text HUD, persistence, script hooks.
-- `game/src/bin/` — `client` (browser, wasm), `desktop` (native window), `bench`, `lint`.
+- `game/src/bin/` — `client` (browser, wasm), `bench`, `lint`.
 - `game/src/assets/shaders/` — WGSL for the water, glass and star field, embedded in the binary.
-- `web/` — the static page that loads the wasm bundle. `e2e/` — the headless Chrome smoke test.
+- `static/` — the page that loads the wasm bundle. `e2e/` — the headless Chrome smoke test.
 
 ## Controls
 

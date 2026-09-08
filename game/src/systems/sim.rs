@@ -34,11 +34,10 @@ pub struct Simulation {
     pub raft_shape: BoxShape,
     pub params: FluidParams,
     pub paused: bool,
-    /// Simulated seconds since the last reset.
-    pub time: f64,
+    /// Simulated time since the last reset.
+    pub time: Seconds,
     /// Fraction of real time the simulation keeps up with (1 = full speed).
     pub rate: f32,
-    pub substep_ms: f32,
     accumulator: f32,
     window: (f32, f32),
 }
@@ -55,9 +54,8 @@ impl Default for Simulation {
             raft_shape: rafts::shape(),
             params: FluidParams::default(),
             paused: false,
-            time: 0.0,
+            time: Seconds(0.0),
             rate: 1.0,
-            substep_ms: 0.0,
             accumulator: 0.0,
             window: (0.0, 0.0),
         }
@@ -75,7 +73,7 @@ impl Simulation {
             &mut self.rafts,
             &self.params,
         );
-        self.time += dt as f64;
+        self.time.0 += dt;
     }
 
     /// Advance by one frame of real time, within the frame budget.
@@ -89,9 +87,7 @@ impl Simulation {
         let start = Instant::now();
         let mut simulated = 0.0;
         while self.accumulator >= dt {
-            let t0 = Instant::now();
             self.substep();
-            self.substep_ms = t0.elapsed().as_secs_f32() * 1000.0;
             self.accumulator -= dt;
             simulated += dt;
             if start.elapsed().as_secs_f32() > FRAME_BUDGET.0 {

@@ -4,6 +4,7 @@ use std::f32::consts::PI;
 
 use crate::core::math::Rng;
 use crate::core::rigid::{Body, BoxShape};
+use crate::core::units::{Hertz, Seconds};
 use crate::core::vessel::{Contact, Vessel};
 
 mod grid;
@@ -46,10 +47,10 @@ pub struct FluidParams {
     pub restitution: f64,
     pub body_drag: f32,
     pub air: bool,
-    /// Time constant (s) for the vessel's air to drag free objects along with its walls.
-    pub air_tau: f32,
-    /// Rate (1/s) at which a fully wetted body's spin relaxes toward the vessel's rotation.
-    pub wet_spin_tau: f64,
+    /// Time constant for the vessel's air to drag free objects along with its walls.
+    pub air_tau: Seconds,
+    /// Rate at which a fully wetted body's spin relaxes toward the vessel's rotation.
+    pub wet_spin_rate: Hertz,
 }
 
 impl Default for FluidParams {
@@ -61,8 +62,8 @@ impl Default for FluidParams {
             restitution: 0.2,
             body_drag: 0.5,
             air: true,
-            air_tau: 12.0,
-            wet_spin_tau: 20.0,
+            air_tau: Seconds(12.0),
+            wet_spin_rate: Hertz(20.0),
         }
     }
 }

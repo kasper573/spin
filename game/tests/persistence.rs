@@ -36,7 +36,7 @@ fn snapshot_round_trips_through_json() {
     assert_eq!(sim2.fluid.len(), sim.fluid.len());
     assert_eq!(sim2.rafts.len(), 1);
     assert_eq!(sim2.drum.landscape.heights(), sim.drum.landscape.heights());
-    assert!((sim2.drum.angle - sim.drum.angle).abs() < 1e-9);
+    assert!((sim2.drum.angle.0 - sim.drum.angle.0).abs() < 1e-9);
     assert!((camera2.translation - camera.translation).length() < 1e-5);
     assert_eq!(fly2.speed, MetresPerSecond(7.0));
     let a = sim.fluid.particle(7);

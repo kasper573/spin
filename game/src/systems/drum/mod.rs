@@ -6,7 +6,7 @@ mod render;
 pub use landscape::{Landscape, wheel_angle};
 pub use render::DrumPlugin;
 
-use crate::core::units::RadiansPerSecond;
+use crate::core::units::{Radians, RadiansPerSecond};
 use crate::core::vessel::{Contact, Penetration, Penetrations, Vessel};
 
 pub const RADIUS: f32 = 3.5;
@@ -17,8 +17,8 @@ const SPIN_ACCEL: f64 = 0.6;
 pub struct Drum {
     pub spin: RadiansPerSecond,
     pub target_spin: RadiansPerSecond,
-    /// Accumulated rotation (rad); the glass at wheel angle φ sits at world angle φ − angle.
-    pub angle: f64,
+    /// Accumulated rotation; the glass at wheel angle φ sits at world angle φ − angle.
+    pub angle: Radians,
     pub landscape: Landscape,
 }
 
@@ -27,7 +27,7 @@ impl Default for Drum {
         Drum {
             spin: RadiansPerSecond(0.0),
             target_spin: RadiansPerSecond(0.0),
-            angle: 0.0,
+            angle: Radians(0.0),
             landscape: Landscape::new(),
         }
     }
@@ -38,12 +38,12 @@ impl Drum {
         let d = (self.target_spin.0 - self.spin.0) as f64;
         let max = SPIN_ACCEL * dt;
         self.spin.0 += d.clamp(-max, max) as f32;
-        self.angle += self.spin.0 as f64 * dt;
+        self.angle.0 += self.spin.0 as f64 * dt;
     }
 
     /// Angle of a world point in the drum's own frame.
     pub fn wheel_angle(&self, x: f64, z: f64) -> f64 {
-        wheel_angle(x, z, self.angle)
+        wheel_angle(x, z, self.angle.0)
     }
 
     /// Pull a point inside the drum, clear of the caps and above the landscape.
@@ -81,7 +81,7 @@ impl Vessel for Drum {
                     p[0] as f64,
                     p[1] as f64,
                     p[2] as f64,
-                    self.angle,
+                    self.angle.0,
                     margin as f64,
                 );
                 if pen <= 0.0 {
@@ -113,7 +113,7 @@ impl Vessel for Drum {
             (r - RADIUS as f64, [-p[0] / r, 0.0, -p[2] / r])
         } else {
             self.landscape
-                .penetration(p[0], p[1], p[2], self.angle, 0.0)
+                .penetration(p[0], p[1], p[2], self.angle.0, 0.0)
         };
         if depth > 0.0 {
             out.push(Penetration { depth, normal });

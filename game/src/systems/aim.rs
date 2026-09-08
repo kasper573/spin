@@ -28,13 +28,6 @@ impl Plugin for AimPlugin {
     }
 }
 
-fn update(sim: Res<Simulation>, cameras: Query<&Transform, With<Camera3d>>, mut aim: ResMut<Aim>) {
-    let Ok(camera) = cameras.single() else {
-        return;
-    };
-    aim.0 = cast(camera.translation, camera.forward().as_vec3(), &sim.drum);
-}
-
 pub fn cast(origin: Vec3, dir: Vec3, drum: &Drum) -> Option<AimPoint> {
     let mut t_in = f32::NEG_INFINITY;
     let mut t_out = f32::INFINITY;
@@ -84,10 +77,17 @@ pub fn cast(origin: Vec3, dir: Vec3, drum: &Drum) -> Option<AimPoint> {
     Some(AimPoint { point, normal })
 }
 
+fn update(sim: Res<Simulation>, cameras: Query<&Transform, With<Camera3d>>, mut aim: ResMut<Aim>) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    aim.0 = cast(camera.translation, camera.forward().as_vec3(), &sim.drum);
+}
+
 fn penetration_at(origin: Vec3, dir: Vec3, t: f32, drum: &Drum) -> (f64, [f64; 3]) {
     let p = origin + dir * t;
     drum.landscape
-        .penetration(p.x as f64, p.y as f64, p.z as f64, drum.angle, 0.0)
+        .penetration(p.x as f64, p.y as f64, p.z as f64, drum.angle.0, 0.0)
 }
 
 /// Fixed-step march along the ray, refined by bisection at the first terrain crossing.

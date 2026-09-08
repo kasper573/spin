@@ -35,7 +35,7 @@ The game crate's `src/` is organized into `core/` and `systems/`:
 `core/`:
 
 - code that may be reused by all systems
-- typically low level systems and primitives (the fluid and rigid body solvers, the fly camera, surface extraction, the platform adapter)
+- typically low level systems and primitives (the fluid and rigid body solvers, the fly camera, surface extraction, the browser page glue)
 - may not depend on high level systems
 - must be abstract and pluggable: systems integrate with core, core never reaches into a system. Never create a `systems::x` that mirrors a `core::x`. If core code seems to need a system, that's a sign core isn't abstract enough — make it extensible (traits, messages, registries, callbacks) and put the game-specific glue in the relevant feature.
 
@@ -45,7 +45,7 @@ The game crate's `src/` is organized into `core/` and `systems/`:
 - the majority of our content and mechanics goes here (the drum, water, rafts, landscape, controls, hud, persistence)
 - may depend on other high level systems
 
-The binaries under `src/bin/` are thin: they install a platform adapter and the plugins, nothing more.
+The binaries under `src/bin/` are thin: the client only assembles the app, nothing more.
 
 ## Comments
 

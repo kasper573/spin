@@ -114,7 +114,7 @@ fn rebuild(
         .as_ref()
         .and_then(|handle| materials.get_mut(handle))
     {
-        material.clock = Vec4::new(sim.time as f32, sim.drum.angle as f32, 0.0, 0.0);
+        material.clock = Vec4::new(sim.time.0, sim.drum.angle.0 as f32, 0.0, 0.0);
     }
     if sim.fluid.is_empty() {
         *visibility = Visibility::Hidden;

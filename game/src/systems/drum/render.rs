@@ -129,7 +129,7 @@ fn spawn(
 
 fn turn(sim: Res<Simulation>, mut frames: Query<&mut Transform, With<WheelFrame>>) {
     for mut transform in &mut frames {
-        transform.rotation = Quat::from_rotation_y(sim.drum.angle as f32);
+        transform.rotation = Quat::from_rotation_y(sim.drum.angle.0 as f32);
     }
 }
 

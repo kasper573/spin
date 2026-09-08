@@ -2,8 +2,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::core::platform::ClientPlatform;
-use crate::core::units::{RadiansPerSecond, Seconds};
+use crate::core::units::{Radians, RadiansPerSecond, Seconds};
+use crate::core::web;
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence;
 use crate::systems::settings::Settings;
@@ -43,13 +43,13 @@ pub enum ScriptCommand {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Status {
+pub struct ScriptStatus {
     pub particles: usize,
     pub litres: f32,
     pub rafts: usize,
-    pub spin: f32,
-    pub angle: f64,
-    pub time: f64,
+    pub spin: RadiansPerSecond,
+    pub angle: Radians,
+    pub time: Seconds,
     pub fps: f32,
     pub sim_rate: f32,
     pub landscape_max: f32,
@@ -67,7 +67,7 @@ impl Plugin for TestingPlugin {
 }
 
 fn drain(world: &mut World) {
-    let commands = world.resource::<ClientPlatform>().0.take_script_commands();
+    let commands = web::take_script_commands();
     for text in commands {
         match serde_json::from_str::<ScriptCommand>(&text) {
             Ok(command) => run(world, command),
@@ -119,12 +119,12 @@ fn run(world: &mut World, command: ScriptCommand) {
     }
 }
 
-fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, platform: Res<ClientPlatform>) {
-    let status = Status {
+fn publish(sim: Res<Simulation>, fps: Res<FrameRate>) {
+    let status = ScriptStatus {
         particles: sim.fluid.len(),
         litres: sim.water().0,
         rafts: sim.rafts.len(),
-        spin: sim.drum.spin.0,
+        spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
         fps: fps.0,
@@ -141,6 +141,6 @@ fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, platform: Res<ClientPlatfo
             .collect(),
     };
     if let Ok(text) = serde_json::to_string(&status) {
-        platform.0.publish_status(&text);
+        web::publish_status(&text);
     }
 }

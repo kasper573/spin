@@ -1,20 +1,20 @@
-//! The whole application, assembled for whichever host installs a platform adapter.
+//! The whole application: bevy's defaults plus every plugin of ours, on the browser page.
 use bevy::prelude::*;
 
-use crate::core::platform::{ClientPlatform, Platform};
+use crate::core::web;
 use crate::systems::{
     aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
     persistence::PersistencePlugin, rafts::RaftsPlugin, scene::ScenePlugin,
     settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin, water::WaterPlugin,
 };
 
-pub fn build(platform: impl Platform, window: Window) -> App {
+pub fn build() -> App {
+    web::install_script_hooks();
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(window),
+        primary_window: Some(web::primary_window()),
         ..default()
-    }))
-    .insert_resource(ClientPlatform(Box::new(platform)));
+    }));
     super::embed_shaders(&mut app);
     app.add_plugins((
         ScenePlugin,
@@ -33,8 +33,8 @@ pub fn build(platform: impl Platform, window: Window) -> App {
     app
 }
 
-fn sync_window(platform: Res<ClientPlatform>, mut windows: Query<&mut Window>) {
+fn sync_window(mut windows: Query<&mut Window>) {
     for mut window in &mut windows {
-        platform.0.sync_window(&mut window);
+        web::sync_window(&mut window);
     }
 }

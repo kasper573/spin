@@ -5,8 +5,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::core::fly_camera::FlyCamera;
-use crate::core::platform::ClientPlatform;
 use crate::core::units::Metres;
+use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::rafts::PLACEMENT_OFFSET;
 use crate::systems::settings::{Dial, Settings, Toggle};
@@ -17,54 +17,54 @@ const INJECT_DEPTH: Metres = Metres(0.4);
 const MARKER_RADIUS: Metres = Metres(0.12);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
+pub enum ClearAction {
     ClearWater,
     ClearRafts,
     ResetLandscape,
     ResetAll,
 }
 
-impl Action {
-    pub const ALL: [Action; 4] = [
-        Action::ClearWater,
-        Action::ClearRafts,
-        Action::ResetLandscape,
-        Action::ResetAll,
+impl ClearAction {
+    pub const ALL: [ClearAction; 4] = [
+        ClearAction::ClearWater,
+        ClearAction::ClearRafts,
+        ClearAction::ResetLandscape,
+        ClearAction::ResetAll,
     ];
 
     pub fn key(self) -> KeyCode {
         match self {
-            Action::ClearWater => KeyCode::Backspace,
-            Action::ClearRafts => KeyCode::Delete,
-            Action::ResetLandscape => KeyCode::KeyL,
-            Action::ResetAll => KeyCode::KeyR,
+            ClearAction::ClearWater => KeyCode::Backspace,
+            ClearAction::ClearRafts => KeyCode::Delete,
+            ClearAction::ResetLandscape => KeyCode::KeyL,
+            ClearAction::ResetAll => KeyCode::KeyR,
         }
     }
 
     pub fn key_label(self) -> &'static str {
         match self {
-            Action::ClearWater => "Backspace",
-            Action::ClearRafts => "Delete",
-            Action::ResetLandscape => "L",
-            Action::ResetAll => "R",
+            ClearAction::ClearWater => "Backspace",
+            ClearAction::ClearRafts => "Delete",
+            ClearAction::ResetLandscape => "L",
+            ClearAction::ResetAll => "R",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::ClearWater => "remove all water",
-            Action::ClearRafts => "remove all rafts",
-            Action::ResetLandscape => "flatten landscape",
-            Action::ResetAll => "reset everything",
+            ClearAction::ClearWater => "remove all water",
+            ClearAction::ClearRafts => "remove all rafts",
+            ClearAction::ResetLandscape => "flatten landscape",
+            ClearAction::ResetAll => "reset everything",
         }
     }
 
     pub fn apply(self, sim: &mut Simulation) {
         match self {
-            Action::ClearWater => sim.fluid.clear(),
-            Action::ClearRafts => sim.rafts.clear(),
-            Action::ResetLandscape => sim.drum.landscape.reset(),
-            Action::ResetAll => sim.reset(),
+            ClearAction::ClearWater => sim.fluid.clear(),
+            ClearAction::ClearRafts => sim.rafts.clear(),
+            ClearAction::ResetLandscape => sim.drum.landscape.reset(),
+            ClearAction::ResetAll => sim.reset(),
         }
     }
 }
@@ -95,7 +95,6 @@ impl Plugin for ControlsPlugin {
 
 fn pointer_lock(
     mut controls: ResMut<Controls>,
-    platform: Res<ClientPlatform>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut cursors: Query<&mut CursorOptions>,
@@ -107,7 +106,7 @@ fn pointer_lock(
     if keys.just_pressed(KeyCode::Escape) {
         controls.active = false;
     }
-    if controls.active && !platform.0.pointer_locked(was_active) {
+    if controls.active && was_active && !web::pointer_locked() {
         controls.active = false;
     }
     if controls.active != was_active {
@@ -169,7 +168,7 @@ fn keys(
             toggle.flip(&mut settings);
         }
     }
-    for action in Action::ALL {
+    for action in ClearAction::ALL {
         if keys.just_pressed(action.key()) {
             action.apply(&mut sim);
         }

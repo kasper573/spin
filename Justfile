@@ -13,10 +13,6 @@ test:
 bench:
     cargo run --release -p game --bin bench
 
-# Native window for local development. State is saved to the given file.
-run:
-    SPIN_SAVE_PATH=target/spin-save.json cargo run --release -p game --bin desktop
-
 # The browser client: a wasm binary post-processed by wasm-bindgen into the bundle the page loads.
 wasm:
     cargo build --profile wasm -p game --bin client --target wasm32-unknown-unknown
@@ -26,7 +22,7 @@ wasm:
 # Everything the static host serves: the page plus the wasm bundle.
 dist: wasm
     rm -rf dist && mkdir -p dist
-    cp web/index.html dist/
+    cp static/index.html dist/
     cp target/wasm/spin.js target/wasm/spin_bg.wasm dist/
 
 # Serve dist/ locally.
