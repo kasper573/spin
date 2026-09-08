@@ -13,6 +13,20 @@ async function waitFor(condition, what, seconds = 60) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
+// Software rendering on a CI runner manages a frame every few seconds, each a fraction of a second
+// of simulation, so an advance is only given up on when the simulation stops making progress.
+async function waitForProgress(measure, target, what, patience = 60) {
+  let last = await measure();
+  let stalled = 0;
+  while (last < target) {
+    await sleep(100);
+    const now = await measure();
+    stalled = now > last ? 0 : stalled + 1;
+    if (stalled >= patience * 10) throw new Error(`timed out waiting for ${what}`);
+    last = now;
+  }
+}
+
 const dist = path.resolve(import.meta.dirname, "..", "dist");
 const out = path.resolve(import.meta.dirname, "..", "target", "e2e");
 fs.mkdirSync(out, { recursive: true });
@@ -42,7 +56,7 @@ await ready;
 await send("Runtime.enable");
 await send("Log.enable");
 await send("Page.enable");
-await send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width: 800, height: 500, deviceScaleFactor: 1, mobile: false });
 
 let failures = 0;
 const check = (name, ok, detail = "") => {
@@ -57,10 +71,7 @@ const command = async (cmd) => {
   await evaluate(`window.spin_command(${JSON.stringify(JSON.stringify(cmd))})`);
   await waitFor(async () => (await status()).frame >= before.frame + 2, `frames after ${cmd.cmd}`);
   if (cmd.cmd === "advance") {
-    const target = before.time + cmd.seconds - 1e-3;
-    // Software rendering on a CI runner manages a few frames a second, each a fraction of a
-    // second of simulation.
-    await waitFor(async () => (await status()).time >= target, `the simulation to advance ${cmd.seconds} s`, 60 + 30 * cmd.seconds);
+    await waitForProgress(async () => (await status()).time, before.time + cmd.seconds - 1e-3, `the simulation to advance ${cmd.seconds} s`);
   }
 };
 const screenshot = async (name) => {
