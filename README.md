@@ -8,27 +8,35 @@ and the water is drawn as an isosurface with a cel-shaded material and foam.
 
 ## Commands
 
-| Command      | What it does                                                  |
-| ------------ | ------------------------------------------------------------- |
-| `just run`   | native window for development                                 |
+| Command      | What it does                                                   |
+| ------------ | -------------------------------------------------------------- |
 | `just lint`  | `cargo fmt --check`, the layering lint, clippy (native + wasm) |
-| `just test`  | the contract tests in `game/tests/`                           |
-| `just bench` | a fixed fluid workload, timed per substep                     |
-| `just wasm`  | the browser client through `wasm-bindgen` into `target/wasm/` |
-| `just dist`  | the page plus the wasm bundle in `dist/`                      |
-| `just serve` | serve `dist/` on http://localhost:8000                        |
-| `just e2e`   | drive `dist/` in headless Chrome                              |
+| `just test`  | the contract tests in `game/tests/`                            |
+| `just bench` | a fixed fluid workload, timed per substep                      |
+| `just wasm`  | the browser client through `wasm-bindgen` into `target/wasm/`  |
+| `just dist`  | the page plus the wasm bundle in `dist/`                       |
+| `just serve` | build `dist/` and serve it on http://localhost:8000            |
+| `just e2e`   | build `dist/` and drive it in headless Chrome                  |
 
 Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pages.
 
 ## Layout
 
-- `game/src/core/` — reusable primitives: the fluid solver and rigid boxes confined by a `Vessel`,
-  the fly camera, isosurface extraction, unit newtypes, the browser page glue.
-- `game/src/systems/` — the drum (geometry, landscape, rendering), the running simulation, water
-  and raft rendering, crosshair aim, controls, the text HUD, persistence, script hooks.
-- `game/src/bin/` — `client` (browser, wasm), `bench`, `lint`.
-- `game/src/assets/shaders/` — WGSL for the water, glass and star field, embedded in the binary.
+One crate, `game/`, split into two layers plus thin binaries:
+
+- `src/core/` — reusable primitives that know nothing about the drum: `fluid/` (position-based
+  fluid solver and its spatial grid), `rigid/` (rigid boxes and their contacts), `vessel.rs` (the
+  container trait both solvers see their walls through), `surface.rs` (isosurface extraction),
+  `fly_camera.rs`, `units.rs` (newtypes), `codec.rs` (float arrays in JSON), `math.rs`, and
+  `web.rs` (the browser page: canvas, localStorage, pointer lock, script hooks).
+- `src/systems/` — the simulation itself: `drum/` (geometry, sculptable landscape, glass and
+  terrain rendering), `sim.rs` (the stepped world and its frame budget), `water.rs` and `rafts.rs`
+  (rendering), `aim.rs` (crosshair ray), `controls.rs` (mouse and keys), `settings.rs` (dials and
+  toggles), `hud.rs` (text overlay), `persistence.rs` (snapshots), `testing.rs` (script commands and
+  status), `scene.rs` (camera, lights, stars), `shaders/` (WGSL, embedded in the binary), and
+  `app.rs` (plugin assembly).
+- `src/bin/` — `client` (the browser app), `bench`, `lint` (core may not reference systems).
+- `tests/` — contract tests against the public API.
 - `static/` — the page that loads the wasm bundle. `e2e/` — the headless Chrome smoke test.
 
 ## Controls
