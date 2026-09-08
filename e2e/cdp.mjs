@@ -18,7 +18,9 @@ export async function launchChrome(port, profileDir) {
     ],
     { stdio: "ignore" },
   );
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // A cold start on a software-rendered CI runner can take well over ten seconds.
+  for (let attempt = 0; attempt < 600; attempt++) {
+    if (chrome.exitCode !== null) throw new Error(`chrome exited with code ${chrome.exitCode}`);
     try {
       const pages = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
       const page = pages.find((p) => p.type === "page");
@@ -27,7 +29,7 @@ export async function launchChrome(port, profileDir) {
     await sleep(100);
   }
   chrome.kill();
-  throw new Error("chrome did not start");
+  throw new Error("chrome did not start within 60 s");
 }
 
 export function connect(page) {
