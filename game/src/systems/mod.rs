@@ -10,6 +10,7 @@ pub mod scene;
 pub mod settings;
 pub mod sim;
 pub mod testing;
+pub mod thrusters;
 pub mod water;
 
 use bevy::asset::embedded_asset;

@@ -9,7 +9,7 @@ use crate::core::units::Metres;
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
-use crate::systems::player::{PilotAxes, Player};
+use crate::systems::player::{PilotInput, Player};
 use crate::systems::rafts::PLACEMENT_OFFSET;
 use crate::systems::settings::{Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -139,7 +139,8 @@ fn pointer_lock(
     }
 }
 
-/// Reads the mouse and the movement keys into the avatar's input; scripted input comes after.
+/// Reads the mouse and the thruster keys (in the order of `Thruster::ALL`) into the avatar's
+/// input; scripted input comes after.
 pub fn pilot(
     controls: Res<Controls>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -152,21 +153,20 @@ pub fn pilot(
         return;
     }
     player.turn(motion.delta);
-    let axis =
-        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f32;
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let space = keys.pressed(KeyCode::Space);
-    let axes = PilotAxes {
-        motion: Vec3::new(
-            axis(KeyCode::KeyA, KeyCode::KeyD),
-            (space as i32 - shift as i32) as f32,
-            -axis(KeyCode::KeyS, KeyCode::KeyW),
-        ),
-        roll: axis(KeyCode::KeyE, KeyCode::KeyQ),
-        run: shift,
-        jump: space,
+    let held = |key: KeyCode| keys.pressed(key) as u8 as f32;
+    let pilot = PilotInput {
+        levels: [
+            held(KeyCode::KeyW),
+            held(KeyCode::KeyS),
+            held(KeyCode::KeyA),
+            held(KeyCode::KeyD),
+            held(KeyCode::Space),
+            held(KeyCode::ShiftLeft).max(held(KeyCode::ShiftRight)),
+            held(KeyCode::KeyQ),
+            held(KeyCode::KeyE),
+        ],
     };
-    sim.avatar_input = player.input(sim.avatar(), axes);
+    sim.avatar_input = player.input(sim.avatar(), pilot);
 }
 
 fn keys(

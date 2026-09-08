@@ -79,9 +79,8 @@ pub fn hud_text(
     } else {
         "click the view to take control\n\n"
     });
-    out.push_str("walk     WASD | Shift run | Space jump | mouse look\n");
-    out.push_str("ghost    WASD thrust | Space/Shift up/down | Q/E roll\n");
-    out.push_str("mouse    LMB water | RMB raft | MMB raise land (Ctrl lowers)\n\n");
+    out.push_str("thrust   W/S fore/aft | A/D left/right | Space/Shift up/down | Q/E roll\n");
+    out.push_str("mouse    look | LMB water | RMB raft | MMB raise land (Ctrl lowers)\n\n");
     out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
         let held = if controls.held_dial == Some(dial) {

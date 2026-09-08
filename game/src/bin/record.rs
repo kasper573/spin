@@ -1,13 +1,15 @@
-//! A first-person video of the avatar on the ring: standing, walking, running, jumping, turning
-//! round and walking against the spin, rendered headless frame by frame into `target/record/`
-//! as PNGs beside an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
+//! A first-person video of the avatar on the ring: each thruster firing on its own for the widget
+//! to show, then walking, a hop, flying in bursts, turning round and walking against the spin,
+//! rendered headless frame by frame into `target/record/` as PNGs beside the thrusters' voices
+//! as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use bevy::prelude::*;
+use game::core::audio::{self, Voice};
+use game::core::avatar::Thruster;
 use game::core::units::Seconds;
-use game::systems::player::{PilotAxes, Player};
+use game::systems::player::{PilotInput, Player};
 use game::systems::sim::Simulation;
 use game::systems::testing;
 
@@ -15,112 +17,86 @@ const FPS: u32 = 30;
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 
-/// A stretch of the script: how long it lasts, the keys held and where the head looks.
+/// A stretch of the script: how long it lasts, the thrusters held and where the head looks.
 struct Phase {
     seconds: f32,
-    axes: PilotAxes,
+    pilot: PilotInput,
     yaw: f64,
     pitch: f64,
     caption: &'static str,
 }
 
 fn script() -> Vec<Phase> {
-    let walk = Vec3::new(0.0, 0.0, -1.0);
-    let phase = |seconds, motion, run, jump, yaw, pitch, caption| Phase {
+    use Thruster::*;
+    let level = 0.3;
+    let pi = std::f64::consts::PI;
+    let phase = |seconds, held: &[Thruster], yaw, pitch, caption| Phase {
         seconds,
-        axes: PilotAxes {
-            motion,
-            roll: 0.0,
-            run,
-            jump,
-        },
+        pilot: PilotInput::firing(held),
         yaw,
         pitch,
         caption,
     };
-    let level = 0.3;
-    let pi = std::f64::consts::PI;
-    vec![
+    let mut phases = vec![
         phase(
             2.0,
-            Vec3::ZERO,
-            false,
-            false,
+            &[],
             0.0,
             1.0,
             "standing still, looking up round the ring",
         ),
-        phase(2.0, Vec3::ZERO, false, false, 0.0, level, "standing still"),
-        phase(4.0, walk, false, false, 0.0, level, "walking spinward (W)"),
+        phase(1.5, &[], 0.0, level, "standing still"),
+    ];
+    let showcase = [
+        (Forward, "forward thruster (W)"),
+        (Back, "back thruster (S)"),
+        (Left, "left thruster (A)"),
+        (Right, "right thruster (D)"),
+        (Up, "up thruster (Space)"),
+        (Down, "down thruster (Shift)"),
+        (RollLeft, "roll left thruster (Q)"),
+        (RollRight, "roll right thruster (E)"),
+    ];
+    for (thruster, caption) in showcase {
+        phases.push(phase(0.8, &[thruster], 0.0, level, caption));
+        let rest = if thruster == Up { 2.6 } else { 1.0 };
+        phases.push(phase(rest, &[], 0.0, level, caption));
+    }
+    phases.extend([
+        phase(4.0, &[Forward], 0.0, level, "walking spinward (W)"),
+        phase(1.5, &[], 0.0, level, "stopping"),
         phase(
-            3.0,
-            walk,
-            true,
-            false,
+            0.8,
+            &[Up],
             0.0,
             level,
-            "running spinward (Shift+W)",
+            "a hop: a burst of up thrust (Space)",
         ),
-        phase(1.5, Vec3::ZERO, false, false, 0.0, level, "stopping"),
-        phase(0.1, Vec3::ZERO, false, true, 0.0, level, "jump (Space)"),
-        phase(1.9, Vec3::ZERO, false, false, 0.0, level, "jump (Space)"),
         phase(
-            0.1,
-            Vec3::ZERO,
-            false,
-            true,
+            2.2,
+            &[],
             0.0,
-            -0.7,
-            "jump, looking down (Space)",
+            -0.5,
+            "a hop: the ground comes back up to meet you",
         ),
         phase(
-            1.9,
-            Vec3::ZERO,
-            false,
-            false,
+            0.4,
+            &[Forward, Up],
             0.0,
-            -0.7,
-            "jump, looking down (Space)",
-        ),
-        phase(1.5, Vec3::ZERO, false, false, pi, level, "turning round"),
-        phase(
-            4.0,
-            walk,
-            false,
-            false,
-            pi,
             level,
-            "walking against the spin (W)",
+            "flying forward in bursts (W + Space)",
         ),
-        phase(
-            1.0,
-            walk,
-            true,
-            false,
-            pi,
-            level,
-            "running against the spin (Shift+W)",
-        ),
-        phase(
-            0.1,
-            walk,
-            true,
-            true,
-            pi,
-            level,
-            "running jump (Shift+W+Space)",
-        ),
-        phase(
-            2.4,
-            Vec3::ZERO,
-            false,
-            false,
-            pi,
-            level,
-            "running jump (Shift+W+Space)",
-        ),
-        phase(1.5, Vec3::ZERO, false, false, pi, level, "standing still"),
-    ]
+        phase(0.2, &[Up], 0.0, level, "flying forward in bursts (Space)"),
+        phase(0.4, &[], 0.0, level, "flying forward in bursts"),
+        phase(0.6, &[Up], 0.0, level, "flying forward in bursts (Space)"),
+        phase(0.4, &[], 0.0, level, "flying forward in bursts"),
+        phase(0.6, &[Up], 0.0, level, "flying forward in bursts (Space)"),
+        phase(3.0, &[], 0.0, level, "landing"),
+        phase(1.5, &[], pi, level, "turning round"),
+        phase(4.0, &[Forward], pi, level, "walking against the spin (W)"),
+        phase(1.5, &[], pi, level, "standing still"),
+    ]);
+    phases
 }
 
 fn main() {
@@ -133,6 +109,7 @@ fn main() {
 
     let frame_time = Seconds(1.0 / FPS as f32);
     let mut srt = String::new();
+    let mut soundtrack = Soundtrack::new(out.join("thrusters.wav"));
     let mut frame = 0u32;
     let mut look = (0.0, 0.0);
     for phase in script() {
@@ -146,9 +123,10 @@ fn main() {
                 player.look.pitch = look.1;
                 let player = *player;
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
-                sim.avatar_input = player.input(sim.avatar(), phase.axes);
+                sim.avatar_input = player.input(sim.avatar(), phase.pilot);
             }
             testing::run(&mut app, frame_time);
+            soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());
             let readout = {
                 let sim = app.world().resource::<Simulation>();
                 let footing = sim.footing();
@@ -187,7 +165,53 @@ fn main() {
         }
     }
     fs::write(out.join("readout.srt"), srt).expect("write readout.srt");
+    soundtrack.finish();
     println!("{frame} frames in {}", out.display());
+}
+
+/// The thrusters' voices mixed down a frame at a time, each fading between the loudness its
+/// level asked for at the last frame and at this one.
+struct Soundtrack {
+    writer: hound::WavWriter<std::io::BufWriter<fs::File>>,
+    voices: Vec<Voice>,
+    gains: [f32; 8],
+}
+
+impl Soundtrack {
+    fn new(path: std::path::PathBuf) -> Soundtrack {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: audio::SAMPLE_RATE.get(),
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        Soundtrack {
+            writer: hound::WavWriter::create(path, spec).expect("create thrusters.wav"),
+            voices: Thruster::ALL.map(Voice::new).to_vec(),
+            gains: [0.0; 8],
+        }
+    }
+
+    fn frame(&mut self, levels: [f64; 8]) {
+        let gains = levels.map(audio::gain);
+        let samples = audio::SAMPLE_RATE.get() / FPS;
+        for k in 0..samples {
+            let t = k as f32 / samples as f32;
+            let mut mix = 0.0;
+            for ((voice, from), to) in self.voices.iter_mut().zip(self.gains).zip(gains) {
+                mix += voice.sample() * (from + (to - from) * t);
+            }
+            let sample = (mix.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            self.writer
+                .write_sample(sample)
+                .expect("write thrusters.wav");
+        }
+        self.gains = gains;
+    }
+
+    fn finish(self) {
+        self.writer.finalize().expect("finish thrusters.wav");
+    }
 }
 
 fn timestamp(seconds: f64) -> String {

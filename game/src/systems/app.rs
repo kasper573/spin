@@ -10,7 +10,8 @@ use crate::systems::drum::{HALF_WIDTH, RADIUS};
 use crate::systems::{
     aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
     persistence::PersistencePlugin, player::PlayerPlugin, rafts::RaftsPlugin, scene::ScenePlugin,
-    settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin, water::WaterPlugin,
+    settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin,
+    thrusters::ThrustersPlugin, water::WaterPlugin,
 };
 
 pub fn build() -> App {
@@ -56,6 +57,7 @@ fn simulation(app: &mut App) {
         WaterPlugin,
         RaftsPlugin,
         PlayerPlugin,
+        ThrustersPlugin,
         AimPlugin,
     ));
 }

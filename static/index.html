@@ -38,6 +38,20 @@
     <canvas id="glcanvas" tabindex="0"></canvas>
     <pre id="error-log" hidden></pre>
     <script>
+      // A browser keeps an AudioContext made before the first click silent; wake every one up on it.
+      (function () {
+        const contexts = [];
+        const Native = window.AudioContext;
+        window.AudioContext = function (...args) {
+          const context = new Native(...args);
+          contexts.push(context);
+          return context;
+        };
+        window.AudioContext.prototype = Native.prototype;
+        const wake = () => contexts.forEach((context) => context.resume());
+        window.addEventListener("pointerdown", wake);
+        window.addEventListener("keydown", wake);
+      })();
       // A Rust panic aborts the wasm and only reaches the console; surface it on the page too.
       (function () {
         const log = document.getElementById("error-log");

@@ -97,16 +97,17 @@ try {
   check("stands on the ground under one g", Math.abs(fresh.weight - 1) < 0.05 && fresh.ground_speed < 0.1, `${fresh.weight} g, ${fresh.ground_speed} m/s`);
   await screenshot("standing");
 
-  await command({ cmd: "walk", x: 0, z: -1, run: false, jump: false, seconds: 4 });
+  await command({ cmd: "thrust", forward: 1, seconds: 4 });
   await command({ cmd: "advance", seconds: 2 });
   const walking = await status();
-  check("walks at walking pace", walking.ground_speed > 1.2 && walking.ground_speed < 1.8, `${walking.ground_speed} m/s`);
+  check("forward thrust walks at walking pace", walking.ground_speed > 1.2 && walking.ground_speed < 1.8, `${walking.ground_speed} m/s`);
+  check("the forward thruster reads full", walking.thrust[0] === 1 && walking.thrust.slice(1).every((l) => l === 0), JSON.stringify(walking.thrust));
   await command({ cmd: "advance", seconds: 3 });
-  await command({ cmd: "walk", x: 0, z: 0, run: false, jump: true, seconds: 0.1 });
-  await command({ cmd: "advance", seconds: 0.3 });
+  await command({ cmd: "thrust", up: 1, seconds: 0.8 });
+  await command({ cmd: "advance", seconds: 1.0 });
   const jumping = await status();
-  check("a jump leaves the ground", jumping.airborne && jumping.weight === 0, JSON.stringify({ airborne: jumping.airborne, weight: jumping.weight }));
-  await command({ cmd: "advance", seconds: 2 });
+  check("up thrust lifts off the ground", jumping.airborne && jumping.weight === 0, JSON.stringify({ airborne: jumping.airborne, weight: jumping.weight }));
+  await command({ cmd: "advance", seconds: 3 });
   const landed = await status();
   check("and lands again", !landed.airborne && Math.abs(landed.weight - 1) < 0.1 && landed.ground_speed < 0.2, JSON.stringify({ airborne: landed.airborne, weight: landed.weight, speed: landed.ground_speed }));
 

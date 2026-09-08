@@ -8,7 +8,7 @@
 //! enough that the avatar standing on it weighs what it would on Earth, and nothing else.
 use bevy::prelude::*;
 
-use crate::core::avatar::{self, AvatarInput};
+use crate::core::avatar::{self, AvatarInput, Thrusters};
 use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_BODIES, MAX_SUBSTEPS_PER_FRAME,
     PARTICLE_MASS, REST_DENSITY,
@@ -71,6 +71,8 @@ pub struct Simulation {
     pub drum: Drum,
     /// What the pilot asks of the avatar during the coming substeps.
     pub avatar_input: AvatarInput,
+    /// How hard each of the avatar's thrusters is firing.
+    pub thrusters: Thrusters,
     pub params: FluidParams,
     pub body_params: BodyParams,
     /// Simulated time since the last reset.
@@ -97,6 +99,7 @@ impl Default for Simulation {
         Simulation {
             drum,
             avatar_input: AvatarInput::default(),
+            thrusters: Thrusters::default(),
             params: FluidParams::default(),
             body_params: BodyParams::default(),
             time: Seconds(0.0),
@@ -188,6 +191,7 @@ impl Simulation {
             self.drum.advance(dt as f64);
             avatar::drive(
                 &mut self.bodies[0],
+                &mut self.thrusters,
                 &self.avatar_input,
                 &self.drum,
                 dt as f64,

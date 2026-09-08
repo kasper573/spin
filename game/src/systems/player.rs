@@ -1,9 +1,9 @@
-//! The viewer as the avatar in the simulation: the camera rides the hull, the pilot's keys become
-//! walking, running and jumping (or thrust and roll for a ghost), and Enter decides whether the
-//! hull is solid or a ghost.
+//! The viewer as the avatar in the simulation: the camera rides the hull and the pilot's keys fire
+//! its thrusters in the head's level frame, so that thrusting forward follows where the head is
+//! turned but stays level with the hull.
 use bevy::prelude::*;
 
-use crate::core::avatar::{self, AvatarInput, Look, ROLL_RATE};
+use crate::core::avatar::{self, AvatarInput, Look, Thruster};
 use crate::core::math::{Quatd, Vec3d};
 use crate::core::rigid::Body;
 use crate::systems::sim::{SimSet, Simulation};
@@ -17,14 +17,21 @@ pub struct Player {
     pub look: Look,
 }
 
-/// Requested motion in the head's level frame (x right, y up, z backward), each axis in [-1, 1],
-/// plus a roll about the view axis and the run and jump keys.
+/// How hard the pilot asks each thruster to fire, 0 to 1, in the order of `Thruster::ALL`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PilotAxes {
-    pub motion: Vec3,
-    pub roll: f32,
-    pub run: bool,
-    pub jump: bool,
+pub struct PilotInput {
+    pub levels: [f32; 8],
+}
+
+impl PilotInput {
+    /// These thrusters at full, the rest idle.
+    pub fn firing(thrusters: &[Thruster]) -> PilotInput {
+        let mut input = PilotInput::default();
+        for thruster in thrusters {
+            input.levels[*thruster as usize] = 1.0;
+        }
+        input
+    }
 }
 
 impl Player {
@@ -33,19 +40,20 @@ impl Player {
         self.look.turn(delta.x as f64, delta.y as f64);
     }
 
-    /// The avatar's input for these pilot axes, given the hull's attitude: motion follows where
-    /// the head is turned but stays level with the hull, so looking down does not slow a walk.
-    pub fn input(&self, hull: &Body, axes: PilotAxes) -> AvatarInput {
-        let level = quat(hull.q) * Quat::from_rotation_y(self.look.yaw as f32);
-        let motion = level * axes.motion.clamp_length_max(1.0);
-        let spin =
-            self.view_rotation(hull) * Vec3::Z * (axes.roll.clamp(-1.0, 1.0) * ROLL_RATE as f32);
+    /// The avatar's input for what the pilot holds, given the hull's attitude.
+    pub fn input(&self, hull: &Body, pilot: PilotInput) -> AvatarInput {
+        let level = self.level_frame(hull);
+        let axis = |v: Vec3| (level * v).as_dvec3().to_array();
         AvatarInput {
-            motion: motion.as_dvec3().to_array(),
-            run: axes.run,
-            jump: axes.jump,
-            spin: spin.as_dvec3().to_array(),
+            frame: [axis(Vec3::X), axis(Vec3::Y), axis(Vec3::Z)],
+            levels: pilot.levels.map(|l| l as f64),
         }
+    }
+
+    /// The frame the thrusters act in: the hull's, turned to where the head looks, but not
+    /// tilted with it, so looking down does not slow a walk.
+    pub fn level_frame(&self, hull: &Body) -> Quat {
+        quat(hull.q) * Quat::from_rotation_y(self.look.yaw as f32)
     }
 
     /// Where the eye is and which way it faces.
@@ -62,9 +70,7 @@ impl Player {
     }
 
     fn view_rotation(&self, hull: &Body) -> Quat {
-        quat(hull.q)
-            * Quat::from_rotation_y(self.look.yaw as f32)
-            * Quat::from_rotation_x(self.look.pitch as f32)
+        self.level_frame(hull) * Quat::from_rotation_x(self.look.pitch as f32)
     }
 }
 

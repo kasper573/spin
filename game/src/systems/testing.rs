@@ -17,7 +17,7 @@ use crate::systems::app;
 use crate::systems::controls::pilot;
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
-use crate::systems::player::{PilotAxes, Player, PlayerCamera};
+use crate::systems::player::{PilotInput, Player, PlayerCamera};
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -56,13 +56,24 @@ pub enum ScriptCommand {
         look_y: f32,
         look_z: f32,
     },
-    /// Hold the movement keys for a while: `x` right and `z` backward in the head's level frame,
-    /// each in [-1, 1].
-    Walk {
-        x: f32,
-        z: f32,
-        run: bool,
-        jump: bool,
+    /// Hold the thrusters at these levels (0 to 1, idle when left out) for a while.
+    Thrust {
+        #[serde(default)]
+        forward: f32,
+        #[serde(default)]
+        back: f32,
+        #[serde(default)]
+        left: f32,
+        #[serde(default)]
+        right: f32,
+        #[serde(default)]
+        up: f32,
+        #[serde(default)]
+        down: f32,
+        #[serde(default)]
+        roll_left: f32,
+        #[serde(default)]
+        roll_right: f32,
         seconds: f32,
     },
     /// Turn the head to an absolute yaw and pitch relative to the hull.
@@ -99,12 +110,14 @@ pub struct ScriptStatus {
     /// The avatar's speed over the ground it stands on, or through the air.
     pub ground_speed: f32,
     pub airborne: bool,
+    /// How hard each thruster is firing, in the order of `Thruster::ALL`.
+    pub thrust: [f32; 8],
 }
 
-/// Movement keys a script holds down until a simulated time.
+/// Thruster keys a script holds down until a simulated time.
 #[derive(Resource, Default)]
-struct ScriptedWalk {
-    axes: PilotAxes,
+struct ScriptedThrust {
+    pilot: PilotInput,
     until: Seconds,
 }
 
@@ -112,7 +125,7 @@ pub struct TestingPlugin;
 
 impl Plugin for TestingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ScriptedWalk>()
+        app.init_resource::<ScriptedThrust>()
             .add_systems(
                 Update,
                 (drain, steer).chain().in_set(SimSet::Command).after(pilot),
@@ -185,20 +198,21 @@ fn execute(world: &mut World, command: ScriptCommand) {
                 );
             });
         }
-        ScriptCommand::Walk {
-            x,
-            z,
-            run,
-            jump,
+        ScriptCommand::Thrust {
+            forward,
+            back,
+            left,
+            right,
+            up,
+            down,
+            roll_left,
+            roll_right,
             seconds,
         } => {
             let now = world.resource::<Simulation>().time;
-            *world.resource_mut::<ScriptedWalk>() = ScriptedWalk {
-                axes: PilotAxes {
-                    motion: Vec3::new(x, 0.0, z),
-                    roll: 0.0,
-                    run,
-                    jump,
+            *world.resource_mut::<ScriptedThrust>() = ScriptedThrust {
+                pilot: PilotInput {
+                    levels: [forward, back, left, right, up, down, roll_left, roll_right],
                 },
                 until: Seconds(now.0 + seconds),
             };
@@ -218,9 +232,9 @@ fn execute(world: &mut World, command: ScriptCommand) {
 }
 
 /// Keep the scripted keys held until their time is up.
-fn steer(walk: Res<ScriptedWalk>, player: Res<Player>, mut sim: ResMut<Simulation>) {
-    if sim.time < walk.until {
-        sim.avatar_input = player.input(sim.avatar(), walk.axes);
+fn steer(thrust: Res<ScriptedThrust>, player: Res<Player>, mut sim: ResMut<Simulation>) {
+    if sim.time < thrust.until {
+        sim.avatar_input = player.input(sim.avatar(), thrust.pilot);
     }
 }
 
@@ -256,6 +270,7 @@ fn publish(
         weight: footing.weight,
         ground_speed: footing.ground_speed,
         airborne: footing.airborne,
+        thrust: sim.thrusters.levels().map(|l| l as f32),
     };
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);

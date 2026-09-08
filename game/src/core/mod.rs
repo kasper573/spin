@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod avatar;
 pub mod codec;
 pub mod fluid;

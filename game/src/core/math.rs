@@ -95,6 +95,7 @@ pub fn basis_from_normal(n: &Vec3d) -> Quatd {
 }
 
 /// Small deterministic RNG (xorshift64*), uniform in [0, 1).
+#[derive(Clone, Debug)]
 pub struct Rng(u64);
 
 impl Rng {
