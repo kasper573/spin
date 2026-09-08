@@ -1,4 +1,5 @@
 //! Automation hooks: scripts push JSON commands through the platform and read back a status line.
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,8 @@ pub enum ScriptCommand {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScriptStatus {
+    /// Frames rendered so far; a command queued during one frame has run by the second after it.
+    pub frame: u32,
     pub particles: usize,
     pub litres: f32,
     pub rafts: usize,
@@ -140,8 +143,9 @@ fn run(world: &mut World, command: ScriptCommand) {
     }
 }
 
-fn publish(sim: Res<Simulation>, fps: Res<FrameRate>) {
+fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
     let status = ScriptStatus {
+        frame: frame.0,
         particles: sim.fluid.len(),
         litres: sim.water().0,
         rafts: sim.rafts.len(),

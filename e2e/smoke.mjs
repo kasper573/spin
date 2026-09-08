@@ -42,7 +42,13 @@ const check = (name, ok, detail = "") => {
   if (!ok) failures++;
 };
 const status = async () => JSON.parse(await evaluate("window.spin_status()"));
-const command = (cmd) => evaluate(`window.spin_command(${JSON.stringify(JSON.stringify(cmd))})`);
+// Commands run on a later frame and the status is published at the end of each frame, so wait
+// for two more frames before reading anything back.
+const command = async (cmd) => {
+  const before = (await status()).frame;
+  await evaluate(`window.spin_command(${JSON.stringify(JSON.stringify(cmd))})`);
+  while ((await status()).frame < before + 2) await sleep(50);
+};
 const screenshot = async (name) => {
   const r = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(out, `${name}.png`), Buffer.from(r.data, "base64"));
@@ -60,7 +66,6 @@ try {
   await evaluate("localStorage.clear(); 1").catch(() => {});
   await send("Page.navigate", { url });
   check("app starts", await waitForApp());
-  await sleep(1500);
   const fresh = await status();
   check("starts empty", fresh.particles === 0 && fresh.rafts === 0, JSON.stringify(fresh));
 
@@ -76,7 +81,6 @@ try {
     await command({ cmd: "raft", x: Math.cos(a) * 3.1, y: 0, z: Math.sin(a) * 3.1, nx: -Math.cos(a), ny: 0, nz: -Math.sin(a) });
   }
   await command({ cmd: "advance", seconds: 8 });
-  await sleep(1500);
   const filled = await status();
   check("water injected", filled.particles === 1800, `${filled.particles} particles, ${filled.litres} L`);
   check("rafts placed", filled.rafts === 3, `${filled.rafts}`);
@@ -86,20 +90,16 @@ try {
 
   await command({ cmd: "sculpt", phi: 0.8, y: 0, radius: 1.2, amount: 1.0 });
   await command({ cmd: "advance", seconds: 3 });
-  await sleep(800);
   const land = await status();
   check("landscape raised", land.landscape_max > 0.5, `${land.landscape_max}`);
   await command({ cmd: "spin", value: 0 });
   await command({ cmd: "advance", seconds: 4 });
-  await sleep(1500);
   const still = await status();
   check("drum stopped", still.spin === 0, `${still.spin}`);
   const a = 0.8 - still.angle;
   await command({ cmd: "camera", x: Math.cos(a) * 0.8, y: 0.9, z: Math.sin(a) * 0.8, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
-  await sleep(800);
   await screenshot("landscape-inside");
   await command({ cmd: "camera", x: Math.cos(a) * 5.5, y: 2.5, z: Math.sin(a) * 5.5, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
-  await sleep(800);
   await screenshot("landscape-outside");
   await command({ cmd: "camera", x: 4.9, y: 5.5, z: 7.2, look_x: 0, look_y: 0, look_z: 0 });
   await command({ cmd: "spin", value: 1.6 });
@@ -110,10 +110,8 @@ try {
   check("frames render", live.fps > 1, `${live.fps.toFixed(1)} fps, sim ${(live.sim_rate * 100).toFixed(0)}%`);
 
   await command({ cmd: "save" });
-  await sleep(300);
   await send("Page.reload");
   check("app restarts", await waitForApp());
-  await sleep(1500);
   const restored = await status();
   check("state persists across reload", restored.particles === live.particles && restored.rafts === 3 && restored.landscape_max > 0.5 && Math.abs(restored.spin - 1.6) < 1e-3, JSON.stringify({ particles: restored.particles, rafts: restored.rafts, land: restored.landscape_max, spin: restored.spin }));
   await screenshot("restored");
