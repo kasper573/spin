@@ -33,7 +33,6 @@ pub struct Simulation {
     pub rafts: Vec<Body>,
     pub raft_shape: BoxShape,
     pub params: FluidParams,
-    pub paused: bool,
     /// Simulated time since the last reset.
     pub time: Seconds,
     /// Fraction of real time the simulation keeps up with (1 = full speed).
@@ -53,7 +52,6 @@ impl Default for Simulation {
             rafts: Vec::new(),
             raft_shape: rafts::shape(),
             params: FluidParams::default(),
-            paused: false,
             time: Seconds(0.0),
             rate: 1.0,
             accumulator: 0.0,
@@ -78,10 +76,6 @@ impl Simulation {
 
     /// Advance by one frame of real time, within the frame budget.
     pub fn advance(&mut self, real: Seconds) {
-        if self.paused {
-            self.accumulator = 0.0;
-            return;
-        }
         let dt = SUBSTEP_RATE.period().0;
         self.accumulator = (self.accumulator + real.0).min(MAX_FRAME_TIME.0);
         let start = Instant::now();
@@ -123,35 +117,28 @@ impl Simulation {
         Litres(self.fluid.len() as f32 * PARTICLE_MASS / REST_DENSITY * 1000.0)
     }
 
-    /// Add up to `count` particles around a point inside the drum.
-    pub fn inject(&mut self, centre: [f32; 3], count: u32, match_wheel: bool) -> u32 {
+    /// Add up to `count` particles around a point inside the drum, moving with the glass.
+    pub fn inject(&mut self, centre: [f32; 3], count: u32) -> u32 {
         let drum = &self.drum;
         self.fluid.inject(
             centre,
             |p| {
-                if match_wheel {
-                    drum.wall_velocity([p[0] as f64, p[1] as f64, p[2] as f64])
-                        .map(|v| v as f32)
-                } else {
-                    [0.0; 3]
-                }
+                drum.wall_velocity([p[0] as f64, p[1] as f64, p[2] as f64])
+                    .map(|v| v as f32)
             },
             count,
             |p| drum.place_inside(p),
         )
     }
 
-    /// Spawn a raft centred at `p`, lying flat against a surface with inward normal `n`.
-    pub fn spawn_raft(&mut self, p: [f64; 3], n: [f64; 3], match_wheel: bool) -> bool {
+    /// Spawn a raft centred at `p`, lying flat against a surface with inward normal `n` and
+    /// moving with the glass.
+    pub fn spawn_raft(&mut self, p: [f64; 3], n: [f64; 3]) -> bool {
         if self.rafts.len() >= crate::core::fluid::MAX_BODIES {
             return false;
         }
         let q = basis_from_normal(&n);
-        let (v, w) = if match_wheel {
-            (self.drum.wall_velocity(p), self.drum.angular_velocity())
-        } else {
-            ([0.0; 3], [0.0; 3])
-        };
+        let (v, w) = (self.drum.wall_velocity(p), self.drum.angular_velocity());
         self.rafts.push(Body::new(&self.raft_shape, p, q, v, w));
         true
     }

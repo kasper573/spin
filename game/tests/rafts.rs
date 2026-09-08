@@ -10,7 +10,6 @@ fn fill(sim: &mut Simulation, spin: f32) {
         sim.inject(
             [a.cos() * 2.7, (k % 3) as f32 * 0.3 - 0.3, a.sin() * 2.7],
             150,
-            true,
         );
         sim.advance_exact(Seconds(0.2));
     }
@@ -24,7 +23,7 @@ fn rafts_float_and_ride_with_the_glass() {
     for k in 0..3 {
         let a = k as f64 * 2.0;
         let n = [-a.cos(), 0.0, -a.sin()];
-        assert!(sim.spawn_raft([a.cos() * 3.1, 0.0, a.sin() * 3.1], n, true));
+        assert!(sim.spawn_raft([a.cos() * 3.1, 0.0, a.sin() * 3.1], n));
     }
     sim.advance_exact(Seconds(10.0));
     for body in &sim.rafts {
@@ -52,7 +51,6 @@ fn raft_count_is_capped() {
         if sim.spawn_raft(
             [a.cos() * 3.0, 0.0, a.sin() * 3.0],
             [-a.cos(), 0.0, -a.sin()],
-            false,
         ) {
             spawned += 1;
         }

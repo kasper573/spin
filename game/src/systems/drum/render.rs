@@ -94,8 +94,9 @@ fn spawn(
     );
     let strut = meshes.add(Cuboid::new(0.07, 2.0 * HALF_WIDTH + 0.16, 0.07));
     let terrain_material = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.47, 0.34),
         perceptual_roughness: 0.95,
+        double_sided: true,
+        cull_mode: None,
         ..default()
     });
     commands
@@ -173,18 +174,20 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
     let dy = 2.0 * HALF_WIDTH / (ROWS as f32 - 1.0);
     let rows = ROWS + 2;
     let mut positions = Vec::with_capacity(SEGMENTS * rows);
+    let mut colours = Vec::with_capacity(SEGMENTS * rows);
     for i in 0..SEGMENTS {
         let phi = i as f32 * dphi;
         let (s, c) = phi.sin_cos();
-        let push = |positions: &mut Vec<[f32; 3]>, r: f32, y: f32| {
+        let mut push = |height: f32, y: f32| {
+            let r = RADIUS - height;
             positions.push([r * c, y, r * s]);
+            colours.push(ground_colour(height));
         };
-        push(&mut positions, RADIUS, -HALF_WIDTH);
+        push(0.0, -HALF_WIDTH);
         for j in 0..ROWS {
-            let r = RADIUS - landscape.height_at(i, j);
-            push(&mut positions, r, -HALF_WIDTH + j as f32 * dy);
+            push(landscape.height_at(i, j), -HALF_WIDTH + j as f32 * dy);
         }
-        push(&mut positions, RADIUS, HALF_WIDTH);
+        push(0.0, HALF_WIDTH);
     }
     let raised = |i: usize, j: usize| {
         let row = j.clamp(1, ROWS) - 1;
@@ -201,7 +204,7 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
             let b = (i1 * rows + j) as u32;
             let c = (i1 * rows + j + 1) as u32;
             let d = (i * rows + j + 1) as u32;
-            indices.extend_from_slice(&[a, c, b, a, d, c]);
+            indices.extend_from_slice(&[a, b, c, a, c, d]);
         }
     }
     let mut mesh = Mesh::new(
@@ -209,7 +212,23 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
     mesh
+}
+
+/// Bare dirt at the glass, grass once the ground has risen a little.
+fn ground_colour(height: f32) -> [f32; 4] {
+    let dirt = LinearRgba::from(Color::srgb(0.45, 0.32, 0.2));
+    let grass = LinearRgba::from(Color::srgb(0.32, 0.58, 0.22));
+    let t = ((height - 0.05) / 0.45).clamp(0.0, 1.0);
+    let t = t * t * (3.0 - 2.0 * t);
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    [
+        mix(dirt.red, grass.red),
+        mix(dirt.green, grass.green),
+        mix(dirt.blue, grass.blue),
+        1.0,
+    ]
 }

@@ -11,15 +11,12 @@ use crate::systems::sim::{SimSet, Simulation};
 pub struct Settings {
     pub spin: RadiansPerSecond,
     pub flow: LitresPerSecond,
-    /// New water and rafts start moving with the glass.
-    pub match_wheel: bool,
     pub viscosity: f32,
     pub wall_friction: f32,
     pub raft_friction: f32,
     pub air: bool,
     pub brush_size: Metres,
     pub brush_rate: MetresPerSecond,
-    pub paused: bool,
 }
 
 impl Default for Settings {
@@ -27,14 +24,12 @@ impl Default for Settings {
         Settings {
             spin: RadiansPerSecond(0.0),
             flow: LitresPerSecond(500.0),
-            match_wheel: true,
             viscosity: 0.15,
             wall_friction: 0.5,
             raft_friction: 0.45,
             air: true,
             brush_size: Metres(0.6),
             brush_rate: MetresPerSecond(0.8),
-            paused: false,
         }
     }
 }
@@ -187,51 +182,39 @@ impl Dial {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Toggle {
-    MatchWheel,
     Air,
-    Paused,
 }
 
 impl Toggle {
-    pub const ALL: [Toggle; 3] = [Toggle::MatchWheel, Toggle::Air, Toggle::Paused];
+    pub const ALL: [Toggle; 1] = [Toggle::Air];
 
     pub fn key(self) -> KeyCode {
         match self {
-            Toggle::MatchWheel => KeyCode::KeyT,
             Toggle::Air => KeyCode::KeyG,
-            Toggle::Paused => KeyCode::KeyP,
         }
     }
 
     pub fn key_label(self) -> &'static str {
         match self {
-            Toggle::MatchWheel => "T",
             Toggle::Air => "G",
-            Toggle::Paused => "P",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Toggle::MatchWheel => "match wheel",
             Toggle::Air => "air drag",
-            Toggle::Paused => "paused",
         }
     }
 
     pub fn get(self, s: &Settings) -> bool {
         match self {
-            Toggle::MatchWheel => s.match_wheel,
             Toggle::Air => s.air,
-            Toggle::Paused => s.paused,
         }
     }
 
     pub fn flip(self, s: &mut Settings) {
         match self {
-            Toggle::MatchWheel => s.match_wheel = !s.match_wheel,
             Toggle::Air => s.air = !s.air,
-            Toggle::Paused => s.paused = !s.paused,
         }
     }
 }
@@ -255,5 +238,4 @@ fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
     sim.params.wall_friction = settings.wall_friction;
     sim.params.body_friction = settings.raft_friction as f64;
     sim.params.air = settings.air;
-    sim.paused = settings.paused;
 }

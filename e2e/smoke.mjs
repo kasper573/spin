@@ -89,7 +89,21 @@ try {
   await sleep(800);
   const land = await status();
   check("landscape raised", land.landscape_max > 0.5, `${land.landscape_max}`);
-  await screenshot("landscape");
+  await command({ cmd: "spin", value: 0 });
+  await command({ cmd: "advance", seconds: 4 });
+  await sleep(1500);
+  const still = await status();
+  check("drum stopped", still.spin === 0, `${still.spin}`);
+  const a = 0.8 - still.angle;
+  await command({ cmd: "camera", x: Math.cos(a) * 0.8, y: 0.9, z: Math.sin(a) * 0.8, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
+  await sleep(800);
+  await screenshot("landscape-inside");
+  await command({ cmd: "camera", x: Math.cos(a) * 5.5, y: 2.5, z: Math.sin(a) * 5.5, look_x: Math.cos(a) * 3.0, look_y: 0, look_z: Math.sin(a) * 3.0 });
+  await sleep(800);
+  await screenshot("landscape-outside");
+  await command({ cmd: "camera", x: 4.9, y: 5.5, z: 7.2, look_x: 0, look_y: 0, look_z: 0 });
+  await command({ cmd: "spin", value: 1.6 });
+  await command({ cmd: "advance", seconds: 4 });
 
   await sleep(2000);
   const live = await status();

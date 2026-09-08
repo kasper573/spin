@@ -22,7 +22,7 @@ impl Plugin for ScenePlugin {
             .insert_resource(ClearColor(SPACE))
             .insert_resource(GlobalAmbientLight {
                 color: Color::srgb(0.75, 0.82, 1.0),
-                brightness: 160.0,
+                brightness: 700.0,
                 ..default()
             })
             .add_systems(Startup, spawn);
@@ -67,12 +67,12 @@ fn spawn(
         Tonemapping::None,
         Msaa::Sample4,
         Transform::from_xyz(4.9, 5.5, 7.2).looking_at(Vec3::ZERO, Vec3::Y),
-        FlyCamera::default(),
+        FlyCamera,
     ));
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.96, 0.88),
-            illuminance: 1400.0,
+            illuminance: 3200.0,
             ..default()
         },
         Transform::default().looking_to(-SUN_DIRECTION, Vec3::Y),
@@ -80,7 +80,7 @@ fn spawn(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.42, 0.55, 1.0),
-            illuminance: 450.0,
+            illuminance: 1100.0,
             ..default()
         },
         Transform::default().looking_to(-FILL_DIRECTION, Vec3::Y),

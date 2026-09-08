@@ -11,7 +11,7 @@ fn water_stays_inside_the_drum() {
     let mut sim = Simulation::default();
     sim.drum.target_spin = RadiansPerSecond(3.0);
     sim.drum.spin = RadiansPerSecond(3.0);
-    sim.inject([2.0, 0.0, 0.0], 800, false);
+    sim.inject([2.0, 0.0, 0.0], 800);
     sim.advance_exact(Seconds(2.0));
     assert_eq!(sim.fluid.len(), 800);
     for p in sim.fluid.particles() {
@@ -26,7 +26,7 @@ fn spinning_drum_throws_water_onto_the_glass() {
     let mut sim = Simulation::default();
     sim.drum.target_spin = RadiansPerSecond(2.0);
     sim.drum.spin = RadiansPerSecond(2.0);
-    sim.inject([1.5, 0.0, 0.5], 600, true);
+    sim.inject([1.5, 0.0, 0.5], 600);
     sim.advance_exact(Seconds(6.0));
     let mean_radius = sim
         .fluid
@@ -40,7 +40,7 @@ fn spinning_drum_throws_water_onto_the_glass() {
 #[test]
 fn injection_counts_litres() {
     let mut sim = Simulation::default();
-    let added = sim.inject([0.0, 0.0, 0.0], 250, false);
+    let added = sim.inject([0.0, 0.0, 0.0], 250);
     assert_eq!(added, 250);
     assert!((sim.water().0 - 250.0).abs() < 1e-3);
     sim.fluid.clear();
@@ -52,7 +52,7 @@ fn reset_keeps_parameters_and_target_spin() {
     let mut sim = Simulation::default();
     sim.params.viscosity = 0.7;
     sim.drum.target_spin = RadiansPerSecond(1.0);
-    sim.inject([0.0, 0.0, 0.0], 10, false);
+    sim.inject([0.0, 0.0, 0.0], 10);
     sim.reset();
     assert!(sim.fluid.is_empty());
     assert_eq!(sim.params.viscosity, 0.7);

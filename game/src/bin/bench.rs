@@ -17,14 +17,13 @@ fn main() {
                 a.sin() * 2.6,
             ],
             200,
-            true,
         );
         sim.advance_exact(Seconds(0.2));
     }
     for k in 0..4 {
         let a = k as f64 * 1.3;
         let n = [-a.cos(), 0.0, -a.sin()];
-        sim.spawn_raft([a.cos() * 3.2, 0.0, a.sin() * 3.2], n, true);
+        sim.spawn_raft([a.cos() * 3.2, 0.0, a.sin() * 3.2], n);
     }
     sim.advance_exact(Seconds(3.0));
 

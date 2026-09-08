@@ -2,6 +2,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::fly_camera::FlyCamera;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::hud::FrameRate;
@@ -34,6 +35,14 @@ pub enum ScriptCommand {
     },
     Spin {
         value: f32,
+    },
+    Camera {
+        x: f32,
+        y: f32,
+        z: f32,
+        look_x: f32,
+        look_y: f32,
+        look_z: f32,
     },
     Advance {
         seconds: f32,
@@ -79,10 +88,7 @@ fn drain(world: &mut World) {
 fn run(world: &mut World, command: ScriptCommand) {
     match command {
         ScriptCommand::Inject { x, y, z, count } => {
-            let match_wheel = world.resource::<Settings>().match_wheel;
-            world
-                .resource_mut::<Simulation>()
-                .inject([x, y, z], count, match_wheel);
+            world.resource_mut::<Simulation>().inject([x, y, z], count);
         }
         ScriptCommand::Raft {
             x,
@@ -92,10 +98,9 @@ fn run(world: &mut World, command: ScriptCommand) {
             ny,
             nz,
         } => {
-            let match_wheel = world.resource::<Settings>().match_wheel;
             world
                 .resource_mut::<Simulation>()
-                .spawn_raft([x, y, z], [nx, ny, nz], match_wheel);
+                .spawn_raft([x, y, z], [nx, ny, nz]);
         }
         ScriptCommand::Sculpt {
             phi,
@@ -110,6 +115,22 @@ fn run(world: &mut World, command: ScriptCommand) {
         ScriptCommand::Spin { value } => {
             world.resource_mut::<Settings>().spin = RadiansPerSecond(value);
             world.resource_mut::<Simulation>().drum.target_spin = RadiansPerSecond(value);
+        }
+        ScriptCommand::Camera {
+            x,
+            y,
+            z,
+            look_x,
+            look_y,
+            look_z,
+        } => {
+            for mut camera in world
+                .query_filtered::<&mut Transform, With<FlyCamera>>()
+                .iter_mut(world)
+            {
+                *camera = Transform::from_xyz(x, y, z)
+                    .looking_at(Vec3::new(look_x, look_y, look_z), Vec3::Y);
+            }
         }
         ScriptCommand::Advance { seconds } => world
             .resource_mut::<Simulation>()

@@ -7,7 +7,7 @@ use crate::core::codec;
 use crate::core::fluid::{PARTICLE_SPACING, Particle};
 use crate::core::fly_camera::FlyCamera;
 use crate::core::rigid::Body;
-use crate::core::units::{MetresPerSecond, Radians, RadiansPerSecond, Seconds};
+use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 use crate::core::web;
 use crate::systems::settings::Settings;
@@ -37,7 +37,6 @@ pub struct Snapshot {
 pub struct CameraPose {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
-    pub speed: MetresPerSecond,
 }
 
 pub struct PersistencePlugin;
@@ -53,18 +52,12 @@ impl Plugin for PersistencePlugin {
     }
 }
 
-pub fn snapshot(
-    settings: &Settings,
-    sim: &Simulation,
-    camera: &Transform,
-    fly: &FlyCamera,
-) -> Snapshot {
+pub fn snapshot(settings: &Settings, sim: &Simulation, camera: &Transform) -> Snapshot {
     Snapshot {
         settings: settings.clone(),
         camera: CameraPose {
             position: camera.translation.to_array(),
             rotation: camera.rotation.to_array(),
-            speed: fly.speed,
         },
         spin: sim.drum.spin,
         angle: sim.drum.angle,
@@ -127,24 +120,21 @@ pub fn apply(snapshot: &Snapshot, settings: &mut Settings, sim: &mut Simulation)
     snapshot.camera
 }
 
-pub fn pose_camera(pose: &CameraPose, camera: &mut Transform, fly: &mut FlyCamera) {
+pub fn pose_camera(pose: &CameraPose, camera: &mut Transform) {
     let position = Vec3::from_array(pose.position);
     let rotation = Quat::from_array(pose.rotation);
     if position.is_finite() && rotation.is_finite() && rotation.length() > 0.5 {
         camera.translation = position;
         camera.rotation = rotation.normalize();
     }
-    if pose.speed.0.is_finite() {
-        fly.set_speed(pose.speed);
-    }
 }
 
 pub fn save_now(world: &mut World) {
-    let Some((camera, fly)) = world
-        .query::<(&Transform, &FlyCamera)>()
+    let Some(camera) = world
+        .query_filtered::<&Transform, With<FlyCamera>>()
         .iter(world)
         .next()
-        .map(|(t, f)| (*t, *f))
+        .copied()
     else {
         return;
     };
@@ -152,7 +142,6 @@ pub fn save_now(world: &mut World) {
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
         &camera,
-        &fly,
     );
     if let Ok(text) = serde_json::to_string(&snapshot) {
         web::storage_save(KEY, &text);
@@ -172,11 +161,11 @@ fn restore(world: &mut World) {
         world
             .resource_scope(|_, mut sim: Mut<Simulation>| apply(&snapshot, &mut settings, &mut sim))
     });
-    for (mut camera, mut fly) in world
-        .query::<(&mut Transform, &mut FlyCamera)>()
+    for mut camera in world
+        .query_filtered::<&mut Transform, With<FlyCamera>>()
         .iter_mut(world)
     {
-        pose_camera(&pose, &mut camera, &mut fly);
+        pose_camera(&pose, &mut camera);
     }
 }
 

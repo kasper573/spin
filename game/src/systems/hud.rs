@@ -1,7 +1,6 @@
 //! Text-only overlay: every key binding with its current value, the crosshair, and live readouts.
 use bevy::prelude::*;
 
-use crate::core::fly_camera::FlyCamera;
 use crate::systems::controls::{ClearAction, Controls};
 use crate::systems::settings::{Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -11,14 +10,18 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameRate>()
+            .init_resource::<FrameTime>()
             .add_systems(Startup, spawn)
             .add_systems(Update, refresh.in_set(SimSet::Observe));
     }
 }
 
-/// Smoothed frames per second.
+/// Frames per second from a smoothed frame time.
 #[derive(Resource, Default)]
 pub struct FrameRate(pub f32);
+
+#[derive(Resource, Default)]
+struct FrameTime(f32);
 
 #[derive(Component)]
 struct HudText;
@@ -61,13 +64,7 @@ fn spawn(mut commands: Commands) {
         });
 }
 
-pub fn hud_text(
-    settings: &Settings,
-    sim: &Simulation,
-    controls: &Controls,
-    fly_speed: f32,
-    fps: f32,
-) -> String {
+pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps: f32) -> String {
     let mut out = String::new();
     out.push_str("SPIN GRAVITY WHEEL\n");
     out.push_str(if controls.active {
@@ -75,19 +72,23 @@ pub fn hud_text(
     } else {
         "click the view to take control\n\n"
     });
-    out.push_str(&format!(
-        "fly      WASD move · Space/Shift up/down · Q/E roll · wheel speed {fly_speed:.1} m/s\n"
-    ));
+    out.push_str("fly      WASD move · Space/Shift up/down · Q/E roll\n");
     out.push_str("mouse    LMB water · RMB raft · MMB raise land (Ctrl lowers)\n\n");
+    out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
+        let held = if controls.held_dial == Some(dial) {
+            '>'
+        } else {
+            ' '
+        };
         out.push_str(&format!(
-            "{:<8} {:<15} {}\n",
+            "{held}{:<7} {:<15} {}\n",
             dial.key_label(),
             dial.label(),
             dial.value_text(settings)
         ));
     }
-    out.push_str("         hold Ctrl with F1-F7 to decrease\n\n");
+    out.push('\n');
     for toggle in Toggle::ALL {
         out.push_str(&format!(
             "{:<8} {:<15} {}\n",
@@ -113,19 +114,19 @@ pub fn hud_text(
 
 fn refresh(
     time: Res<Time>,
+    mut frame_time: ResMut<FrameTime>,
     mut rate: ResMut<FrameRate>,
     settings: Res<Settings>,
     sim: Res<Simulation>,
     controls: Res<Controls>,
-    cameras: Query<&FlyCamera>,
     mut texts: Query<&mut Text, With<HudText>>,
 ) {
     let dt = time.delta_secs();
     if dt > 0.0 {
-        rate.0 += (1.0 / dt - rate.0) * 0.05;
+        frame_time.0 += (dt - frame_time.0) * 0.1;
+        rate.0 = 1.0 / frame_time.0;
     }
-    let speed = cameras.single().map(|c| c.speed.0).unwrap_or(0.0);
-    let text = hud_text(&settings, &sim, &controls, speed, rate.0);
+    let text = hud_text(&settings, &sim, &controls, rate.0);
     for mut t in &mut texts {
         if t.0 != text {
             t.0 = text.clone();

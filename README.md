@@ -43,16 +43,16 @@ One crate, `game/`, split into two layers plus thin binaries:
 ## Controls
 
 Click the view to take the mouse, then fly like a spacecraft: WASD moves, Space and Shift move up
-and down, Q/E rolls, the mouse steers and the wheel changes fly speed. Escape releases the mouse.
+and down, Q/E rolls and the mouse steers. Escape releases the mouse.
 
 The crosshair aims at the drum's inner surface: the left button injects water there, the right
 button places a raft lying flat on it, and the middle button raises the landscape (hold Control to
-lower it).
+lower it). New water and rafts start out moving with the glass.
 
-Every setting is a key, listed on screen with its current value: F1–F7 step the spin, flow,
-viscosity, wall friction, raft friction, brush size and brush rate up (hold Control to step down);
-T, G and P toggle match-wheel, air drag and pause; Backspace, Delete, L and R remove the water,
-remove the rafts, flatten the landscape and reset everything.
+Every setting is a key, listed on screen with its current value. Hold F1–F7 (spin, flow,
+viscosity, wall friction, raft friction, brush size, brush rate) and turn the mouse wheel to change
+it; G toggles air drag. Backspace chorded with 1, 2 or 3 removes all water, removes all rafts, or
+flattens the landscape.
 
 Settings, water, rafts, landscape, spin and camera are saved to localStorage every couple of
 seconds and restored on reload.

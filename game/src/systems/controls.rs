@@ -1,5 +1,5 @@
-//! Mouse and keyboard: pointer lock, spaceship flight, the dials and toggles, and the three mouse
-//! buttons that act on the crosshair.
+//! Mouse and keyboard: pointer lock, spaceship flight, the dials (hold a key, turn the wheel), the
+//! toggles, the clearing chords, and the three mouse buttons that act on the crosshair.
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -16,37 +16,36 @@ use crate::systems::sim::{SimSet, Simulation};
 const INJECT_DEPTH: Metres = Metres(0.4);
 const MARKER_RADIUS: Metres = Metres(0.12);
 
+/// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearAction {
     ClearWater,
     ClearRafts,
     ResetLandscape,
-    ResetAll,
 }
 
 impl ClearAction {
-    pub const ALL: [ClearAction; 4] = [
+    pub const ALL: [ClearAction; 3] = [
         ClearAction::ClearWater,
         ClearAction::ClearRafts,
         ClearAction::ResetLandscape,
-        ClearAction::ResetAll,
     ];
+
+    pub const CHORD: KeyCode = KeyCode::Backspace;
 
     pub fn key(self) -> KeyCode {
         match self {
-            ClearAction::ClearWater => KeyCode::Backspace,
-            ClearAction::ClearRafts => KeyCode::Delete,
-            ClearAction::ResetLandscape => KeyCode::KeyL,
-            ClearAction::ResetAll => KeyCode::KeyR,
+            ClearAction::ClearWater => KeyCode::Digit1,
+            ClearAction::ClearRafts => KeyCode::Digit2,
+            ClearAction::ResetLandscape => KeyCode::Digit3,
         }
     }
 
     pub fn key_label(self) -> &'static str {
         match self {
-            ClearAction::ClearWater => "Backspace",
-            ClearAction::ClearRafts => "Delete",
-            ClearAction::ResetLandscape => "L",
-            ClearAction::ResetAll => "R",
+            ClearAction::ClearWater => "Backspace+1",
+            ClearAction::ClearRafts => "Backspace+2",
+            ClearAction::ResetLandscape => "Backspace+3",
         }
     }
 
@@ -55,7 +54,6 @@ impl ClearAction {
             ClearAction::ClearWater => "remove all water",
             ClearAction::ClearRafts => "remove all rafts",
             ClearAction::ResetLandscape => "flatten landscape",
-            ClearAction::ResetAll => "reset everything",
         }
     }
 
@@ -64,7 +62,6 @@ impl ClearAction {
             ClearAction::ClearWater => sim.fluid.clear(),
             ClearAction::ClearRafts => sim.rafts.clear(),
             ClearAction::ResetLandscape => sim.drum.landscape.reset(),
-            ClearAction::ResetAll => sim.reset(),
         }
     }
 }
@@ -73,6 +70,8 @@ impl ClearAction {
 pub struct Controls {
     /// Pointer lock held: the mouse steers and the buttons act on the crosshair.
     pub active: bool,
+    /// The dial whose key is held; the mouse wheel then turns it.
+    pub held_dial: Option<Dial>,
     /// Litres requested but not yet turned into whole particles.
     inject_carry: f32,
     sculpting: bool,
@@ -126,8 +125,7 @@ fn fly(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
-    scroll: Res<AccumulatedMouseScroll>,
-    mut cameras: Query<(&mut Transform, &mut FlyCamera)>,
+    mut cameras: Query<&mut Transform, With<FlyCamera>>,
 ) {
     if !controls.active {
         return;
@@ -135,7 +133,7 @@ fn fly(
     let dt = time.delta_secs();
     let axis =
         |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f32;
-    for (mut transform, mut camera) in &mut cameras {
+    for mut transform in &mut cameras {
         FlyCamera::look(&mut transform, motion.delta);
         FlyCamera::roll(&mut transform, axis(KeyCode::KeyE, KeyCode::KeyQ), dt);
         let up =
@@ -145,32 +143,33 @@ fn fly(
             up.clamp(-1.0, 1.0),
             -axis(KeyCode::KeyS, KeyCode::KeyW),
         );
-        camera.fly(&mut transform, axes, dt);
-        if scroll.delta.y != 0.0 {
-            camera.adjust_speed(scroll.delta.y.signum());
-        }
+        FlyCamera::fly(&mut transform, axes, dt);
     }
 }
 
 fn keys(
+    mut controls: ResMut<Controls>,
     keys: Res<ButtonInput<KeyCode>>,
+    scroll: Res<AccumulatedMouseScroll>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
 ) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    for dial in Dial::ALL {
-        if keys.just_pressed(dial.key()) {
-            dial.adjust(&mut settings, if ctrl { -1 } else { 1 });
-        }
+    controls.held_dial = Dial::ALL.into_iter().find(|dial| keys.pressed(dial.key()));
+    if let Some(dial) = controls.held_dial
+        && scroll.delta.y != 0.0
+    {
+        dial.adjust(&mut settings, scroll.delta.y.signum() as i32);
     }
     for toggle in Toggle::ALL {
         if keys.just_pressed(toggle.key()) {
             toggle.flip(&mut settings);
         }
     }
-    for action in ClearAction::ALL {
-        if keys.just_pressed(action.key()) {
-            action.apply(&mut sim);
+    if keys.pressed(ClearAction::CHORD) {
+        for action in ClearAction::ALL {
+            if keys.just_pressed(action.key()) {
+                action.apply(&mut sim);
+            }
         }
     }
 }
@@ -198,7 +197,7 @@ fn mouse(
         let count = controls.inject_carry.floor();
         controls.inject_carry -= count;
         let at = target.point + target.normal * INJECT_DEPTH.0;
-        sim.inject(at.to_array(), count as u32, settings.match_wheel);
+        sim.inject(at.to_array(), count as u32);
     } else {
         controls.inject_carry = 0.0;
     }
@@ -207,7 +206,6 @@ fn mouse(
         sim.spawn_raft(
             at.as_dvec3().to_array(),
             target.normal.as_dvec3().to_array(),
-            settings.match_wheel,
         );
     }
     if mouse.pressed(MouseButton::Middle) {

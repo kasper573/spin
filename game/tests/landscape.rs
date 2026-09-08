@@ -58,7 +58,7 @@ fn water_settles_on_top_of_raised_ground() {
     }
     for k in 0..8 {
         let a = k as f32 * 0.8;
-        sim.inject([a.cos() * 2.0, 0.0, a.sin() * 2.0], 150, true);
+        sim.inject([a.cos() * 2.0, 0.0, a.sin() * 2.0], 150);
         sim.advance_exact(Seconds(0.2));
     }
     sim.advance_exact(Seconds(5.0));
