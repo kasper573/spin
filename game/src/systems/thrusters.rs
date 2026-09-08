@@ -2,7 +2,8 @@
 //! the view, in the frame the thrusters act in: up, down, left and right arms at full length,
 //! the forward and back arms receding diagonally, and a bent arm at each shoulder for the roll
 //! pair. Each arm fills from the centre outward as its thruster spools up. Each thruster also has
-//! a voice of its own that plays as loud as its level says.
+//! a voice, the same jet for all of them, heard from where it sits around the head and as loud
+//! as its level says.
 //!
 //! The cross is projected onto the image plane by hand rather than left to the camera: a solid
 //! drawn off-axis under a wide lens skews toward the vanishing point.
@@ -14,7 +15,7 @@ use bevy::audio::{
 };
 use bevy::prelude::*;
 
-use crate::core::audio::{self, Voice};
+use crate::core::audio::{self, Placement, Voice};
 use crate::core::avatar::Thruster;
 use crate::systems::controls::Controls;
 use crate::systems::player::{Player, PlayerCamera};
@@ -34,6 +35,7 @@ const RECEDING_LENGTH: f32 = 0.85;
 const SHOULDER: f32 = 1.3;
 const SHOULDER_ARC: (f32, f32) = (-60.0, 75.0);
 const ARC_SEGMENTS: usize = 24;
+const STEREO: ChannelCount = NonZero::new(2).unwrap();
 const IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.9);
 const FIRING: Color = Color::srgb(1.0, 0.32, 0.04);
 
@@ -47,7 +49,12 @@ struct FillGizmos;
 #[derive(Asset, TypePath)]
 struct ThrusterSound(Thruster);
 
-struct ThrusterDecoder(Voice);
+/// The voice as the two ears hear it, a left sample then a right one.
+struct ThrusterDecoder {
+    voice: Voice,
+    placement: Placement,
+    right: Option<f32>,
+}
 
 /// The entity playing one thruster's voice.
 #[derive(Component)]
@@ -174,7 +181,11 @@ impl Decodable for ThrusterSound {
     type Decoder = ThrusterDecoder;
 
     fn decoder(&self) -> ThrusterDecoder {
-        ThrusterDecoder(Voice::new(self.0))
+        ThrusterDecoder {
+            voice: Voice::new(self.0 as u64),
+            placement: Placement::around(self.0.mount()),
+            right: None,
+        }
     }
 }
 
@@ -182,7 +193,12 @@ impl Iterator for ThrusterDecoder {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        Some(self.0.sample())
+        if let Some(right) = self.right.take() {
+            return Some(right);
+        }
+        let [left, right] = self.placement.hear(self.voice.sample());
+        self.right = Some(right);
+        Some(left)
     }
 }
 
@@ -192,7 +208,7 @@ impl Source for ThrusterDecoder {
     }
 
     fn channels(&self) -> ChannelCount {
-        NonZero::<u16>::MIN
+        STEREO
     }
 
     fn sample_rate(&self) -> SampleRate {

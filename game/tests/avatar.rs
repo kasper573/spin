@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use game::core::audio::{self, Voice};
+use game::core::audio::{self, Placement, Voice};
 use game::core::avatar::{self, EYE_HEIGHT, SPOOL_TIME, THRUST, Thruster, WALK_SPEED};
 use game::core::math::norm;
 use game::core::units::{EARTH_GRAVITY, RadiansPerSecond, Seconds};
@@ -259,16 +259,49 @@ fn a_thruster_sounds_from_a_quarter_to_full_as_its_level_rises() {
     assert!((audio::gain(0.001) - 0.25).abs() < 0.01);
     assert!((audio::gain(0.5) - 0.625).abs() < 1e-6);
     assert_eq!(audio::gain(1.0), 1.0);
-    for thruster in Thruster::ALL {
-        let mut voice = Voice::new(thruster);
-        let samples: Vec<f32> = (0..audio::SAMPLE_RATE.get())
-            .map(|_| voice.sample())
-            .collect();
-        let loudness = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+    let mut voice = Voice::new(0);
+    let samples: Vec<f32> = (0..audio::SAMPLE_RATE.get())
+        .map(|_| voice.sample())
+        .collect();
+    let loudness = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+    assert!(loudness > 0.05 && loudness < 0.6, "voice at {loudness}");
+    assert!(samples.iter().all(|s| s.abs() <= 1.0));
+}
+
+#[test]
+fn every_thruster_is_heard_from_where_it_sits() {
+    let ears = |t: Thruster| Placement::around(t.mount()).ears();
+    let [left, right] = ears(Thruster::Left);
+    assert!(
+        right > left * 1.5,
+        "the left thruster sits on the right: {left} {right}"
+    );
+    let [left, right] = ears(Thruster::Right);
+    assert!(
+        left > right * 1.5,
+        "the right thruster sits on the left: {left} {right}"
+    );
+    let [left, right] = ears(Thruster::RollLeft);
+    assert!(
+        right > left * 1.5,
+        "the roll left thruster is at the right shoulder"
+    );
+    for centred in [
+        Thruster::Forward,
+        Thruster::Back,
+        Thruster::Up,
+        Thruster::Down,
+    ] {
+        let [left, right] = ears(centred);
         assert!(
-            loudness > 0.05 && loudness < 0.6,
-            "{thruster:?} at {loudness}"
+            (left - right).abs() < 1e-6,
+            "{centred:?} is off centre: {left} {right}"
         );
-        assert!(samples.iter().all(|s| s.abs() <= 1.0));
     }
+    let behind = ears(Thruster::Forward)[0];
+    let in_front = ears(Thruster::Back)[0];
+    assert!(
+        behind < in_front,
+        "the forward thruster fires behind the head"
+    );
 }

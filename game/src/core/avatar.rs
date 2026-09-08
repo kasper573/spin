@@ -72,6 +72,16 @@ impl Thruster {
         Thruster::RollRight,
     ];
 
+    /// Where the thruster sits on the hull in the level frame (x right, y up, z back): a linear
+    /// one on the side it pushes away from, a roll one at the shoulder it lifts.
+    pub fn mount(self) -> Vec3d {
+        match self {
+            Thruster::RollLeft => [RADIUS, 0.0, 0.0],
+            Thruster::RollRight => [-RADIUS, 0.0, 0.0],
+            linear => linear.direction().map(|d| -d * RADIUS),
+        }
+    }
+
     /// The direction a linear thruster pushes in the level frame (x right, y up, z back); the
     /// roll pair push nothing along an axis.
     pub fn direction(self) -> Vec3d {

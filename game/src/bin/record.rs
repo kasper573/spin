@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use game::core::audio::{self, Voice};
+use game::core::audio::{self, Placement, Voice};
 use game::core::avatar::Thruster;
 use game::core::units::Seconds;
 use game::systems::player::{PilotInput, Player};
@@ -169,25 +169,27 @@ fn main() {
     println!("{frame} frames in {}", out.display());
 }
 
-/// The thrusters' voices mixed down a frame at a time, each fading between the loudness its
-/// level asked for at the last frame and at this one.
+/// The thrusters' voices, each heard from where it sits around the head, mixed down a frame at a
+/// time, fading between the loudness its level asked for at the last frame and at this one.
 struct Soundtrack {
     writer: hound::WavWriter<std::io::BufWriter<fs::File>>,
-    voices: Vec<Voice>,
+    voices: Vec<(Voice, Placement)>,
     gains: [f32; 8],
 }
 
 impl Soundtrack {
     fn new(path: std::path::PathBuf) -> Soundtrack {
         let spec = hound::WavSpec {
-            channels: 1,
+            channels: 2,
             sample_rate: audio::SAMPLE_RATE.get(),
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
         Soundtrack {
             writer: hound::WavWriter::create(path, spec).expect("create thrusters.wav"),
-            voices: Thruster::ALL.map(Voice::new).to_vec(),
+            voices: Thruster::ALL
+                .map(|t| (Voice::new(t as u64), Placement::around(t.mount())))
+                .to_vec(),
             gains: [0.0; 8],
         }
     }
@@ -197,14 +199,21 @@ impl Soundtrack {
         let samples = audio::SAMPLE_RATE.get() / FPS;
         for k in 0..samples {
             let t = k as f32 / samples as f32;
-            let mut mix = 0.0;
-            for ((voice, from), to) in self.voices.iter_mut().zip(self.gains).zip(gains) {
-                mix += voice.sample() * (from + (to - from) * t);
+            let mut mix = [0.0; 2];
+            for (((voice, placement), from), to) in
+                self.voices.iter_mut().zip(self.gains).zip(gains)
+            {
+                let [left, right] = placement.hear(voice.sample());
+                let gain = from + (to - from) * t;
+                mix[0] += left * gain;
+                mix[1] += right * gain;
             }
-            let sample = (mix.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            self.writer
-                .write_sample(sample)
-                .expect("write thrusters.wav");
+            for ear in mix {
+                let sample = (ear.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                self.writer
+                    .write_sample(sample)
+                    .expect("write thrusters.wav");
+            }
         }
         self.gains = gains;
     }

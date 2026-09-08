@@ -75,10 +75,11 @@ thrusters and legs that push against whatever ground it stands on. Click the vie
 mouse; the mouse turns your head and Escape releases it. W/S, A/D, Space/Shift and Q/E each fire
 a thruster: forward and back, left and right, up and down, roll left and roll right. Thrusters
 spool up and down over a third of a second, and the cross in the bottom-left corner shows each
-one filling as it fires, the bent arms at its shoulders being the roll pair. Each thruster has
-a voice of its own, a jet under a hum pitched by the thruster, that plays at a quarter loudness
-as soon as it fires and at full when it is at full. Opposed thrusters cancel each other out; the
-widget still shows both firing.
+one filling as it fires, the bent arms at its shoulders being the roll pair. Every thruster is
+the same jet, heard from where it sits on you (the one pushing you forward roars from behind,
+the one pushing you left from your right side) at a quarter loudness as soon as it fires and at
+full when it is at full. Opposed thrusters cancel each other out; the widget still shows both
+firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in
 that direction. Each thruster pulls 1.78 g, so holding Space lifts you off the floor at 0.78 g,
