@@ -262,11 +262,14 @@ fn publish(
     }
 }
 
-/// The simulation with rendering into nothing, stepped by hand.
+/// The simulation with rendering into nothing, stepped by hand. No wall-clock time passes in it:
+/// the simulation advances only by `run`, so what a test observes never depends on how fast the
+/// machine is.
 pub fn headless() -> App {
     let mut app = app::build_headless();
     app.finish();
     app.cleanup();
+    app.world_mut().resource_mut::<Time<Virtual>>().pause();
     app
 }
 

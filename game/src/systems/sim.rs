@@ -156,7 +156,6 @@ impl Simulation {
     /// coupling from the last frame lands on the bodies first.
     pub fn advance(&mut self, real: Seconds, fluid: &mut Fluid) {
         let max_dt = SUBSTEP_RATE.period().0;
-        let coupling = fluid.take_coupling();
         self.substeps.clear();
         if fluid.outstanding() > MAX_FRAMES_AHEAD {
             return;
@@ -179,6 +178,11 @@ impl Simulation {
                 self.accumulator = 0.0;
                 (steps, dt)
             }
+        };
+        let coupling = if steps > 0 {
+            fluid.take_coupling()
+        } else {
+            None
         };
         for k in 0..steps {
             self.drum.advance(dt as f64);

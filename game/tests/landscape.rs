@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use game::core::fluid::{Fluid, PARTICLE_SPACING};
+use game::core::fluid::Fluid;
 use game::core::units::{Radians, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
 use game::systems::drum::{Drum, Landscape, RADIUS, wheel_angle};
@@ -86,7 +86,7 @@ fn water_settles_on_top_of_raised_ground() {
         let r = (x * x + z * z).sqrt();
         let (h, _, _) = sim.drum.landscape.sample(wheel_angle(x, z, angle), y);
         assert!(
-            r <= RADIUS as f64 - h + PARTICLE_SPACING as f64,
+            r <= RADIUS as f64 - h + 0.06,
             "particle inside terrain: r {r}, ground at {}",
             RADIUS as f64 - h
         );
