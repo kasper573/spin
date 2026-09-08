@@ -1,6 +1,7 @@
-import { MAX_RAFTS, RMAX, YMAX } from './constants';
+import { MAX_RAFTS, R_OUT, RMAX, YMAX } from './constants';
 import { collideRaftPair, collideWheel } from './contacts';
 import { Boundary, Fluid } from './fluid';
+import { Landscape, wheelAngle } from './landscape';
 import { cross, quatFromBasis, vec3, type Quat, type Vec3 } from './math';
 import { defaultParams, type SimParams } from './params';
 import { stepFluid } from './pbf';
@@ -10,6 +11,7 @@ export interface SimState {
   fluid: Fluid;
   boundary: Boundary;
   rafts: Raft[];
+  landscape: Landscape;
   /** Drum angular speed and its target (rad/s), accumulated angle and simulated time. */
   omega: number;
   omegaTarget: number;
@@ -23,6 +25,7 @@ export function makeState(): SimState {
     fluid: new Fluid(),
     boundary: new Boundary(),
     rafts: [],
+    landscape: new Landscape(),
     omega: 0,
     omegaTarget: 0,
     theta: 0,
@@ -39,11 +42,22 @@ export function step(S: SimState, dt: number): void {
   S.theta += S.omega * dt;
   S.time += dt;
   const rafts = S.rafts,
-    omega = S.omega;
-  stepFluid(S.fluid, S.boundary, dt, omega, rafts, P);
+    omega = S.omega,
+    theta = S.theta,
+    land = S.landscape;
+  stepFluid(S.fluid, S.boundary, dt, omega, theta, land, rafts, P);
   const airK = P.air ? dt / P.airTau : 0;
+  // water may change a raft's velocity by a few times the drum's artificial gravity per substep
+  const maxDv = (20 + 4 * omega * omega * R_OUT) * dt;
   for (const r of rafts) {
-    r.applyAcc();
+    r.applyAcc(maxDv);
+    // rotational drag in water: a wetted board's spin relaxes toward the water's co-rotation
+    const wetK = Math.min(1, r.wet * P.wetSpinTau * dt);
+    if (wetK > 0) {
+      r.w[0] -= r.w[0] * wetK;
+      r.w[1] += (omega - r.w[1]) * wetK;
+      r.w[2] -= r.w[2] * wetK;
+    }
     if (airK > 0) {
       r.v[0] += (omega * r.p[2] - r.v[0]) * airK;
       r.v[1] -= r.v[1] * airK;
@@ -54,7 +68,7 @@ export function step(S: SimState, dt: number): void {
     }
     r.integrate(dt);
   }
-  for (const r of rafts) collideWheel(r, omega, P);
+  for (const r of rafts) collideWheel(r, omega, theta, land, P);
   for (let a = 0; a < rafts.length; a++) {
     for (let b = a + 1; b < rafts.length; b++) {
       collideRaftPair(rafts[a], rafts[b], P);
@@ -97,6 +111,8 @@ export function spawnRaft(
   return r;
 }
 
+const landSample = { h: 0, dPhi: 0, dY: 0 };
+
 /** Inject up to `count` particles in a small cloud around a point; returns how many were added. */
 export function injectAt(
   S: SimState,
@@ -112,13 +128,14 @@ export function injectAt(
     let px = x + (rng() - 0.5) * 0.5,
       py = y + (rng() - 0.5) * 0.5,
       pz = z + (rng() - 0.5) * 0.5;
+    py = Math.max(-YMAX + 0.05, Math.min(YMAX - 0.05, py));
     const r = Math.hypot(px, pz);
-    if (r > RMAX - 0.05) {
-      const rc = RMAX - 0.05;
+    let rc = RMAX - 0.05;
+    if (!S.landscape.empty) rc -= S.landscape.sample(wheelAngle(px, pz, S.theta), py, landSample).h;
+    if (r > rc) {
       px *= rc / r;
       pz *= rc / r;
     }
-    py = Math.max(-YMAX + 0.05, Math.min(YMAX - 0.05, py));
     const v = matchWheel ? wheelVelocity(S, px, pz) : vec3();
     const ok = S.fluid.add(
       px,

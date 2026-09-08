@@ -1,6 +1,7 @@
 /* Raft contacts: sequential impulses with Coulomb friction against the moving glass and other rafts. */
 import { HALF_W, R_OUT } from './constants';
 import { cross, dot, mat3mul, vec3, type Vec3 } from './math';
+import type { Landscape } from './landscape';
 import type { SimParams } from './params';
 import { RAFT_PTS, type Raft } from './raft';
 
@@ -76,18 +77,30 @@ function resolveWallContact(
   raft.p[2] += n[2] * corr;
 }
 
-export function collideWheel(raft: Raft, omega: number, P: SimParams): void {
+export function collideWheel(
+  raft: Raft,
+  omega: number,
+  theta: number,
+  land: Landscape,
+  P: SimParams,
+): void {
   for (let pass = 0; pass < 2; pass++) {
     for (const lp of RAFT_PTS) {
       raft.toWorld(lp, sWp);
-      const x = sWp[0],
-        z = sWp[2],
-        r = Math.sqrt(x * x + z * z) || 1e-9;
-      if (r > R_OUT) {
+      let pen: number;
+      if (land.empty) {
+        const x = sWp[0],
+          z = sWp[2],
+          r = Math.sqrt(x * x + z * z) || 1e-9;
+        pen = r - R_OUT;
         sN[0] = -x / r;
         sN[1] = 0;
         sN[2] = -z / r;
-        resolveWallContact(raft, sWp, sN, r - R_OUT, omega, P.restitution, P.raftFriction);
+      } else {
+        pen = land.penetration(sWp[0], sWp[1], sWp[2], theta, 0, sN);
+      }
+      if (pen > 0) {
+        resolveWallContact(raft, sWp, sN, pen, omega, P.restitution, P.raftFriction);
         raft.toWorld(lp, sWp);
       }
       if (sWp[1] > HALF_W) {

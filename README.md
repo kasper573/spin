@@ -29,8 +29,10 @@ with a screen-space fluid renderer (smoothed particle depth, thickness, cel shad
 
 ## Controls
 
-Click the view to take pointer lock, then fly like a spacecraft: WASD moves, R/F moves up and down,
+Click the view to take pointer lock, then fly like a spacecraft: WASD moves, Space and Shift (or R/F) move up and down,
 Q/E rolls, the mouse steers and the wheel changes fly speed. The crosshair at the centre of the screen
-aims at the drum's inner surface: the left button injects (or drains, per the panel) water there and
-the right button places a raft lying flat on it. Escape releases the controls. In dev mode `window.sim` exposes the running simulation for scripting, e.g.
+aims at the drum's inner surface: the left button injects water there and
+the right button places a raft lying flat on it, and the middle button raises the landscape
+there (hold Control to lower it), with brush size and rate in the panel. Escape releases the controls. Settings, water, rafts, landscape, spin and camera are saved to
+localStorage every couple of seconds and restored on reload; Reset clears the simulation. In dev mode `window.sim` exposes the running simulation for scripting, e.g.
 `sim.inject(x, y, z, count)` and `sim.advance(seconds)`.

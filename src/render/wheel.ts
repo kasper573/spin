@@ -14,6 +14,7 @@ import {
   type Camera,
 } from 'three';
 import { HALF_W, R_OUT } from '../physics/constants';
+import { LandscapeMesh } from './landscape';
 import glassFrag from './shaders/glass.frag?raw';
 import glassVert from './shaders/glass.vert?raw';
 
@@ -24,6 +25,7 @@ export class Wheel {
   /** Glass shell: rendered last, blended over water and scene. */
   readonly glass = new Group();
   private readonly glassMat: ShaderMaterial;
+  readonly landscape = new LandscapeMesh();
 
   constructor() {
     const R = R_OUT,
@@ -50,7 +52,7 @@ export class Wheel {
       new MeshStandardMaterial({ color: 0xff7a4a, emissive: 0xff5a2a, emissiveIntensity: 0.5 }),
     );
     mark.position.set(R + 0.05, 0, 0);
-    this.frame.add(mark);
+    this.frame.add(mark, this.landscape.mesh);
 
     this.glassMat = new ShaderMaterial({
       uniforms: {

@@ -1,7 +1,5 @@
 import { createStore } from 'solid-js/store';
-
-/** What the left mouse button does. */
-export type Tool = 'inject' | 'drain';
+import { savedSnapshot } from './persistence';
 
 export interface Settings {
   /** Target drum spin (rad/s). */
@@ -14,7 +12,9 @@ export interface Settings {
   wallFriction: number;
   raftFriction: number;
   air: boolean;
-  tool: Tool;
+  /** Landscape brush radius (m) and rate of height change (m/s). */
+  brushSize: number;
+  brushRate: number;
   paused: boolean;
 }
 
@@ -40,11 +40,26 @@ export const defaultSettings = (): Settings => ({
   wallFriction: 0.5,
   raftFriction: 0.45,
   air: true,
-  tool: 'inject',
+  brushSize: 0.6,
+  brushRate: 0.8,
   paused: false,
 });
 
-export const [settings, setSettings] = createStore<Settings>(defaultSettings());
+/** Only known keys with the right type survive from storage. */
+function sanitize(saved: Partial<Settings> | undefined): Settings {
+  const defaults = defaultSettings();
+  const out: Record<string, unknown> = { ...defaults };
+  if (saved) {
+    for (const k of Object.keys(defaults) as (keyof Settings)[]) {
+      const v = saved[k];
+      if (typeof v === typeof defaults[k] && (typeof v !== 'number' || Number.isFinite(v)))
+        out[k] = v;
+    }
+  }
+  return out as unknown as Settings;
+}
+
+export const [settings, setSettings] = createStore<Settings>(sanitize(savedSnapshot?.settings));
 export const [readouts, setReadouts] = createStore<Readouts>({
   omega: 0,
   particles: 0,

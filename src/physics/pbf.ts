@@ -1,6 +1,7 @@
 /* Position-based fluids (Macklin & Müller 2013) in the inertial frame, with Akinci-style
    boundary coupling to the rafts and a projection onto the inside of the glass drum. */
 import {
+  D,
   EPS_LAMBDA,
   H,
   H2,
@@ -23,6 +24,7 @@ import {
 } from './constants';
 import type { Boundary, Fluid } from './fluid';
 import { cellHash } from './grid';
+import type { Landscape } from './landscape';
 import type { SimParams } from './params';
 import { RAFT_TEMPLATE, type Raft } from './raft';
 import { vec3 } from './math';
@@ -31,17 +33,42 @@ const CONTACT_FLOOR = 1;
 const CONTACT_WALL_POS = 4;
 const CONTACT_WALL_NEG = 8;
 
-/** Clamp a predicted position into the drum; returns contact flags. */
-function projectWheel(px: Float32Array, py: Float32Array, pz: Float32Array, i: number): number {
+/** Terrain and wheel angle for the substep being solved. */
+interface Walls {
+  land: Landscape;
+  theta: number;
+}
+
+const sN = new Float64Array(3);
+
+/** Clamp a predicted position into the drum and out of the terrain; returns contact flags. */
+function projectWheel(
+  px: Float32Array,
+  py: Float32Array,
+  pz: Float32Array,
+  i: number,
+  W: Walls,
+): number {
   let c = 0;
-  const x = px[i],
-    z = pz[i],
-    r = Math.sqrt(x * x + z * z);
-  if (r > RMAX) {
-    const s = RMAX / r;
-    px[i] = x * s;
-    pz[i] = z * s;
-    c |= CONTACT_FLOOR;
+  if (W.land.empty) {
+    const x = px[i],
+      z = pz[i],
+      r = Math.sqrt(x * x + z * z);
+    if (r > RMAX) {
+      const s = RMAX / r;
+      px[i] = x * s;
+      pz[i] = z * s;
+      c |= CONTACT_FLOOR;
+    }
+  } else {
+    for (let k = 0; k < 2; k++) {
+      const pen = W.land.penetration(px[i], py[i], pz[i], W.theta, D * 0.5, sN);
+      if (pen <= 0) break;
+      px[i] += sN[0] * pen;
+      py[i] += sN[1] * pen;
+      pz[i] += sN[2] * pen;
+      c |= CONTACT_FLOOR;
+    }
   }
   if (py[i] > YMAX) {
     py[i] = YMAX;
@@ -181,10 +208,9 @@ function computeLambda(F: Fluid, B: Boundary): void {
   }
 }
 
-function applyDelta(F: Fluid, B: Boundary, rafts: Raft[], dt: number): void {
+function applyDelta(F: Fluid, B: Boundary, rafts: Raft[], W: Walls): void {
   const { px, py, pz, lam, dx, dy, dz, nb, nbc, bnb, bnbc, contact, n } = F;
-  const mr = MASS / RHO0,
-    invdt = 1 / dt;
+  const mr = MASS / RHO0;
   for (let i = 0; i < n; i++) {
     const xi = px[i],
       yi = py[i],
@@ -227,21 +253,9 @@ function applyDelta(F: Fluid, B: Boundary, rafts: Raft[], dt: number): void {
       if (r < 1e-6) continue;
       const hr = H - r,
         g = ((SPIKY * hr * hr) / r) * (B.psi[b] / RHO0) * li;
-      const ddx = g * rx,
-        ddy = g * ry,
-        ddz = g * rz;
-      ax += ddx;
-      ay += ddy;
-      az += ddz;
-      // reaction impulse on the raft: -m Δp / dt at the boundary particle
-      rafts[B.raft[b]].accumulate(
-        -MASS * ddx * invdt,
-        -MASS * ddy * invdt,
-        -MASS * ddz * invdt,
-        B.x[b],
-        B.y[b],
-        B.z[b],
-      );
+      ax += g * rx;
+      ay += g * ry;
+      az += g * rz;
     }
     const dl = ax * ax + ay * ay + az * az;
     if (dl > MAX_DP * MAX_DP) {
@@ -258,13 +272,13 @@ function applyDelta(F: Fluid, B: Boundary, rafts: Raft[], dt: number): void {
     px[i] += dx[i];
     py[i] += dy[i];
     pz[i] += dz[i];
-    contact[i] |= projectWheel(px, py, pz, i);
+    contact[i] |= projectWheel(px, py, pz, i, W);
   }
-  excludeFromRafts(F, rafts, invdt);
+  excludeFromRafts(F, rafts);
 }
 
 /** Hard exclusion of particles from raft volumes (tunnelling guard); also counts submerged samples. */
-function excludeFromRafts(F: Fluid, rafts: Raft[], invdt: number): void {
+function excludeFromRafts(F: Fluid, rafts: Raft[]): void {
   const { px, py, pz, n } = F;
   for (let ri = 0; ri < rafts.length; ri++) {
     const r = rafts[ri],
@@ -302,21 +316,9 @@ function excludeFromRafts(F: Fluid, rafts: Raft[], invdt: number): void {
         k = 2;
         amt = pzn * (lz >= 0 ? 1 : -1);
       }
-      const wx = m[k] * amt,
-        wy = m[3 + k] * amt,
-        wz = m[6 + k] * amt;
-      px[i] += wx;
-      py[i] += wy;
-      pz[i] += wz;
-      const cap = 0.5 * Math.min(1, 0.01 / Math.abs(amt));
-      r.accumulate(
-        -MASS * wx * cap * invdt,
-        -MASS * wy * cap * invdt,
-        -MASS * wz * cap * invdt,
-        px[i],
-        py[i],
-        pz[i],
-      );
+      px[i] += m[k] * amt;
+      py[i] += m[3 + k] * amt;
+      pz[i] += m[6 + k] * amt;
     }
     r.submerged = sub;
   }
@@ -328,10 +330,13 @@ export function stepFluid(
   B: Boundary,
   dt: number,
   omega: number,
+  theta: number,
+  land: Landscape,
   rafts: Raft[],
   P: SimParams,
 ): void {
   const n = F.n;
+  const W: Walls = { land, theta };
   gatherBoundary(B, rafts);
   if (n === 0) return;
   const { x, y, z, vx, vy, vz, px, py, pz, contact } = F;
@@ -360,22 +365,22 @@ export function stepFluid(
     px[i] = x[i] + ux * dt;
     py[i] = y[i] + uy * dt;
     pz[i] = z[i] + uz * dt;
-    contact[i] = projectWheel(px, py, pz, i);
+    contact[i] = projectWheel(px, py, pz, i, W);
   }
   F.grid.build(px, py, pz, n);
   if (B.n > 0) B.grid.build(B.x, B.y, B.z, B.n);
   findNeighbors(F, B);
   for (let it = 0; it < ITERS; it++) {
     computeLambda(F, B);
-    applyDelta(F, B, rafts, dt);
+    applyDelta(F, B, rafts, W);
   }
-  updateVelocities(F, dt, omega, P);
+  updateVelocities(F, dt, omega, P, W);
   if (B.n > 0) applyBuoyancy(F, B, rafts, dt);
   applyViscosityAndDrag(F, B, rafts, omega, dt, P);
 }
 
 /** Velocities from positions; wall contact = no penetration + viscous drag toward the wall's speed. */
-function updateVelocities(F: Fluid, dt: number, omega: number, P: SimParams): void {
+function updateVelocities(F: Fluid, dt: number, omega: number, P: SimParams, W: Walls): void {
   const { x, y, z, vx, vy, vz, px, py, pz, contact, n } = F;
   const invdt = 1 / dt,
     keep = 1 - P.wallFriction;
@@ -396,12 +401,22 @@ function updateVelocities(F: Fluid, dt: number, omega: number, P: SimParams): vo
         rvy = uy,
         rvz = uz - wz;
       if (c & CONTACT_FLOOR) {
-        const r = Math.sqrt(xi * xi + zi * zi) || 1;
-        const nx = -xi / r,
+        let nx: number, ny: number, nz: number;
+        if (W.land.empty) {
+          const r = Math.sqrt(xi * xi + zi * zi) || 1;
+          nx = -xi / r;
+          ny = 0;
           nz = -zi / r;
-        const vn = rvx * nx + rvz * nz;
+        } else {
+          W.land.penetration(xi, y[i], zi, W.theta, D * 0.5, sN);
+          nx = sN[0];
+          ny = sN[1];
+          nz = sN[2];
+        }
+        const vn = rvx * nx + rvy * ny + rvz * nz;
         if (vn < 0) {
           rvx -= vn * nx;
+          rvy -= vn * ny;
           rvz -= vn * nz;
         }
       }
@@ -537,6 +552,20 @@ function applyViscosityAndDrag(
 
     const bbase = i * MAXB,
       bcnt = bnbc[i];
+    // no-slip drag toward the rafts, limited so this particle relaxes at most fully in one substep
+    let wsum = 0;
+    for (let k = 0; k < bcnt; k++) {
+      const b = bnb[bbase + k];
+      const rx = xi - B.x[b],
+        ry = yi - B.y[b],
+        rz = zi - B.z[b],
+        r2 = rx * rx + ry * ry + rz * rz;
+      if (r2 < H2) {
+        const t = H2 - r2;
+        wsum += cd * POLY6 * t * t * t * (B.psi[b] / RHO0);
+      }
+    }
+    const scale = wsum > 1 ? 1 / wsum : 1;
     for (let k = 0; k < bcnt; k++) {
       const b = bnb[bbase + k];
       const rx = xi - B.x[b],
@@ -545,14 +574,22 @@ function applyViscosityAndDrag(
         r2 = rx * rx + ry * ry + rz * rz;
       if (r2 >= H2) continue;
       const t = H2 - r2,
-        w = cd * POLY6 * t * t * t * (B.psi[b] / RHO0);
+        w = cd * POLY6 * t * t * t * (B.psi[b] / RHO0) * scale;
       const dvx = (B.vx[b] - ui) * w,
         dvy = (B.vy[b] - vi) * w,
         dvz = (B.vz[b] - wi) * w;
       ax += dvx;
       ay += dvy;
       az += dvz;
-      rafts[B.raft[b]].accumulate(-MASS * dvx, -MASS * dvy, -MASS * dvz, B.x[b], B.y[b], B.z[b]);
+      rafts[B.raft[b]].accumulateDrag(
+        -MASS * dvx,
+        -MASS * dvy,
+        -MASS * dvz,
+        B.x[b],
+        B.y[b],
+        B.z[b],
+        MASS * w,
+      );
       // reaction to buoyancy: share of -F_b, weighted by this particle's kernel contribution
       const rb = B.rho[b];
       if (rb > 1) {

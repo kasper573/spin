@@ -9,6 +9,8 @@ export interface SimParams {
   airTau: number;
   /** Maximum spin-up acceleration of the drum (rad/s²). */
   spinAccel: number;
+  /** Rate (1/s) at which a fully wetted raft's spin relaxes toward the water's rotation. */
+  wetSpinTau: number;
 }
 
 export const defaultParams = (): SimParams => ({
@@ -20,4 +22,5 @@ export const defaultParams = (): SimParams => ({
   air: true,
   airTau: 12,
   spinAccel: 0.6,
+  wetSpinTau: 20,
 });

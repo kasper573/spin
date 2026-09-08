@@ -1,13 +1,8 @@
 import type { JSX } from 'solid-js';
-import { SPIN_MAX, SPIN_STEP, setSettings, settings, type Tool } from '../app/settings';
+import { SPIN_MAX, SPIN_STEP, setSettings, settings } from '../app/settings';
 import type { Simulation } from '../app/simulation';
 import { Gauge } from './Gauge';
-import { Segmented, Slider, Toggle } from './controls';
-
-const TOOLS: ReadonlyArray<{ value: Tool; label: string }> = [
-  { value: 'inject', label: 'Inject water' },
-  { value: 'drain', label: 'Drain water' },
-];
+import { Slider, Toggle } from './controls';
 
 export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element {
   const nudgeSpin = (d: number) =>
@@ -45,15 +40,6 @@ export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element
 
       <section>
         <h2>Water and rafts</h2>
-        <div class="row">
-          <label>Left button</label>
-        </div>
-        <Segmented
-          label="Left mouse button"
-          options={TOOLS}
-          value={settings.tool}
-          onChange={(t) => setSettings('tool', t)}
-        />
         <Slider
           label="Flow rate"
           min={10}
@@ -70,10 +56,37 @@ export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element
         />
         <div class="btns">
           <button type="button" class="warn" onClick={() => props.sim()?.clearRafts()}>
-            Remove rafts
+            Remove all rafts
           </button>
           <button type="button" class="warn" onClick={() => props.sim()?.clearWater()}>
             Remove all water
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Landscape</h2>
+        <Slider
+          label="Brush size"
+          min={0.2}
+          max={2}
+          step={0.1}
+          value={settings.brushSize}
+          format={(v) => `${v.toFixed(1)} m`}
+          onInput={(v) => setSettings('brushSize', v)}
+        />
+        <Slider
+          label="Brush rate"
+          min={0.1}
+          max={3}
+          step={0.1}
+          value={settings.brushRate}
+          format={(v) => `${v.toFixed(1)} m/s`}
+          onInput={(v) => setSettings('brushRate', v)}
+        />
+        <div class="btns">
+          <button type="button" class="warn" onClick={() => props.sim()?.resetLandscape()}>
+            Reset landscape
           </button>
         </div>
       </section>

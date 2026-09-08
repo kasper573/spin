@@ -1,4 +1,4 @@
-import { For, type JSX } from 'solid-js';
+import type { JSX } from 'solid-js';
 
 interface SliderProps {
   label: string;
@@ -44,31 +44,5 @@ export function Toggle(props: ToggleProps): JSX.Element {
       />
       {props.label}
     </label>
-  );
-}
-
-interface SegmentedProps<T extends string> {
-  label: string;
-  options: ReadonlyArray<{ value: T; label: string; class?: string }>;
-  value: T;
-  onChange: (v: T) => void;
-}
-
-export function Segmented<T extends string>(props: SegmentedProps<T>): JSX.Element {
-  return (
-    <div class="seg" role="group" aria-label={props.label}>
-      <For each={props.options}>
-        {(o) => (
-          <button
-            type="button"
-            class={o.class}
-            aria-pressed={props.value === o.value}
-            onClick={() => props.onChange(o.value)}
-          >
-            {o.label}
-          </button>
-        )}
-      </For>
-    </div>
   );
 }

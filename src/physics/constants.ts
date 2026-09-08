@@ -29,7 +29,7 @@ export const MAX_SPEED = 15;
 export const MAX_DP = 0.5 * D;
 export const WET_REF = 300; // fluid density at a raft sample point when fully submerged
 
-export const RAFT_L = 0.9;
-export const RAFT_T = 0.28;
+export const RAFT_L = 0.3;
+export const RAFT_T = 0.09;
 export const RAFT_RHO = 500;
-export const RAFT_SPACING = 0.15;
+export const RAFT_SPACING = 0.075; // boundary sample spacing on the board

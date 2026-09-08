@@ -53,8 +53,9 @@ export class Raft {
   readonly hz = RAFT_L / 2;
   readonly M = RAFT_RHO * RAFT_L * RAFT_L * RAFT_T;
   readonly invM = 1 / this.M;
-  /** Inverse body-space inertia (diagonal). */
+  /** Inverse body-space inertia (diagonal) and its largest component. */
   readonly invI: Vec3;
+  readonly invIMax: number;
   readonly p: Vec3;
   readonly q: Quat;
   readonly v: Vec3;
@@ -64,6 +65,11 @@ export class Raft {
   readonly iw = new Float64Array(9);
   readonly accJ = vec3();
   readonly accL = vec3();
+  /** Drag impulses are kept apart so their relaxation can be limited to one full step. */
+  readonly dragJ = vec3();
+  readonly dragL = vec3();
+  private dragK = 0;
+  private dragKa = 0;
   submerged = 0;
   wet = 0;
   readonly volPerSample = (RAFT_L * RAFT_L * RAFT_T) / RAFT_TEMPLATE.length;
@@ -77,6 +83,7 @@ export class Raft {
       12 / (this.M * (a * a + c * c)),
       12 / (this.M * (a * a + b * b)),
     );
+    this.invIMax = Math.max(this.invI[0], this.invI[1], this.invI[2]);
     this.p = Float64Array.from(p);
     this.q = q ? Float64Array.from(q) : quat();
     this.v = v ? Float64Array.from(v) : vec3();
@@ -169,10 +176,51 @@ export class Raft {
     this.accL[2] += rx * jy - ry * jx;
   }
 
-  applyAcc(): void {
+  /**
+   * Accumulate a drag impulse from one particle–sample pair; `mw` is the pair's coupling mass, used
+   * to measure how far the summed drag would relax this body in a single substep.
+   */
+  accumulateDrag(
+    jx: number,
+    jy: number,
+    jz: number,
+    ax: number,
+    ay: number,
+    az: number,
+    mw: number,
+  ): void {
+    this.dragJ[0] += jx;
+    this.dragJ[1] += jy;
+    this.dragJ[2] += jz;
+    const rx = ax - this.p[0],
+      ry = ay - this.p[1],
+      rz = az - this.p[2];
+    this.dragL[0] += ry * jz - rz * jy;
+    this.dragL[1] += rz * jx - rx * jz;
+    this.dragL[2] += rx * jy - ry * jx;
+    this.dragK += mw * this.invM;
+    this.dragKa += mw * (rx * rx + ry * ry + rz * rz) * this.invIMax;
+  }
+
+  /** Apply the accumulated water impulse, limited to `maxDv` of velocity change. */
+  applyAcc(maxDv: number): void {
+    const dJ = this.dragJ,
+      dL = this.dragL;
+    const sLin = this.dragK > 1 ? 1 / this.dragK : 1,
+      sAng = this.dragKa > 1 ? 1 / this.dragKa : 1;
+    this.v[0] += dJ[0] * this.invM * sLin;
+    this.v[1] += dJ[1] * this.invM * sLin;
+    this.v[2] += dJ[2] * this.invM * sLin;
+    const ddw = mat3mul(this.iw, dL, this.sDw);
+    this.w[0] += ddw[0] * sAng;
+    this.w[1] += ddw[1] * sAng;
+    this.w[2] += ddw[2] * sAng;
+    dJ.fill(0);
+    dL.fill(0);
+    this.dragK = this.dragKa = 0;
     const J = this.accJ,
       L = this.accL,
-      cap = this.M * 0.5; // ≤0.5 m/s velocity change per substep from water
+      cap = this.M * maxDv;
     const jm = Math.hypot(J[0], J[1], J[2]);
     if (jm > cap) {
       const s = cap / jm;

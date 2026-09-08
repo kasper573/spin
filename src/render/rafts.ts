@@ -11,9 +11,9 @@ import type { Raft } from '../physics/raft';
 
 const wood = new MeshStandardMaterial({ color: 0xb9813f, roughness: 0.85, metalness: 0 });
 const woodDark = new MeshStandardMaterial({ color: 0x7a5228, roughness: 0.9, metalness: 0 });
-const logRadius = 0.11;
+const logRadius = RAFT_T / 2;
 const logGeo = new CylinderGeometry(logRadius, logRadius, RAFT_L, 12);
-const beamGeo = new BoxGeometry(RAFT_L, 0.06, 0.07);
+const beamGeo = new BoxGeometry(RAFT_L, RAFT_T * 0.22, RAFT_L * 0.08);
 
 function makeRaftMesh(): Group {
   const g = new Group();
@@ -25,7 +25,7 @@ function makeRaftMesh(): Group {
   }
   for (const sz of [-1, 1]) {
     const beam = new Mesh(beamGeo, woodDark);
-    beam.position.set(0, RAFT_T / 2 - 0.03, sz * 0.3);
+    beam.position.set(0, RAFT_T / 2 - RAFT_T * 0.11, sz * RAFT_L * 0.33);
     g.add(beam);
   }
   return g;

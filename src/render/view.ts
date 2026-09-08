@@ -89,12 +89,14 @@ export class View {
     aimPoint: Vector3,
     aimNormal: Vector3,
     raftOffset: number,
+    brushRadius: number,
   ): void {
     const r = this.renderer,
       cam = this.fly.camera;
     this.wheel.update(S.theta, cam, SUN_DIR, FILL_DIR);
+    this.wheel.landscape.sync(S.landscape);
     this.rafts.sync(S.rafts);
-    this.markers.update(marker, aimPoint, aimNormal, raftOffset);
+    this.markers.update(marker, aimPoint, aimNormal, raftOffset, brushRadius);
     this.water.upload(S.fluid);
 
     r.setRenderTarget(this.sceneTarget);

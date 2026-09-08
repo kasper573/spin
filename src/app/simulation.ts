@@ -1,16 +1,19 @@
 import { Vector3 } from 'three';
 import { MASS, RAFT_T } from '../physics/constants';
+import { wheelAngle } from '../physics/landscape';
+import { deserializeState, serializeState } from '../physics/serialize';
 import { injectAt, makeState, spawnRaft, step, type SimState } from '../physics/world';
 import type { MarkerKind } from '../render/markers';
 import { View } from '../render/view';
 import { aimAtDrum, type Aim } from './aim';
 import { Controls } from './controls';
+import { savedSnapshot, saveSnapshot } from './persistence';
 import { setReadouts, setSettings, settings } from './settings';
 
 const SUBSTEP = 1 / 120;
 const MAX_SUBSTEPS = 3;
-const DRAIN_RATE = 240; // particles per second removed along the aim ray
 const READOUT_INTERVAL = 100; // ms
+const SAVE_INTERVAL = 2000; // ms
 const INJECT_DEPTH = 0.4; // how far inside the aimed surface water appears
 const RAFT_OFFSET = RAFT_T / 2 + 0.04; // raft centre above the aimed surface
 
@@ -28,6 +31,7 @@ export class Simulation {
   private fps = { t: 0, n: 0, value: 0 };
   private simRate = 1;
   private lastReadout = 0;
+  private lastSave = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.view = new View(canvas);
@@ -38,6 +42,12 @@ export class Simulation {
       lockChange: (locked) => setReadouts('controlsActive', locked),
     });
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('pagehide', this.save);
+    document.addEventListener('visibilitychange', this.onVisibility);
+    if (savedSnapshot) {
+      this.state = deserializeState(savedSnapshot.sim);
+      if (savedSnapshot.camera) this.view.fly.restore(savedSnapshot.camera);
+    }
   }
 
   start(): void {
@@ -48,6 +58,9 @@ export class Simulation {
   dispose(): void {
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('pagehide', this.save);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    this.save();
     this.controls.dispose();
     this.view.renderer.dispose();
   }
@@ -58,6 +71,10 @@ export class Simulation {
 
   clearRafts(): void {
     this.state.rafts.length = 0;
+  }
+
+  resetLandscape(): void {
+    this.state.landscape.reset();
   }
 
   /** Inject `count` particles around a point inside the drum. */
@@ -83,10 +100,24 @@ export class Simulation {
 
   private readonly onResize = (): void => this.view.resize();
 
+  private readonly onVisibility = (): void => {
+    if (document.visibilityState === 'hidden') this.save();
+  };
+
+  /** Persist settings, simulation and camera to localStorage. */
+  readonly save = (): void => {
+    this.lastSave = performance.now();
+    saveSnapshot({
+      settings: { ...settings },
+      sim: serializeState(this.state),
+      camera: this.view.fly.snapshot(),
+    });
+  };
+
   private updateAim(): void {
     const cam = this.view.fly.camera;
     cam.getWorldDirection(this.rayDir);
-    this.aim = aimAtDrum(cam.position, this.rayDir);
+    this.aim = aimAtDrum(cam.position, this.rayDir, this.state.landscape, this.state.theta);
   }
 
   private placeRaft(): void {
@@ -94,48 +125,30 @@ export class Simulation {
     this.updateAim();
     if (!this.aim) return;
     const p = this.aim.point.clone().addScaledVector(this.aim.normal, RAFT_OFFSET);
-    spawnRaft(
-      this.state,
-      [p.x, p.y, p.z],
-      [this.aim.normal.x, this.aim.normal.y, this.aim.normal.z],
-      settings.matchWheel,
-    );
+    const n = this.aim.normal;
+    spawnRaft(this.state, [p.x, p.y, p.z], [n.x, n.y, n.z], settings.matchWheel);
   }
 
-  private applyTool(dt: number): void {
-    if (!this.controls.primary || !this.aim) return;
-    const rate = settings.tool === 'inject' ? settings.flow : DRAIN_RATE;
-    this.toolAcc += rate * dt;
-    const k = Math.floor(this.toolAcc);
-    this.toolAcc -= k;
-    if (k <= 0) return;
-    if (settings.tool === 'inject') {
-      const p = this.aim.point.clone().addScaledVector(this.aim.normal, INJECT_DEPTH);
-      injectAt(this.state, p.x, p.y, p.z, k, settings.matchWheel);
-    } else {
-      this.drain(k);
-    }
-  }
-
-  /** Remove particles within a tube around the aim ray, nearest to the camera first. */
-  private drain(count: number): void {
-    const F = this.state.fluid,
-      o = this.view.fly.camera.position,
-      d = this.rayDir;
-    let removed = 0;
-    for (let i = F.n - 1; i >= 0 && removed < count; i--) {
-      const rx = F.x[i] - o.x,
-        ry = F.y[i] - o.y,
-        rz = F.z[i] - o.z;
-      const t = rx * d.x + ry * d.y + rz * d.z;
-      if (t < 0) continue;
-      const qx = rx - d.x * t,
-        qy = ry - d.y * t,
-        qz = rz - d.z * t;
-      if (qx * qx + qy * qy + qz * qz < 0.5) {
-        F.remove(i);
-        removed++;
+  private applyTools(dt: number): void {
+    if (!this.aim) return;
+    if (this.controls.primary) {
+      this.toolAcc += settings.flow * dt;
+      const k = Math.floor(this.toolAcc);
+      this.toolAcc -= k;
+      if (k > 0) {
+        const p = this.aim.point.clone().addScaledVector(this.aim.normal, INJECT_DEPTH);
+        injectAt(this.state, p.x, p.y, p.z, k, settings.matchWheel);
       }
+    }
+    if (this.controls.tertiary) {
+      const p = this.aim.point;
+      const amount = settings.brushRate * dt * (this.controls.modifier ? -1 : 1);
+      this.state.landscape.sculpt(
+        wheelAngle(p.x, p.z, this.state.theta),
+        p.y,
+        settings.brushSize,
+        amount,
+      );
     }
   }
 
@@ -167,7 +180,7 @@ export class Simulation {
     this.updateAim();
 
     if (!settings.paused) {
-      this.applyTool(dt);
+      this.applyTools(dt);
       this.acc += dt;
       let steps = 0;
       while (this.acc >= SUBSTEP && steps < MAX_SUBSTEPS) {
@@ -183,10 +196,11 @@ export class Simulation {
       }
     }
 
-    const marker: MarkerKind = this.aim && this.controls.locked ? settings.tool : 'none';
+    const marker: MarkerKind = this.aim && this.controls.locked ? 'aim' : 'none';
     const aim = this.aim ?? NO_AIM;
-    this.view.render(this.state, marker, aim.point, aim.normal, RAFT_OFFSET);
+    this.view.render(this.state, marker, aim.point, aim.normal, RAFT_OFFSET, settings.brushSize);
 
+    if (now - this.lastSave > SAVE_INTERVAL) this.save();
     if (now - this.lastReadout > READOUT_INTERVAL) {
       this.lastReadout = now;
       setReadouts({
