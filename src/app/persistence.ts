@@ -2,7 +2,7 @@ import type { CameraSnapshot } from '../render/camera';
 import type { SimSnapshot } from '../physics/serialize';
 import type { Settings } from './settings';
 
-const KEY = 'spin-gravity-wheel/v1';
+const KEY = 'spin-gravity-wheel/v2';
 
 export interface Snapshot {
   settings: Partial<Settings>;

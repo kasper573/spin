@@ -42,11 +42,11 @@ export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element
         <h2>Water and rafts</h2>
         <Slider
           label="Flow rate"
-          min={10}
-          max={200}
-          step={10}
+          min={100}
+          max={3000}
+          step={50}
           value={settings.flow}
-          format={(v) => `${v} /s`}
+          format={(v) => `${v} L/s`}
           onInput={(v) => setSettings('flow', v)}
         />
         <Toggle

@@ -4,7 +4,7 @@ import { savedSnapshot } from './persistence';
 export interface Settings {
   /** Target drum spin (rad/s). */
   spin: number;
-  /** Injection rate (particles per second). */
+  /** Injection rate in litres per second. */
   flow: number;
   /** New water and rafts start moving with the glass. */
   matchWheel: boolean;
@@ -34,7 +34,7 @@ export const SPIN_STEP = 0.25;
 
 export const defaultSettings = (): Settings => ({
   spin: 0,
-  flow: 60,
+  flow: 500,
   matchWheel: true,
   viscosity: 0.15,
   wallFriction: 0.5,

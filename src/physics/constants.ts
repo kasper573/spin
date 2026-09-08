@@ -3,17 +3,17 @@
 export const R_OUT = 3.5; // drum floor radius
 export const HALF_W = 0.6; // half width of the drum along its axis
 
-export const D = 0.2; // particle spacing
-export const H = 0.4; // SPH kernel radius
+export const D = 0.13; // particle spacing
+export const H = 2 * D; // SPH kernel radius
 export const H2 = H * H;
 export const RHO0 = 1000;
-export const MASS = RHO0 * D * D * D; // 8 kg per particle
+export const MASS = RHO0 * D * D * D; // about 2.2 kg (litres) per particle
 export const RMAX = R_OUT - D * 0.5;
 export const YMAX = HALF_W - D * 0.5;
 
-export const MAXP = 4000; // fluid particles
+export const MAXP = 9000; // fluid particles
 export const MAXN = 56; // fluid neighbours per particle
-export const MAXB = 24; // boundary neighbours per particle
+export const MAXB = 48; // boundary neighbours per particle
 export const MAXBP = 1200; // boundary particles across all rafts
 export const MAX_RAFTS = 12;
 

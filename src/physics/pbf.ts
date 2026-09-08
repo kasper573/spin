@@ -284,9 +284,9 @@ function excludeFromRafts(F: Fluid, rafts: Raft[]): void {
     const r = rafts[ri],
       m = r.m,
       c = r.p;
-    const ex = r.hx + 0.06,
-      ey = r.hy + 0.08,
-      ez = r.hz + 0.06,
+    const ex = r.hx + 0.3 * D,
+      ey = r.hy + 0.4 * D,
+      ez = r.hz + 0.3 * D,
       reach = Math.hypot(ex, ey, ez);
     let sub = 0;
     for (let i = 0; i < n; i++) {
@@ -300,7 +300,7 @@ function excludeFromRafts(F: Fluid, rafts: Raft[]): void {
       const ax = Math.abs(lx),
         ay = Math.abs(ly),
         az = Math.abs(lz);
-      if (ax < r.hx + 0.2 && az < r.hz + 0.2 && ay < r.hy + 0.25) sub++;
+      if (ax < r.hx + D && az < r.hz + D && ay < r.hy + 1.25 * D) sub++;
       if (ax >= ex || ay >= ey || az >= ez) continue;
       const pxn = ex - ax,
         pyn = ey - ay,

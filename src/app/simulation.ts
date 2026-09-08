@@ -10,7 +10,7 @@ import { Controls } from './controls';
 import { savedSnapshot, saveSnapshot } from './persistence';
 import { setReadouts, setSettings, settings } from './settings';
 
-const SUBSTEP = 1 / 120;
+const SUBSTEP = 1 / 90;
 const MAX_SUBSTEPS = 3;
 const READOUT_INTERVAL = 100; // ms
 const SAVE_INTERVAL = 2000; // ms
@@ -132,7 +132,7 @@ export class Simulation {
   private applyTools(dt: number): void {
     if (!this.aim) return;
     if (this.controls.primary) {
-      this.toolAcc += settings.flow * dt;
+      this.toolAcc += (settings.flow / MASS) * dt; // litres per second → particles
       const k = Math.floor(this.toolAcc);
       this.toolAcc -= k;
       if (k > 0) {

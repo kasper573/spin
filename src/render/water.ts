@@ -28,7 +28,7 @@ import {
   type WebGLRenderer,
   AlwaysDepth,
 } from 'three';
-import { MAXP } from '../physics/constants';
+import { D, MAXP } from '../physics/constants';
 import type { Fluid } from '../physics/fluid';
 import blurFrag from './shaders/blur.frag?raw';
 import compositeFrag from './shaders/composite.frag?raw';
@@ -37,10 +37,10 @@ import particleVert from './shaders/particle.vert?raw';
 import particleDepthFrag from './shaders/particleDepth.frag?raw';
 import particleThickFrag from './shaders/particleThick.frag?raw';
 
-const DEPTH_RADIUS = 0.24; // sphere radius used for the surface
-const THICK_RADIUS = 0.34; // wider footprint for a smooth thickness field
-const BLUR_RADIUS = 0.32; // world-space smoothing radius
-const BLUR_RANGE = 0.25; // depth difference (m) at which neighbours stop contributing
+const DEPTH_RADIUS = 1.2 * D; // sphere radius used for the surface
+const THICK_RADIUS = 1.7 * D; // wider footprint for a smooth thickness field
+const BLUR_RADIUS = 1.6 * D; // world-space smoothing radius
+const BLUR_RANGE = 1.25 * D; // depth difference (m) at which neighbours stop contributing
 const BLUR_PASSES = 2;
 
 function floatTargetType(renderer: WebGLRenderer): TextureDataType {
