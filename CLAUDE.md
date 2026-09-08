@@ -9,7 +9,6 @@
 - No paintjobs. Think longterm when adding features. Again, refactoring is encouraged: Don't just layer code on top of code without thinking about the longterm design. Entropy is the enemy.
 - Build once, run everywhere. The same binary (applies to all binaries in the repo) should be able to run in any environment. If assets or environment variables are changed the runtime should work anyway. (Note that runtimes may still panic or have degraded behavior if essential assets are missing)
 - No hardcoded environment defaults: Panic if an env var is missing or invalid. Makes mistakes loud and obvious and forces environments to be well and explicitly configured. Also aids with the "build once, run everywhere" principle.
-- While we currently deploy only to web for the forseeable future, the deploy target must still be abstracted away. Do not hard couple the codebase with any specific platform or environment. Ideally you only use abstractions provided by bevy and don't have to worry about this. But if you physically cannot avoid platform specific code, you must encapsulate it behind a single platform adapter so that it's easy to swap out the implementation for a different platform in the future.
 
 ## Code style
 
@@ -34,12 +33,14 @@
 The game crate's `src/` is organized into `core/` and `systems/`:
 
 `core/`:
+
 - code that may be reused by all systems
 - typically low level systems and primitives (the fluid and rigid body solvers, the fly camera, surface extraction, the platform adapter)
 - may not depend on high level systems
 - must be abstract and pluggable: systems integrate with core, core never reaches into a system. Never create a `systems::x` that mirrors a `core::x`. If core code seems to need a system, that's a sign core isn't abstract enough — make it extensible (traits, messages, registries, callbacks) and put the game-specific glue in the relevant feature.
 
 `systems/`:
+
 - high level systems and compositions of core primitives
 - the majority of our content and mechanics goes here (the drum, water, rafts, landscape, controls, hud, persistence)
 - may depend on other high level systems
