@@ -25,6 +25,27 @@ pub fn mat3mul(m: &[f64; 9], v: &Vec3d) -> Vec3d {
     ]
 }
 
+/// Solve `m x = b` for a row-major 3x3 `m`; `None` when it is singular.
+pub fn mat3solve(m: &[f64; 9], b: &Vec3d) -> Option<Vec3d> {
+    let c = [
+        m[4] * m[8] - m[5] * m[7],
+        m[2] * m[7] - m[1] * m[8],
+        m[1] * m[5] - m[2] * m[4],
+        m[5] * m[6] - m[3] * m[8],
+        m[0] * m[8] - m[2] * m[6],
+        m[2] * m[3] - m[0] * m[5],
+        m[3] * m[7] - m[4] * m[6],
+        m[1] * m[6] - m[0] * m[7],
+        m[0] * m[4] - m[1] * m[3],
+    ];
+    let det = m[0] * c[0] + m[1] * c[3] + m[2] * c[6];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let x = mat3mul(&c, b);
+    Some([x[0] / det, x[1] / det, x[2] / det])
+}
+
 /// a += b * s
 #[inline]
 pub fn add_scaled(a: &mut Vec3d, b: &Vec3d, s: f64) {

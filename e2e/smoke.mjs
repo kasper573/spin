@@ -5,6 +5,14 @@ import http from "node:http";
 import path from "node:path";
 import { connect, launchChrome, sleep } from "./cdp.mjs";
 
+async function waitFor(condition, what, seconds = 60) {
+  for (let attempt = 0; attempt < seconds * 10; attempt++) {
+    if (await condition()) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 const dist = path.resolve(import.meta.dirname, "..", "dist");
 const out = path.resolve(import.meta.dirname, "..", "target", "e2e");
 fs.mkdirSync(out, { recursive: true });
@@ -45,9 +53,15 @@ const status = async () => JSON.parse(await evaluate("window.spin_status()"));
 // Commands run on a later frame and the status is published at the end of each frame, so wait
 // for two more frames before reading anything back.
 const command = async (cmd) => {
-  const before = (await status()).frame;
+  const before = await status();
   await evaluate(`window.spin_command(${JSON.stringify(JSON.stringify(cmd))})`);
-  while ((await status()).frame < before + 2) await sleep(50);
+  await waitFor(async () => (await status()).frame >= before.frame + 2, `frames after ${cmd.cmd}`);
+  if (cmd.cmd === "advance") {
+    const target = before.time + cmd.seconds - 1e-3;
+    // Software rendering on a CI runner manages a few frames a second, each a fraction of a
+    // second of simulation.
+    await waitFor(async () => (await status()).time >= target, `the simulation to advance ${cmd.seconds} s`, 60 + 30 * cmd.seconds);
+  }
 };
 const screenshot = async (name) => {
   const r = await send("Page.captureScreenshot", { format: "png" });
@@ -109,7 +123,9 @@ try {
   const live = await status();
   check("frames render", live.fps > 1, `${live.fps.toFixed(1)} fps, sim ${(live.sim_rate * 100).toFixed(0)}%`);
 
+  const before = (await status()).saves;
   await command({ cmd: "save" });
+  await waitFor(async () => (await status()).saves > before, "the save to land");
   await send("Page.reload");
   check("app restarts", await waitForApp());
   const restored = await status();

@@ -10,7 +10,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 
 use super::landscape::{ROWS, SEGMENTS};
-use super::{HALF_WIDTH, RADIUS};
+use super::{DrumFrame, DrumUniform, HALF_WIDTH, RADIUS};
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f32 = 0.02;
@@ -21,9 +21,13 @@ pub struct DrumPlugin;
 
 impl Plugin for DrumPlugin {
     fn build(&self, app: &mut App) {
+        super::gpu::install(app);
         app.add_plugins(MaterialPlugin::<GlassMaterial>::default())
             .add_systems(Startup, spawn)
-            .add_systems(Update, (turn, rebuild_terrain).in_set(SimSet::Observe));
+            .add_systems(
+                Update,
+                (turn, rebuild_terrain, feed_water).in_set(SimSet::Observe),
+            );
     }
 }
 
@@ -236,4 +240,28 @@ fn ground_colour(height: f32) -> [f32; 4] {
         mix(dirt.blue, grass.blue),
         1.0,
     ]
+}
+
+/// Hand the water the drum's state for every substep taken this frame and the landscape when it
+/// changed.
+fn feed_water(
+    sim: Res<Simulation>,
+    mut frame: ResMut<DrumFrame>,
+    mut images: ResMut<Assets<Image>>,
+    mut uploaded: Local<Option<u64>>,
+) {
+    frame.states.clear();
+    for record in &sim.substeps {
+        frame
+            .states
+            .push(DrumUniform::new(&sim.drum, record.spin, record.angle));
+    }
+    frame
+        .states
+        .push(DrumUniform::new(&sim.drum, sim.drum.spin, sim.drum.angle));
+    let version = sim.drum.landscape.version();
+    if *uploaded != Some(version) {
+        *uploaded = Some(version);
+        super::gpu::upload_heights(&sim.drum, &frame, &mut images);
+    }
 }

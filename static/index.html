@@ -57,6 +57,9 @@
     <script type="module">
       import init from "./spin.js";
       try {
+        if (!navigator.gpu) {
+          throw new Error("this page needs WebGPU: use a current Chrome, Edge, Safari or Firefox");
+        }
         await init();
       } catch (e) {
         const log = document.getElementById("error-log");

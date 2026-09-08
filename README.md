@@ -3,8 +3,10 @@
 Live: https://kasper573.github.io/spin/
 
 A browser simulation of a solid glass drum spinning in zero g, built in Rust on Bevy. Water is a
-position-based fluid, rafts are rigid wooden boards with Coulomb friction against the moving glass,
-and the water is drawn as an isosurface with a cel-shaded material and foam.
+position-based fluid solved in compute shaders, rafts are rigid wooden boards with Coulomb friction
+against the moving glass, and the water is drawn as an isosurface the GPU extracts every frame,
+with a cel-shaded material and foam. It needs a browser with WebGPU (current Chrome, Edge, Safari
+or Firefox).
 
 ## Commands
 
@@ -12,7 +14,7 @@ and the water is drawn as an isosurface with a cel-shaded material and foam.
 | ------------ | -------------------------------------------------------------- |
 | `just lint`  | `cargo fmt --check`, the layering lint, clippy (native + wasm) |
 | `just test`  | the contract tests in `game/tests/`                            |
-| `just bench` | a fixed fluid workload, timed per substep                      |
+| `just bench` | a fixed fluid workload, timed per frame on the GPU             |
 | `just wasm`  | the browser client through `wasm-bindgen` into `target/wasm/`  |
 | `just dist`  | the page plus the wasm bundle in `dist/`                       |
 | `just serve` | build `dist/` and serve it on http://localhost:8000            |
@@ -25,21 +27,23 @@ Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pag
 
 One crate, `game/`, split into two layers plus thin binaries:
 
-- `src/core/` — reusable primitives that know nothing about the drum: `fluid/` (position-based
-  fluid solver and its spatial grid), `rigid/` (boxes and ballasted spheres and their contacts),
-  `vessel.rs` (the container trait both solvers see their walls through), `shuttle.rs` (the
-  self-righting vehicle the viewer rides), `surface.rs` (isosurface extraction), `units.rs`
-  (newtypes), `codec.rs` (float arrays in JSON), `math.rs`, and `web.rs` (the browser page: canvas,
-  localStorage, pointer lock, script hooks).
+- `src/core/` — reusable primitives that know nothing about the drum: `fluid/` (the position-based
+  fluid solver, body coupling and isosurface extraction as WGSL compute kernels under `shaders/`,
+  with the buffers, pipelines and per-frame dispatch that run them), `rigid/` (boxes and ballasted
+  spheres, their contacts, and what the water does to them), `vessel.rs` (the container both the
+  bodies and the water kernels see their walls through), `shuttle.rs` (the self-righting vehicle
+  the viewer rides), `units.rs` (newtypes), `codec.rs` (float arrays in JSON), `math.rs`, and
+  `web.rs` (the browser page: canvas, localStorage, pointer lock, script hooks).
 - `src/systems/` — the simulation itself: `drum/` (geometry, sculptable landscape, glass and
-  terrain rendering), `sim.rs` (the stepped world and its frame budget), `water.rs` and `rafts.rs`
-  (rendering), `player.rs` (the camera on the shuttle), `aim.rs` (crosshair ray), `controls.rs`
+  terrain rendering, and the drum as the water's vessel on the GPU), `sim.rs` (the stepped world),
+  `water.rs` and `rafts.rs` (rendering), `player.rs` (the camera on the shuttle), `aim.rs` (crosshair ray), `controls.rs`
   (mouse and keys), `settings.rs` (dials and
   toggles), `hud.rs` (text overlay), `persistence.rs` (snapshots), `testing.rs` (script commands and
   status), `scene.rs` (camera, lights, stars), `shaders/` (WGSL, embedded in the binary), and
   `app.rs` (plugin assembly).
 - `src/bin/` — `client` (the browser app), `bench`, `lint` (core may not reference systems).
-- `tests/` — contract tests against the public API.
+- `tests/` — contract tests against the public API, run headless on whatever GPU (or Vulkan
+  software driver) the machine has.
 - `static/` — the page that loads the wasm bundle. `e2e/` — the headless Chrome smoke test.
 
 ## Controls

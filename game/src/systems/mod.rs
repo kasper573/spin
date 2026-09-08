@@ -20,4 +20,5 @@ pub fn embed_shaders(app: &mut App) {
     embedded_asset!(app, "shaders/water.wgsl");
     embedded_asset!(app, "shaders/glass.wgsl");
     embedded_asset!(app, "shaders/stars.wgsl");
+    embedded_asset!(app, "drum/shaders/drum.wgsl");
 }

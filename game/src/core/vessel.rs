@@ -1,4 +1,21 @@
-//! The container the fluid and bodies live in, seen only through its walls.
+//! The container the fluid and bodies live in, seen only through its walls. Bodies collide with
+//! it on the CPU through [`Vessel`]; the water meets it on the GPU through a shader module named
+//! `vessel` (see `particles.wgsl` for the functions it must define) bound at group 1, whose
+//! layout and per-frame bind group the vessel's plugin provides.
+use bevy::prelude::*;
+use bevy::render::render_resource::{BindGroup, BindGroupLayoutDescriptor};
+
+/// The layout of bind group 1 of every fluid kernel, inserted into the render app by the vessel.
+#[derive(Resource, Clone)]
+pub struct VesselLayout(pub BindGroupLayoutDescriptor);
+
+/// Bind group 1 for this frame: one dynamic offset per substep of the frame, then one more for
+/// the vessel as it is after them.
+#[derive(Resource)]
+pub struct VesselBinding {
+    pub bind_group: BindGroup,
+    pub offsets: Vec<u32>,
+}
 
 pub const MAX_CONTACT_NORMALS: usize = 2;
 

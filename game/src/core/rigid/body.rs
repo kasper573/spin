@@ -1,5 +1,81 @@
 use crate::core::fluid::{H2, MAX_SPEED_BODY, POLY6, REST_DENSITY};
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul};
+use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve};
+
+/// What the water did to a body over a frame: the buoyancy impulse and torque, and the flow
+/// around the hull weighted by how strongly each wetted sample coupled to it, as a fraction of
+/// the body's mass. The flow sums let the body be relaxed toward the water it is actually in
+/// rather than by a difference against a stale copy of its own velocity, so the coupling stays
+/// stable whenever the readback lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaterCoupling {
+    pub buoyancy: Vec3d,
+    pub buoyancy_torque: Vec3d,
+    /// Σ k·v of the water around the hull.
+    pub flow: Vec3d,
+    /// Σ k·(r × v) of the water around the hull, about the centre of mass.
+    pub flow_moment: Vec3d,
+    /// Σ k·r over the wetted samples.
+    pub hull: Vec3d,
+    /// Σ k·(xx, yy, zz, xy, yz, zx) over the wetted samples.
+    pub hull_tensor: [f64; 6],
+    /// Σ k: the coupling mass over the body's mass.
+    pub coupling: f64,
+    pub wet: f64,
+}
+
+impl WaterCoupling {
+    pub fn add(&mut self, other: &WaterCoupling) {
+        for k in 0..3 {
+            self.buoyancy[k] += other.buoyancy[k];
+            self.buoyancy_torque[k] += other.buoyancy_torque[k];
+            self.flow[k] += other.flow[k];
+            self.flow_moment[k] += other.flow_moment[k];
+            self.hull[k] += other.hull[k];
+        }
+        for k in 0..6 {
+            self.hull_tensor[k] += other.hull_tensor[k];
+        }
+        self.coupling += other.coupling;
+        self.wet += other.wet;
+    }
+
+    /// The velocity of the water around the hull.
+    fn flow_velocity(&self) -> Vec3d {
+        self.flow.map(|f| f / self.coupling)
+    }
+
+    /// The spin that, together with `v`, would move the wetted hull with the water: solves
+    /// Σ k·r × (v + ω × r) = Σ k·r × v_water for ω. The wetted samples of a floating hull lie
+    /// nearly in a plane, which makes the system ill-conditioned, so it is regularised toward
+    /// `prior`, the rotation the surrounding water has when nothing disturbs it.
+    fn flow_spin(&self, v: &Vec3d, prior: &Vec3d) -> Option<Vec3d> {
+        let t = &self.hull_tensor;
+        let trace = t[0] + t[1] + t[2];
+        let m = [
+            2.0 * trace - t[0],
+            -t[3],
+            -t[5],
+            -t[3],
+            2.0 * trace - t[1],
+            -t[4],
+            -t[5],
+            -t[4],
+            2.0 * trace - t[2],
+        ];
+        let carried = cross(&self.hull, v);
+        let rhs = [
+            self.flow_moment[0] - carried[0] + trace * prior[0],
+            self.flow_moment[1] - carried[1] + trace * prior[1],
+            self.flow_moment[2] - carried[2] + trace * prior[2],
+        ];
+        mat3solve(&m, &rhs)
+    }
+
+    /// Σ k·|r|², the coupling's moment.
+    fn coupling_moment(&self) -> f64 {
+        self.hull_tensor[0] + self.hull_tensor[1] + self.hull_tensor[2]
+    }
+}
 
 /// What a body is made of, for contacts. Positions are local to the body's centre of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,13 +173,6 @@ pub struct Body {
     /// Rotation matrix (row-major) and world-space inverse inertia.
     pub m: [f64; 9],
     pub iw: [f64; 9],
-    acc_j: Vec3d,
-    acc_l: Vec3d,
-    drag_j: Vec3d,
-    drag_l: Vec3d,
-    drag_k: f64,
-    drag_ka: f64,
-    pub submerged: u32,
     /// Fraction of boundary samples in water, in [0, 1].
     pub wet: f64,
 }
@@ -123,13 +192,6 @@ impl Body {
             w,
             m: [0.0; 9],
             iw: [0.0; 9],
-            acc_j: [0.0; 3],
-            acc_l: [0.0; 3],
-            drag_j: [0.0; 3],
-            drag_l: [0.0; 3],
-            drag_k: 0.0,
-            drag_ka: 0.0,
-            submerged: 0,
             wet: 0.0,
         };
         body.update_rotation();
@@ -195,63 +257,43 @@ impl Body {
         add_scaled(&mut self.w, &mat3mul(&self.iw, l), 1.0);
     }
 
-    /// Accumulate an impulse applied at a world point, to be applied once per substep.
-    #[inline]
-    pub fn accumulate(&mut self, j: Vec3d, at: Vec3d) {
-        add_scaled(&mut self.acc_j, &j, 1.0);
-        let r = [at[0] - self.p[0], at[1] - self.p[1], at[2] - self.p[2]];
-        add_scaled(&mut self.acc_l, &cross(&r, &j), 1.0);
-    }
-
-    /// Accumulate a drag impulse from one particle–sample pair; `mw` is the pair's coupling mass,
-    /// used to measure how far the summed drag would relax this body in a single substep.
-    #[inline]
-    pub fn accumulate_drag(&mut self, j: Vec3d, at: Vec3d, mw: f64) {
-        add_scaled(&mut self.drag_j, &j, 1.0);
-        let r = [at[0] - self.p[0], at[1] - self.p[1], at[2] - self.p[2]];
-        add_scaled(&mut self.drag_l, &cross(&r, &j), 1.0);
-        self.drag_k += mw * self.inv_m;
-        self.drag_ka += mw * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) * self.inv_i_max;
-    }
-
-    /// Apply the accumulated water impulses; drag relaxes the body at most once per substep and
-    /// the rest is limited to `max_dv` of velocity change.
-    pub fn apply_accumulated(&mut self, max_dv: f64) {
-        let s_lin = if self.drag_k > 1.0 {
-            1.0 / self.drag_k
-        } else {
-            1.0
-        };
-        let s_ang = if self.drag_ka > 1.0 {
-            1.0 / self.drag_ka
-        } else {
-            1.0
-        };
-        let drag_j = self.drag_j;
-        add_scaled(&mut self.v, &drag_j, self.inv_m * s_lin);
-        add_scaled(&mut self.w, &mat3mul(&self.iw, &self.drag_l), s_ang);
-        self.drag_j = [0.0; 3];
-        self.drag_l = [0.0; 3];
-        self.drag_k = 0.0;
-        self.drag_ka = 0.0;
+    /// Take what the water did: the drag relaxes the body toward the flow by at most once over,
+    /// the buoyancy is limited to `max_dv` of velocity change. `spin` is the rotation of the
+    /// water at rest in the vessel.
+    pub fn couple(&mut self, water: &WaterCoupling, max_dv: f64, spin: &Vec3d) {
+        self.wet = water.wet.clamp(0.0, 1.0);
+        if water.coupling > 0.0 {
+            let flow = water.flow_velocity();
+            let s_lin = water.coupling.min(1.0);
+            for (v, f) in self.v.iter_mut().zip(flow) {
+                *v += (f - *v) * s_lin;
+            }
+            if let Some(wanted) = water.flow_spin(&self.v, spin) {
+                let s_ang = (water.coupling_moment() / self.inv_m * self.inv_i_max).min(1.0);
+                for (w, f) in self.w.iter_mut().zip(wanted) {
+                    *w += (f - *w) * s_ang;
+                }
+            }
+        }
 
         let cap = max_dv / self.inv_m;
-        let jm = (self.acc_j[0] * self.acc_j[0]
-            + self.acc_j[1] * self.acc_j[1]
-            + self.acc_j[2] * self.acc_j[2])
-            .sqrt();
+        let mut j = water.buoyancy;
+        let mut l = water.buoyancy_torque;
+        let jm = (j[0] * j[0] + j[1] * j[1] + j[2] * j[2]).sqrt();
         if jm > cap {
             let s = cap / jm;
             for k in 0..3 {
-                self.acc_j[k] *= s;
-                self.acc_l[k] *= s;
+                j[k] *= s;
+                l[k] *= s;
             }
         }
-        let acc_j = self.acc_j;
-        add_scaled(&mut self.v, &acc_j, self.inv_m);
-        add_scaled(&mut self.w, &mat3mul(&self.iw, &self.acc_l), 1.0);
-        self.acc_j = [0.0; 3];
-        self.acc_l = [0.0; 3];
+        add_scaled(&mut self.v, &j, self.inv_m);
+        add_scaled(&mut self.w, &mat3mul(&self.iw, &l), 1.0);
+    }
+
+    /// The largest inverse moment of inertia about any principal axis.
+    pub fn inv_inertia_max(&self) -> f64 {
+        self.inv_i_max
     }
 
     pub fn integrate(&mut self, dt: f64) {

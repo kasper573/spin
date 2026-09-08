@@ -1,7 +1,11 @@
+use bevy::prelude::*;
+use game::core::fluid::Fluid;
 use game::core::units::{Radians, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
 use game::systems::drum::{Drum, Landscape, RADIUS, wheel_angle};
+use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
+use game::systems::testing;
 
 #[test]
 fn sculpting_raises_ground_under_the_brush_only() {
@@ -50,31 +54,41 @@ fn terrain_pushes_particles_out_and_turns_with_the_drum() {
 
 #[test]
 fn water_settles_on_top_of_raised_ground() {
-    let mut sim = Simulation::default();
-    sim.drum.target_spin = RadiansPerSecond(1.6);
-    sim.drum.spin = RadiansPerSecond(1.6);
-    for _ in 0..40 {
-        sim.drum.landscape.sculpt(0.8, 0.0, 1.2, 0.03);
+    let mut app = testing::headless();
+    app.world_mut().resource_mut::<Settings>().spin = RadiansPerSecond(1.6);
+    {
+        let mut sim = app.world_mut().resource_mut::<Simulation>();
+        sim.drum.spin = RadiansPerSecond(1.6);
+        for _ in 0..40 {
+            sim.drum.landscape.sculpt(0.8, 0.0, 1.2, 0.03);
+        }
     }
     for k in 0..8 {
         let a = k as f32 * 0.8;
-        sim.inject([a.cos() * 2.0, 0.0, a.sin() * 2.0], 150);
-        sim.advance_exact(Seconds(0.2));
+        app.world_mut()
+            .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world.resource::<Simulation>().inject(
+                    &mut fluid,
+                    [a.cos() * 2.4, 0.0, a.sin() * 2.4],
+                    150,
+                )
+            });
+        testing::run(&mut app, Seconds(0.2));
     }
-    sim.advance_exact(Seconds(5.0));
-    let inside = sim
-        .fluid
-        .particles()
-        .filter(|p| {
-            let (pen, _) = sim.drum.landscape.penetration(
-                p.position[0] as f64,
-                p.position[1] as f64,
-                p.position[2] as f64,
-                sim.drum.angle.0,
-                0.0,
-            );
-            pen > 0.06
-        })
-        .count();
-    assert_eq!(inside, 0);
+    testing::run(&mut app, Seconds(6.0));
+    let particles = testing::particles(&mut app);
+    let sim = app.world().resource::<Simulation>();
+    let angle = sim.drum.angle.0;
+    let height = sim.drum.landscape.max_height() as f64;
+    assert!(height > 0.5, "landscape height {height}");
+    for p in &particles {
+        let [x, y, z] = p.position.map(|v| v as f64);
+        let r = (x * x + z * z).sqrt();
+        let (h, _, _) = sim.drum.landscape.sample(wheel_angle(x, z, angle), y);
+        assert!(
+            r <= RADIUS as f64 - h + 0.06,
+            "particle inside terrain: r {r}, ground at {}",
+            RADIUS as f64 - h
+        );
+    }
 }

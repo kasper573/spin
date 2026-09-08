@@ -34,12 +34,13 @@ bevy = { workspace = true, features = [
     "bevy_window",
     "bevy_ui",
     "bevy_ui_render",
-    "webgl2",
+    "webgpu",
     "web",
 ] }
 serde.workspace = true
 serde_json.workspace = true
 base64 = "0.22"
+bytemuck = "1"
 console_error_panic_hook = "0.1"
 wasm-bindgen = "=0.2.126"
 js-sys = "0.3"

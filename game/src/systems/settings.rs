@@ -245,7 +245,8 @@ fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
     sim.drum.target_spin = settings.spin;
     sim.params.viscosity = settings.viscosity;
     sim.params.wall_friction = settings.wall_friction;
-    sim.params.body_friction = settings.raft_friction as f64;
     sim.params.air = settings.air;
+    sim.body_params.friction = settings.raft_friction as f64;
+    sim.body_params.air = settings.air;
     sim.shuttle_mut().solid = settings.collisions;
 }

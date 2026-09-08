@@ -1,6 +1,7 @@
 //! Text-only overlay: every key binding with its current value, the crosshair, and live readouts.
 use bevy::prelude::*;
 
+use crate::core::fluid::Fluid;
 use crate::systems::controls::{ClearAction, Controls};
 use crate::systems::settings::{Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -64,7 +65,13 @@ fn spawn(mut commands: Commands) {
         });
 }
 
-pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps: f32) -> String {
+pub fn hud_text(
+    settings: &Settings,
+    sim: &Simulation,
+    fluid: &Fluid,
+    controls: &Controls,
+    fps: f32,
+) -> String {
     let mut out = String::new();
     out.push_str("SPIN GRAVITY WHEEL\n");
     out.push_str(if controls.active {
@@ -103,7 +110,7 @@ pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps:
     }
     out.push_str(&format!(
         "\nwater {:.0} L · rafts {} · spin {:.2} rad/s · {:.0} fps · sim {:.0}%",
-        sim.water().0,
+        Simulation::water(fluid).0,
         sim.rafts().len(),
         sim.drum.spin.0,
         fps,
@@ -112,12 +119,14 @@ pub fn hud_text(settings: &Settings, sim: &Simulation, controls: &Controls, fps:
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refresh(
     time: Res<Time>,
     mut frame_time: ResMut<FrameTime>,
     mut rate: ResMut<FrameRate>,
     settings: Res<Settings>,
     sim: Res<Simulation>,
+    fluid: Res<Fluid>,
     controls: Res<Controls>,
     mut texts: Query<&mut Text, With<HudText>>,
 ) {
@@ -126,7 +135,7 @@ fn refresh(
         frame_time.0 += (dt - frame_time.0) * 0.1;
         rate.0 = 1.0 / frame_time.0;
     }
-    let text = hud_text(&settings, &sim, &controls, rate.0);
+    let text = hud_text(&settings, &sim, &fluid, &controls, rate.0);
     for mut t in &mut texts {
         if t.0 != text {
             t.0 = text.clone();

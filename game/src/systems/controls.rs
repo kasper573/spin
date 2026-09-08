@@ -4,6 +4,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
+use crate::core::fluid::Fluid;
 use crate::core::units::Metres;
 use crate::core::web;
 use crate::systems::aim::Aim;
@@ -57,9 +58,9 @@ impl ClearAction {
         }
     }
 
-    pub fn apply(self, sim: &mut Simulation) {
+    pub fn apply(self, sim: &mut Simulation, fluid: &mut Fluid) {
         match self {
-            ClearAction::ClearWater => sim.fluid.clear(),
+            ClearAction::ClearWater => fluid.clear(),
             ClearAction::ClearRafts => sim.clear_rafts(),
             ClearAction::ResetLandscape => sim.drum.landscape.reset(),
         }
@@ -152,6 +153,7 @@ fn keys(
     scroll: Res<AccumulatedMouseScroll>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
+    mut fluid: ResMut<Fluid>,
 ) {
     controls.held_dial = Dial::ALL.into_iter().find(|dial| keys.pressed(dial.key()));
     if let Some(dial) = controls.held_dial
@@ -167,12 +169,13 @@ fn keys(
     if keys.pressed(ClearAction::CHORD) {
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
-                action.apply(&mut sim);
+                action.apply(&mut sim, &mut fluid);
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mouse(
     mut controls: ResMut<Controls>,
     time: Res<Time>,
@@ -181,6 +184,7 @@ fn mouse(
     aim: Res<Aim>,
     settings: Res<Settings>,
     mut sim: ResMut<Simulation>,
+    mut fluid: ResMut<Fluid>,
 ) {
     controls.sculpting = false;
     if !controls.active {
@@ -196,7 +200,7 @@ fn mouse(
         let count = controls.inject_carry.floor();
         controls.inject_carry -= count;
         let at = target.point + target.normal * INJECT_DEPTH.0;
-        sim.inject(at.to_array(), count as u32);
+        sim.inject(&mut fluid, at.to_array(), count as u32);
     } else {
         controls.inject_carry = 0.0;
     }

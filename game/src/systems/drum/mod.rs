@@ -1,8 +1,10 @@
 //! The glass drum: a solid cylinder spinning about its axis (world y), with a sculptable landscape
 //! on the inside of its floor. Implements the vessel the fluid and rafts live in.
+mod gpu;
 mod landscape;
 mod render;
 
+pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{Landscape, wheel_angle};
 pub use render::DrumPlugin;
 

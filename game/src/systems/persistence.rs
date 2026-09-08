@@ -1,10 +1,11 @@
 //! Everything worth keeping across a reload — settings, shuttle, drum, water, rafts, landscape —
-//! as one JSON snapshot in the browser's storage, written every couple of seconds.
+//! as one JSON snapshot in the browser's storage, written every couple of seconds. The water
+//! lives on the GPU, so a save first asks for a copy and writes when it arrives.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::codec;
-use crate::core::fluid::{PARTICLE_SPACING, Particle};
+use crate::core::fluid::{Fluid, FluidBuffers, PARTICLE_SPACING, Particle};
 use crate::core::rigid::Body;
 use crate::core::shuttle::Look;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
@@ -43,6 +44,13 @@ pub struct ShuttlePose {
     pub look: Look,
 }
 
+/// Saves requested and completed so far.
+#[derive(Resource, Default)]
+pub struct Saves {
+    pub completed: u32,
+    pending: Option<u32>,
+}
+
 pub struct PersistencePlugin;
 
 impl Plugin for PersistencePlugin {
@@ -51,12 +59,13 @@ impl Plugin for PersistencePlugin {
             AUTOSAVE_INTERVAL.0,
             TimerMode::Repeating,
         )))
+        .init_resource::<Saves>()
         .add_systems(PostStartup, restore)
-        .add_systems(Update, autosave.in_set(SimSet::Observe));
+        .add_systems(Update, (autosave, flush).chain().in_set(SimSet::Observe));
     }
 }
 
-pub fn snapshot(settings: &Settings, sim: &Simulation, player: &Player) -> Snapshot {
+pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid, player: &Player) -> Snapshot {
     let shuttle = sim.shuttle();
     Snapshot {
         settings: settings.clone(),
@@ -70,8 +79,7 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, player: &Player) -> Snaps
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
-        fluid: sim
-            .fluid
+        fluid: fluid
             .particles()
             .flat_map(|p| {
                 let [x, y, z] = p.position;
@@ -98,10 +106,12 @@ pub fn apply(
     snapshot: &Snapshot,
     settings: &mut Settings,
     sim: &mut Simulation,
+    fluid: &mut Fluid,
     player: &mut Player,
 ) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
+    fluid.clear();
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-10.0, 10.0));
     sim.drum.target_spin = settings.spin;
     sim.drum.angle = Radians(finite_f64(snapshot.angle.0));
@@ -111,7 +121,7 @@ pub fn apply(
         if chunk.iter().all(|v| v.is_finite()) {
             let mut position = [chunk[0], chunk[1], chunk[2]];
             sim.drum.confine(&mut position, PARTICLE_SPACING * 0.5);
-            sim.fluid.add(Particle {
+            fluid.add(Particle {
                 position,
                 velocity: [chunk[3], chunk[4], chunk[5]],
                 foam: chunk[6].clamp(0.0, 1.0),
@@ -133,15 +143,15 @@ pub fn apply(
     sim.shuttle_mut().solid = settings.collisions;
 }
 
-pub fn save_now(world: &mut World) {
-    let snapshot = snapshot(
-        world.resource::<Settings>(),
-        world.resource::<Simulation>(),
-        world.resource::<Player>(),
-    );
-    if let Ok(text) = serde_json::to_string(&snapshot) {
-        web::storage_save(KEY, &text);
-    }
+/// Ask for the water and save once it has arrived.
+pub fn save_soon(world: &mut World) {
+    let buffers = world.resource::<FluidBuffers>().clone();
+    let ticket = world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+        let mut commands = world.commands();
+        fluid.request_snapshot(&mut commands, &buffers)
+    });
+    world.flush();
+    world.resource_mut::<Saves>().pending = Some(ticket);
 }
 
 #[derive(Resource)]
@@ -174,8 +184,10 @@ fn restore(world: &mut World) {
     };
     world.resource_scope(|world, mut settings: Mut<Settings>| {
         world.resource_scope(|world, mut sim: Mut<Simulation>| {
-            world.resource_scope(|_, mut player: Mut<Player>| {
-                apply(&snapshot, &mut settings, &mut sim, &mut player)
+            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world.resource_scope(|_, mut player: Mut<Player>| {
+                    apply(&snapshot, &mut settings, &mut sim, &mut fluid, &mut player)
+                })
             })
         })
     });
@@ -189,8 +201,29 @@ fn autosave(world: &mut World) {
         .tick(delta)
         .just_finished()
     {
-        save_now(world);
+        save_soon(world);
     }
+}
+
+fn flush(world: &mut World) {
+    let Some(ticket) = world.resource::<Saves>().pending else {
+        return;
+    };
+    if !world.resource::<Fluid>().snapshot_ready(ticket) {
+        return;
+    }
+    let snapshot = snapshot(
+        world.resource::<Settings>(),
+        world.resource::<Simulation>(),
+        world.resource::<Fluid>(),
+        world.resource::<Player>(),
+    );
+    if let Ok(text) = serde_json::to_string(&snapshot) {
+        web::storage_save(KEY, &text);
+    }
+    let mut saves = world.resource_mut::<Saves>();
+    saves.pending = None;
+    saves.completed += 1;
 }
 
 fn finite(v: f32) -> f32 {

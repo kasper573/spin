@@ -1,12 +1,18 @@
-//! Automation hooks: scripts push JSON commands through the platform and read back a status line.
+//! Automation hooks: scripts push JSON commands through the platform and read back a status line;
+//! plus the headless app the bench and the tests drive frame by frame.
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use bevy::render::gpu_readback::{Readback, ReadbackComplete};
+use bevy::render::storage::ShaderBuffer;
+
+use crate::core::fluid::{Fluid, FluidBuffers, FluidReady};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
+use crate::systems::app;
 use crate::systems::hud::FrameRate;
-use crate::systems::persistence;
+use crate::systems::persistence::{self, Saves};
 use crate::systems::player::Player;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
@@ -65,6 +71,8 @@ pub struct ScriptStatus {
     pub fps: f32,
     pub sim_rate: f32,
     pub landscape_max: f32,
+    /// Saves written to storage so far.
+    pub saves: u32,
     /// Each raft's distance from the axis and its tangential speed relative to the glass.
     pub raft_slip: Vec<[f32; 2]>,
 }
@@ -82,16 +90,20 @@ fn drain(world: &mut World) {
     let commands = web::take_script_commands();
     for text in commands {
         match serde_json::from_str::<ScriptCommand>(&text) {
-            Ok(command) => run(world, command),
+            Ok(command) => execute(world, command),
             Err(error) => warn!("ignored script command {text}: {error}"),
         }
     }
 }
 
-fn run(world: &mut World, command: ScriptCommand) {
+fn execute(world: &mut World, command: ScriptCommand) {
     match command {
         ScriptCommand::Inject { x, y, z, count } => {
-            world.resource_mut::<Simulation>().inject([x, y, z], count);
+            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world
+                    .resource::<Simulation>()
+                    .inject(&mut fluid, [x, y, z], count)
+            });
         }
         ScriptCommand::Raft {
             x,
@@ -135,19 +147,28 @@ fn run(world: &mut World, command: ScriptCommand) {
                 );
             });
         }
-        ScriptCommand::Advance { seconds } => world
-            .resource_mut::<Simulation>()
-            .advance_exact(Seconds(seconds)),
-        ScriptCommand::Reset => world.resource_mut::<Simulation>().reset(),
-        ScriptCommand::Save => persistence::save_now(world),
+        ScriptCommand::Advance { seconds } => {
+            world.resource_mut::<Simulation>().request(Seconds(seconds))
+        }
+        ScriptCommand::Reset => {
+            world.resource_mut::<Simulation>().reset();
+            world.resource_mut::<Fluid>().clear();
+        }
+        ScriptCommand::Save => persistence::save_soon(world),
     }
 }
 
-fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
+fn publish(
+    sim: Res<Simulation>,
+    fluid: Res<Fluid>,
+    saves: Res<Saves>,
+    fps: Res<FrameRate>,
+    frame: Res<FrameCount>,
+) {
     let status = ScriptStatus {
         frame: frame.0,
-        particles: sim.fluid.len(),
-        litres: sim.water().0,
+        particles: fluid.len(),
+        litres: Simulation::water(&fluid).0,
         rafts: sim.rafts().len(),
         spin: sim.drum.spin,
         angle: sim.drum.angle,
@@ -155,6 +176,7 @@ fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
         fps: fps.0,
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
+        saves: saves.completed,
         raft_slip: sim
             .rafts()
             .iter()
@@ -168,4 +190,81 @@ fn publish(sim: Res<Simulation>, fps: Res<FrameRate>, frame: Res<FrameCount>) {
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);
     }
+}
+
+/// The simulation with rendering into nothing, stepped by hand.
+pub fn headless() -> App {
+    let mut app = app::build_headless();
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Run frames until this much simulated time has passed.
+pub fn run(app: &mut App, seconds: Seconds) {
+    app.world_mut()
+        .resource_mut::<Simulation>()
+        .request(seconds);
+    let mut idle = 0;
+    while app.world().resource::<Simulation>().queued().0 > 0.0 {
+        app.update();
+        if app.world().resource::<FluidReady>().get() {
+            idle = 0;
+        } else {
+            idle += 1;
+            assert!(idle < 2000, "the water's shaders never became ready");
+        }
+    }
+}
+
+/// Run frames until a fresh copy of the water has been read back, then return it.
+pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
+    let buffers = app.world().resource::<FluidBuffers>().clone();
+    let ticket = app
+        .world_mut()
+        .resource_scope(|world, mut fluid: Mut<Fluid>| {
+            let mut commands = world.commands();
+            fluid.request_snapshot(&mut commands, &buffers)
+        });
+    for _ in 0..600 {
+        app.update();
+        if app.world().resource::<Fluid>().snapshot_ready(ticket) {
+            break;
+        }
+    }
+    app.world().resource::<Fluid>().particles().collect()
+}
+
+/// How many triangles the water's surface currently has, read back from the GPU.
+pub fn surface_triangles(app: &mut App) -> u32 {
+    let counters = app
+        .world()
+        .resource::<FluidBuffers>()
+        .surface
+        .counters
+        .clone();
+    read_u32s(app, counters).get(1).copied().unwrap_or(0) / 3
+}
+
+#[derive(Resource, Default)]
+struct ReadResult(Option<Vec<u32>>);
+
+fn read_u32s(app: &mut App, buffer: Handle<ShaderBuffer>) -> Vec<u32> {
+    app.world_mut().insert_resource(ReadResult::default());
+    app.world_mut().spawn(Readback::buffer(buffer)).observe(
+        |event: On<ReadbackComplete>, mut result: ResMut<ReadResult>, mut commands: Commands| {
+            result.0 = Some(event.to_shader_type());
+            commands.entity(event.entity).try_despawn();
+        },
+    );
+    for _ in 0..600 {
+        app.update();
+        if app.world().resource::<ReadResult>().0.is_some() {
+            break;
+        }
+    }
+    app.world_mut()
+        .remove_resource::<ReadResult>()
+        .and_then(|r| r.0)
+        .unwrap_or_default()
 }

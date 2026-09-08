@@ -1,0 +1,136 @@
+// The drum as the fluid solver's vessel: a spinning cylinder with caps, a heightfield landscape on
+// its inside wall, and air that turns with the glass. Mirrors `Drum` on the CPU.
+#define_import_path vessel
+
+struct DrumUniform {
+    spin: f32,
+    angle: f32,
+    radius: f32,
+    half_width: f32,
+    // 1 when any landscape is raised
+    landscape: u32,
+    segments: u32,
+    rows: u32,
+    pad: u32,
+    dphi: f32,
+    dy: f32,
+    pad_b: f32,
+    pad_c: f32,
+}
+
+@group(1) @binding(0) var<uniform> drum: DrumUniform;
+@group(1) @binding(1) var heights: texture_2d<f32>;
+
+struct Confined {
+    p: vec3<f32>,
+    // inward wall normals, w = 1 when present
+    first: vec4<f32>,
+    second: vec4<f32>,
+}
+
+struct Penetration {
+    depth: f32,
+    normal: vec3<f32>,
+}
+
+const TWO_PI: f32 = 6.283185307179586;
+
+fn height_at(segment: u32, row: u32) -> f32 {
+    return textureLoad(heights, vec2<i32>(i32(row), i32(segment)), 0).r;
+}
+
+/// Bilinear height and its derivatives with respect to wheel angle and axial position.
+fn landscape_sample(phi: f32, y: f32) -> vec3<f32> {
+    let segments = f32(drum.segments);
+    var u = (phi / drum.dphi) % segments;
+    if (u < 0.0) {
+        u += segments;
+    }
+    let i_a = u32(floor(u)) % drum.segments;
+    let fu = u - floor(u);
+    let i_b = (i_a + 1u) % drum.segments;
+    let v = clamp((y + drum.half_width) / drum.dy, 0.0, f32(drum.rows) - 1.0 - 1e-6);
+    let j_a = u32(floor(v));
+    let fv = v - floor(v);
+    let j_b = j_a + 1u;
+    let h_aa = height_at(i_a, j_a);
+    let h_ba = height_at(i_b, j_a);
+    let h_ab = height_at(i_a, j_b);
+    let h_bb = height_at(i_b, j_b);
+    let h = (h_aa * (1.0 - fu) + h_ba * fu) * (1.0 - fv) + (h_ab * (1.0 - fu) + h_bb * fu) * fv;
+    let dphi = ((h_ba - h_aa) * (1.0 - fv) + (h_bb - h_ab) * fv) / drum.dphi;
+    let dy = ((h_ab - h_aa) * (1.0 - fu) + (h_bb - h_ba) * fu) / drum.dy;
+    return vec3(h, dphi, dy);
+}
+
+/// Signed penetration of a point into the terrain (positive = inside) and the inward normal.
+fn landscape_penetration(p: vec3<f32>, margin: f32) -> Penetration {
+    let r = length(p.xz);
+    if (r < 1e-6) {
+        return Penetration(-drum.radius, vec3(0.0));
+    }
+    let s = landscape_sample(atan2(p.z, p.x) + drum.angle, p.y);
+    let f = r - (drum.radius - s.x - margin);
+    let g_phi = s.y / r;
+    let g = vec3((p.x - g_phi * p.z) / r, s.z, (p.z + g_phi * p.x) / r);
+    let len = max(length(g), 1e-12);
+    return Penetration(f / len, -g / len);
+}
+
+fn vessel_confine(p_in: vec3<f32>, margin: f32) -> Confined {
+    var p = p_in;
+    var out = Confined(p, vec4(0.0), vec4(0.0));
+    var count = 0u;
+    if (drum.landscape == 0u) {
+        let limit = drum.radius - margin;
+        let r = length(p.xz);
+        if (r > limit) {
+            p.x *= limit / r;
+            p.z *= limit / r;
+            out.first = vec4(-p.x / limit, 0.0, -p.z / limit, 1.0);
+            count = 1u;
+        }
+    } else {
+        for (var attempt = 0u; attempt < 2u; attempt++) {
+            let pen = landscape_penetration(p, margin);
+            if (pen.depth <= 0.0) {
+                break;
+            }
+            p += pen.normal * pen.depth;
+            if (count == 0u) {
+                out.first = vec4(pen.normal, 1.0);
+                count = 1u;
+            }
+        }
+    }
+    let cap = drum.half_width - margin;
+    var cap_normal = vec4(0.0);
+    if (p.y > cap) {
+        p.y = cap;
+        cap_normal = vec4(0.0, -1.0, 0.0, 1.0);
+    } else if (p.y < -cap) {
+        p.y = -cap;
+        cap_normal = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    if (cap_normal.w > 0.0) {
+        if (count == 0u) {
+            out.first = cap_normal;
+        } else {
+            out.second = cap_normal;
+        }
+    }
+    out.p = p;
+    return out;
+}
+
+fn vessel_wall_velocity(p: vec3<f32>) -> vec3<f32> {
+    return vec3(drum.spin * p.z, 0.0, -drum.spin * p.x);
+}
+
+fn vessel_air_velocity(p: vec3<f32>) -> vec4<f32> {
+    let inside = dot(p.xz, p.xz) < drum.radius * drum.radius && abs(p.y) < drum.half_width;
+    if (inside) {
+        return vec4(vessel_wall_velocity(p), 1.0);
+    }
+    return vec4(0.0);
+}

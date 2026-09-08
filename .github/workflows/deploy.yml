@@ -39,7 +39,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft* /etc/apt/sources.list.d/azure*
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev \
+          sudo apt-get install -y mesa-vulkan-drivers libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev \
             libxrender-dev libxfixes-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
         with:
