@@ -1,20 +1,26 @@
-import { MASS, R_OUT } from '../physics/constants';
+import { Vector3 } from 'three';
+import { MASS, RAFT_T } from '../physics/constants';
 import { injectAt, makeState, spawnRaft, step, type SimState } from '../physics/world';
 import type { MarkerKind } from '../render/markers';
 import { View } from '../render/view';
-import { Pointer } from './pointer';
+import { aimAtDrum, type Aim } from './aim';
+import { Controls } from './controls';
 import { setReadouts, setSettings, settings } from './settings';
 
 const SUBSTEP = 1 / 120;
 const MAX_SUBSTEPS = 3;
-const DRAIN_RATE = 240; // particles per second removed under the cursor
+const DRAIN_RATE = 240; // particles per second removed along the aim ray
 const READOUT_INTERVAL = 100; // ms
+const INJECT_DEPTH = 0.4; // how far inside the aimed surface water appears
+const RAFT_OFFSET = RAFT_T / 2 + 0.04; // raft centre above the aimed surface
 
-/** Owns the simulation state, the renderer and the frame loop. */
+/** Owns the simulation state, the renderer, the controls and the frame loop. */
 export class Simulation {
   private state: SimState = makeState();
   private readonly view: View;
-  private readonly pointer: Pointer;
+  private readonly controls: Controls;
+  private aim: Aim | null = null;
+  private readonly rayDir = new Vector3();
   private raf = 0;
   private last = performance.now();
   private acc = 0;
@@ -25,10 +31,11 @@ export class Simulation {
 
   constructor(canvas: HTMLCanvasElement) {
     this.view = new View(canvas);
-    this.pointer = new Pointer(canvas, {
-      orbit: (dx, dy) => this.view.orbit.rotate(dx, dy),
-      zoom: (dy) => this.view.orbit.zoom(dy),
-      click: () => this.onClick(),
+    this.controls = new Controls(canvas, this.view.fly.keys, {
+      look: (dx, dy) => this.view.fly.look(dx, dy),
+      wheel: (dy) => this.view.fly.adjustSpeed(dy),
+      secondary: () => this.placeRaft(),
+      lockChange: (locked) => setReadouts('controlsActive', locked),
     });
     window.addEventListener('resize', this.onResize);
   }
@@ -41,6 +48,7 @@ export class Simulation {
   dispose(): void {
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this.onResize);
+    this.controls.dispose();
     this.view.renderer.dispose();
   }
 
@@ -50,18 +58,6 @@ export class Simulation {
 
   clearRafts(): void {
     this.state.rafts.length = 0;
-  }
-
-  addRaft(): void {
-    const a = Math.random() * Math.PI * 2,
-      r = 0.8 + Math.random() * (R_OUT - 1.6);
-    spawnRaft(
-      this.state,
-      Math.cos(a) * r,
-      (Math.random() - 0.5) * 0.4,
-      Math.sin(a) * r,
-      settings.matchWheel,
-    );
   }
 
   /** Inject `count` particles around a point inside the drum. */
@@ -87,32 +83,45 @@ export class Simulation {
 
   private readonly onResize = (): void => this.view.resize();
 
-  private onClick(): void {
-    if (settings.tool !== 'raft' || settings.paused) return;
-    this.pointer.update(this.view.orbit.camera);
-    const p = this.pointer.point;
-    spawnRaft(this.state, p.x, 0, p.z, settings.matchWheel);
+  private updateAim(): void {
+    const cam = this.view.fly.camera;
+    cam.getWorldDirection(this.rayDir);
+    this.aim = aimAtDrum(cam.position, this.rayDir);
+  }
+
+  private placeRaft(): void {
+    if (settings.paused) return;
+    this.updateAim();
+    if (!this.aim) return;
+    const p = this.aim.point.clone().addScaledVector(this.aim.normal, RAFT_OFFSET);
+    spawnRaft(
+      this.state,
+      [p.x, p.y, p.z],
+      [this.aim.normal.x, this.aim.normal.y, this.aim.normal.z],
+      settings.matchWheel,
+    );
   }
 
   private applyTool(dt: number): void {
-    const ps = this.pointer.state;
-    if (!ps.using || !ps.over) return;
-    const rate =
-      settings.tool === 'inject' ? settings.flow : settings.tool === 'drain' ? DRAIN_RATE : 0;
+    if (!this.controls.primary || !this.aim) return;
+    const rate = settings.tool === 'inject' ? settings.flow : DRAIN_RATE;
     this.toolAcc += rate * dt;
     const k = Math.floor(this.toolAcc);
     this.toolAcc -= k;
     if (k <= 0) return;
-    const p = this.pointer.point;
-    if (settings.tool === 'inject') injectAt(this.state, p.x, p.y, p.z, k, settings.matchWheel);
-    else if (settings.tool === 'drain') this.drain(k);
+    if (settings.tool === 'inject') {
+      const p = this.aim.point.clone().addScaledVector(this.aim.normal, INJECT_DEPTH);
+      injectAt(this.state, p.x, p.y, p.z, k, settings.matchWheel);
+    } else {
+      this.drain(k);
+    }
   }
 
-  /** Remove particles within a tube around the pick ray, nearest to the camera first. */
+  /** Remove particles within a tube around the aim ray, nearest to the camera first. */
   private drain(count: number): void {
     const F = this.state.fluid,
-      o = this.pointer.rayOrigin,
-      d = this.pointer.rayDir;
+      o = this.view.fly.camera.position,
+      d = this.rayDir;
     let removed = 0;
     for (let i = F.n - 1; i >= 0 && removed < count; i--) {
       const rx = F.x[i] - o.x,
@@ -154,8 +163,8 @@ export class Simulation {
     }
 
     this.syncParams();
-    this.view.orbit.update();
-    if (this.pointer.state.over) this.pointer.update(this.view.orbit.camera);
+    this.view.fly.update(dt);
+    this.updateAim();
 
     if (!settings.paused) {
       this.applyTool(dt);
@@ -174,10 +183,9 @@ export class Simulation {
       }
     }
 
-    const ps = this.pointer.state;
-    const marker: MarkerKind = ps.over && !ps.orbiting ? settings.tool : 'none';
-    const p = this.pointer.point;
-    this.view.render(this.state, marker, p.x, p.z);
+    const marker: MarkerKind = this.aim && this.controls.locked ? settings.tool : 'none';
+    const aim = this.aim ?? NO_AIM;
+    this.view.render(this.state, marker, aim.point, aim.normal, RAFT_OFFSET);
 
     if (now - this.lastReadout > READOUT_INTERVAL) {
       this.lastReadout = now;
@@ -191,3 +199,5 @@ export class Simulation {
     }
   };
 }
+
+const NO_AIM: Aim = { point: new Vector3(), normal: new Vector3(0, 1, 0) };

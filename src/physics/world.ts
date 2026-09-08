@@ -1,7 +1,7 @@
 import { MAX_RAFTS, RMAX, YMAX } from './constants';
 import { collideRaftPair, collideWheel } from './contacts';
 import { Boundary, Fluid } from './fluid';
-import { quatFromBasis, vec3, type Vec3 } from './math';
+import { cross, quatFromBasis, vec3, type Quat, type Vec3 } from './math';
 import { defaultParams, type SimParams } from './params';
 import { stepFluid } from './pbf';
 import { Raft } from './raft';
@@ -68,23 +68,31 @@ export function wheelVelocity(S: SimState, x: number, z: number): Vec3 {
   return vec3(S.omega * z, 0, -S.omega * x);
 }
 
-/** Basis for a raft lying flat against the floor at angle a. */
-export function floorBasis(a: number) {
-  return quatFromBasis([-Math.sin(a), 0, Math.cos(a)], [Math.cos(a), 0, Math.sin(a)], [0, 1, 0]);
+/** Orientation of a board lying flat against a surface with normal n (the board's local y). */
+export function basisFromNormal(n: ArrayLike<number>): Quat {
+  const ny = vec3(n[0], n[1], n[2]);
+  const helper = Math.abs(ny[1]) < 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  const ex = cross(helper, ny, vec3());
+  const l = Math.hypot(ex[0], ex[1], ex[2]) || 1;
+  ex[0] /= l;
+  ex[1] /= l;
+  ex[2] /= l;
+  const ez = cross(ex, ny, vec3());
+  return quatFromBasis(ex, ny, ez);
 }
 
+/** Spawn a raft centred at p, lying flat against a surface with normal n. */
 export function spawnRaft(
   S: SimState,
-  x: number,
-  y: number,
-  z: number,
+  p: ArrayLike<number>,
+  n: ArrayLike<number>,
   matchWheel: boolean,
 ): Raft | null {
   if (S.rafts.length >= MAX_RAFTS) return null;
-  const q = floorBasis(Math.atan2(z, x));
-  const v = matchWheel ? wheelVelocity(S, x, z) : vec3();
+  const q = basisFromNormal(n);
+  const v = matchWheel ? wheelVelocity(S, p[0], p[2]) : vec3();
   const w = matchWheel ? vec3(0, S.omega, 0) : vec3();
-  const r = new Raft(vec3(x, y, z), q, v, w);
+  const r = new Raft(vec3(p[0], p[1], p[2]), q, v, w);
   S.rafts.push(r);
   return r;
 }

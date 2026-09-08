@@ -38,7 +38,7 @@ export class Fluid {
     this.vz[i] = vz;
     this.contact[i] = 0;
     this.rho[i] = RHO0;
-    this.foam[i] = 0.25;
+    this.foam[i] = 0.1;
     return true;
   }
 

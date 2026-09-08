@@ -29,11 +29,49 @@ body {
   inset: 0;
   display: block;
   touch-action: none;
-  cursor: crosshair;
+  cursor: pointer;
 }
 
 #view.orbiting {
   cursor: grabbing;
+}
+
+.crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  pointer-events: none;
+  opacity: 0.35;
+  transition: opacity 0.15s;
+}
+
+.crosshair.active {
+  opacity: 0.9;
+}
+
+.crosshair::before,
+.crosshair::after {
+  content: '';
+  position: absolute;
+  background: var(--text);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+}
+
+.crosshair::before {
+  left: 10px;
+  top: 0;
+  width: 2px;
+  height: 22px;
+}
+
+.crosshair::after {
+  left: 0;
+  top: 10px;
+  width: 22px;
+  height: 2px;
 }
 
 .panel {
@@ -184,11 +222,6 @@ input[type='range'] {
 .seg button[aria-pressed='true'] {
   background: rgba(79, 178, 255, 0.22);
   border-color: rgba(79, 178, 255, 0.55);
-}
-
-.seg button.raft[aria-pressed='true'] {
-  background: rgba(197, 139, 72, 0.25);
-  border-color: rgba(197, 139, 72, 0.6);
 }
 
 .btns {

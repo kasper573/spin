@@ -11,7 +11,7 @@ import {
   HalfFloatType,
 } from 'three';
 import type { SimState } from '../physics/world';
-import { OrbitCamera } from './camera';
+import { FlyCamera } from './camera';
 import { Markers, type MarkerKind } from './markers';
 import { RaftMeshes } from './rafts';
 import { makeStars } from './stars';
@@ -30,7 +30,7 @@ const FILL_DIR = new Vector3(-5, -6, -3).normalize();
  */
 export class View {
   readonly renderer: WebGLRenderer;
-  readonly orbit = new OrbitCamera();
+  readonly fly = new FlyCamera();
   private readonly scene = new Scene();
   private readonly glassScene = new Scene();
   private readonly overlayScene = new Scene();
@@ -76,20 +76,25 @@ export class View {
     const w = window.innerWidth,
       h = window.innerHeight;
     this.renderer.setSize(w, h, false);
-    this.orbit.setAspect(w / h);
+    this.fly.setAspect(w / h);
     const pw = Math.round(w * this.renderer.getPixelRatio()),
       ph = Math.round(h * this.renderer.getPixelRatio());
     this.sceneTarget.setSize(pw, ph);
     this.water.resize(pw, ph);
   }
 
-  render(S: SimState, marker: MarkerKind, markerX: number, markerZ: number): void {
+  render(
+    S: SimState,
+    marker: MarkerKind,
+    aimPoint: Vector3,
+    aimNormal: Vector3,
+    raftOffset: number,
+  ): void {
     const r = this.renderer,
-      cam = this.orbit.camera;
-    this.orbit.update();
+      cam = this.fly.camera;
     this.wheel.update(S.theta, cam, SUN_DIR, FILL_DIR);
     this.rafts.sync(S.rafts);
-    this.markers.update(marker, markerX, markerZ);
+    this.markers.update(marker, aimPoint, aimNormal, raftOffset);
     this.water.upload(S.fluid);
 
     r.setRenderTarget(this.sceneTarget);

@@ -1,5 +1,7 @@
 # Spin-gravity wheel
 
+Live: https://kasper573.github.io/spin/
+
 A browser simulation of a solid glass drum spinning in zero g. Water is a position-based fluid,
 rafts are rigid wooden boards with Coulomb friction against the moving glass, and the water is drawn
 with a screen-space fluid renderer (smoothed particle depth, thickness, cel shading with foam).
@@ -27,6 +29,8 @@ with a screen-space fluid renderer (smoothed particle depth, thickness, cel shad
 
 ## Controls
 
-Left drag uses the selected tool (inject, drain or place raft), right drag or Shift orbits the camera,
-the wheel zooms. In dev mode `window.sim` exposes the running simulation for scripting, e.g.
+Click the view to take pointer lock, then fly like a spacecraft: WASD moves, R/F moves up and down,
+Q/E rolls, the mouse steers and the wheel changes fly speed. The crosshair at the centre of the screen
+aims at the drum's inner surface: the left button injects (or drains, per the panel) water there and
+the right button places a raft lying flat on it. Escape releases the controls. In dev mode `window.sim` exposes the running simulation for scripting, e.g.
 `sim.inject(x, y, z, count)` and `sim.advance(seconds)`.

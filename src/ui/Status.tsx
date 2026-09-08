@@ -17,7 +17,21 @@ export function Status(): JSX.Element {
 export function Hint(): JSX.Element {
   return (
     <div class="hint">
-      <b>Left drag</b> uses the tool. <b>Right drag</b> or Shift orbits. <b>Scroll</b> zooms.
+      <Show
+        when={readouts.controlsActive}
+        fallback={
+          <>
+            <b>Click the view</b> to take the controls.
+          </>
+        }
+      >
+        <b>WASD</b> fly, <b>Q E</b> roll, <b>R F</b> up/down, <b>mouse</b> look, <b>scroll</b>{' '}
+        speed. <b>LMB</b> water, <b>RMB</b> raft, <b>Esc</b> release.
+      </Show>
     </div>
   );
+}
+
+export function Crosshair(): JSX.Element {
+  return <div class="crosshair" classList={{ active: readouts.controlsActive }} />;
 }

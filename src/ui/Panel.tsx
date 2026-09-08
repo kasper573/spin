@@ -4,10 +4,9 @@ import type { Simulation } from '../app/simulation';
 import { Gauge } from './Gauge';
 import { Segmented, Slider, Toggle } from './controls';
 
-const TOOLS: ReadonlyArray<{ value: Tool; label: string; class?: string }> = [
-  { value: 'inject', label: 'Inject' },
-  { value: 'drain', label: 'Drain' },
-  { value: 'raft', label: 'Place raft', class: 'raft' },
+const TOOLS: ReadonlyArray<{ value: Tool; label: string }> = [
+  { value: 'inject', label: 'Inject water' },
+  { value: 'drain', label: 'Drain water' },
 ];
 
 export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element {
@@ -46,8 +45,11 @@ export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element
 
       <section>
         <h2>Water and rafts</h2>
+        <div class="row">
+          <label>Left button</label>
+        </div>
         <Segmented
-          label="Pointer tool"
+          label="Left mouse button"
           options={TOOLS}
           value={settings.tool}
           onChange={(t) => setSettings('tool', t)}
@@ -67,9 +69,6 @@ export function Panel(props: { sim: () => Simulation | undefined }): JSX.Element
           onChange={(v) => setSettings('matchWheel', v)}
         />
         <div class="btns">
-          <button type="button" onClick={() => props.sim()?.addRaft()}>
-            Add raft
-          </button>
           <button type="button" class="warn" onClick={() => props.sim()?.clearRafts()}>
             Remove rafts
           </button>

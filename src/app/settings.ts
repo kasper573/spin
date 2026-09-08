@@ -1,6 +1,7 @@
 import { createStore } from 'solid-js/store';
 
-export type Tool = 'inject' | 'drain' | 'raft';
+/** What the left mouse button does. */
+export type Tool = 'inject' | 'drain';
 
 export interface Settings {
   /** Target drum spin (rad/s). */
@@ -24,6 +25,8 @@ export interface Readouts {
   fps: number;
   /** Fraction of real time the simulation keeps up with (1 = full speed). */
   simRate: number;
+  /** Pointer lock held: mouse and keys steer the camera. */
+  controlsActive: boolean;
 }
 
 export const SPIN_MAX = 3;
@@ -48,4 +51,5 @@ export const [readouts, setReadouts] = createStore<Readouts>({
   rafts: 0,
   fps: 0,
   simRate: 1,
+  controlsActive: false,
 });
