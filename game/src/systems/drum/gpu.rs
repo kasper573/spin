@@ -1,5 +1,6 @@
-//! The drum as the water's vessel on the GPU: its per-substep state as a uniform and the
-//! landscape as a height texture, bound at group 1 of every fluid kernel (see `drum.wgsl`).
+//! The drum as the water's vessel on the GPU: its per-substep state as a uniform, in the
+//! water's units, and the landscape as a height texture, bound at group 1 of every fluid
+//! kernel (see `drum.wgsl`).
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::RenderApp;
@@ -18,7 +19,8 @@ use bevy::shader::Shader;
 
 use super::Drum;
 use super::landscape::{ROWS, SEGMENTS};
-use crate::core::units::{Radians, RadiansPerSecond};
+use crate::core::fluid::Resolution;
+use crate::core::units::{RadiansPerSecond, RadiansPerSecondSquared};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
 const SHADER: &str = "embedded://game/systems/drum/shaders/drum.wgsl";
@@ -26,34 +28,38 @@ const SHADER: &str = "embedded://game/systems/drum/shaders/drum.wgsl";
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct DrumUniform {
     spin: f32,
-    angle: f32,
+    spin_rate: f32,
     radius: f32,
     half_width: f32,
+    per_metre: f32,
     landscape: u32,
     segments: u32,
     rows: u32,
     pad: u32,
     dphi: f32,
     dy: f32,
-    pad_b: f32,
-    pad_c: f32,
 }
 
 impl DrumUniform {
-    pub fn new(drum: &Drum, spin: RadiansPerSecond, angle: Radians) -> Self {
+    pub fn new(
+        drum: &Drum,
+        spin: RadiansPerSecond,
+        spin_rate: RadiansPerSecondSquared,
+        resolution: Resolution,
+    ) -> Self {
+        let (length, time) = (resolution.length(), resolution.time());
         DrumUniform {
-            spin: spin.0,
-            angle: angle.0 as f32,
-            radius: drum.ring.radius.0,
-            half_width: drum.ring.half_width.0,
+            spin: (spin.0 as f64 * time) as f32,
+            spin_rate: (spin_rate.0 as f64 * time * time) as f32,
+            radius: (drum.ring.radius.0 as f64 / length) as f32,
+            half_width: (drum.ring.half_width.0 as f64 / length) as f32,
+            per_metre: (1.0 / length) as f32,
             landscape: u32::from(!drum.landscape.is_empty()),
             segments: SEGMENTS as u32,
             rows: ROWS as u32,
             pad: 0,
             dphi: std::f32::consts::TAU / SEGMENTS as f32,
-            dy: drum.landscape.row_spacing() as f32,
-            pad_b: 0.0,
-            pad_c: 0.0,
+            dy: (drum.landscape.row_spacing() / length) as f32,
         }
     }
 }

@@ -181,6 +181,11 @@ impl Landscape {
         (f / len, [-gx / len, -gy / len, -gz / len])
     }
 
+    /// The arc one segment spans round the ring: the finest feature the landscape can hold.
+    pub fn segment_arc(&self) -> f64 {
+        DPHI * self.ring.radius.0 as f64
+    }
+
     /// Distance between rows along the axis.
     pub fn row_spacing(&self) -> f64 {
         2.0 * self.ring.half_width.0 as f64 / (ROWS as f64 - 1.0)

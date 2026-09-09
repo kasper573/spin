@@ -1,4 +1,5 @@
-//! Sequential impulses with Coulomb friction against the moving vessel walls.
+//! Sequential impulses with Coulomb friction against the vessel walls, which stand still in
+//! the vessel's frame.
 use super::{Body, BodyShape, Ground, Hull};
 use crate::core::math::{Vec3d, add_scaled, cross, dot, mat3mul, norm};
 use crate::core::units::Newtons;
@@ -29,8 +30,7 @@ pub fn collide_vessel(body: &mut Body, shape: &BodyShape, vessel: &impl Vessel, 
                 c[1] - pen.normal[1] * radius,
                 c[2] - pen.normal[2] * radius,
             ];
-            let wall = vessel.wall_velocity(at);
-            let j = resolve_wall_contact(body, &at, &pen, &wall, restitution, friction);
+            let j = resolve_wall_contact(body, &at, &pen, restitution, friction);
             stand(&mut ground, at, pen.normal, j);
         }
     }
@@ -55,17 +55,13 @@ fn resolve_wall_contact(
     body: &mut Body,
     wp: &Vec3d,
     pen: &crate::core::vessel::Penetration,
-    wall: &Vec3d,
     restitution: f64,
     friction: f64,
 ) -> f64 {
     let mut normal_impulse = 0.0;
     let n = &pen.normal;
     let r = [wp[0] - body.p[0], wp[1] - body.p[1], wp[2] - body.p[2]];
-    let relative = |body: &Body| {
-        let vp = body.point_velocity(wp);
-        [vp[0] - wall[0], vp[1] - wall[1], vp[2] - wall[2]]
-    };
+    let relative = |body: &Body| body.point_velocity(wp);
     let rv = relative(body);
     let vn = dot(&rv, n);
     if vn < 0.0 {

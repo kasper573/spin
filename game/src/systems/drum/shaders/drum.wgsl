@@ -1,12 +1,16 @@
-// The drum as the fluid solver's vessel: a spinning cylinder with caps, a heightfield landscape on
-// its inside wall, and air that turns with the glass. Mirrors `Drum` on the CPU.
+// The drum as the fluid solver's vessel: a spinning cylinder with caps and a heightfield
+// landscape on its inside wall, in its own turning frame and the water's units. Mirrors `Drum`
+// on the CPU.
 #define_import_path vessel
 
 struct DrumUniform {
+    // the drum's spin and its rate of change, per second of the water's clock
     spin: f32,
-    angle: f32,
+    spin_rate: f32,
+    // the drum's size in the water's units, and how many of them a metre is
     radius: f32,
     half_width: f32,
+    per_metre: f32,
     // 1 when any landscape is raised
     landscape: u32,
     segments: u32,
@@ -14,8 +18,6 @@ struct DrumUniform {
     pad: u32,
     dphi: f32,
     dy: f32,
-    pad_b: f32,
-    pad_c: f32,
 }
 
 @group(1) @binding(0) var<uniform> drum: DrumUniform;
@@ -33,10 +35,8 @@ struct Penetration {
     normal: vec3<f32>,
 }
 
-const TWO_PI: f32 = 6.283185307179586;
-
 fn height_at(segment: u32, row: u32) -> f32 {
-    return textureLoad(heights, vec2<i32>(i32(row), i32(segment)), 0).r;
+    return textureLoad(heights, vec2<i32>(i32(row), i32(segment)), 0).r * drum.per_metre;
 }
 
 /// Bilinear height and its derivatives with respect to wheel angle and axial position.
@@ -69,7 +69,7 @@ fn landscape_penetration(p: vec3<f32>, margin: f32) -> Penetration {
     if (r < 1e-6) {
         return Penetration(-drum.radius, vec3(0.0));
     }
-    let s = landscape_sample(atan2(p.z, p.x) + drum.angle, p.y);
+    let s = landscape_sample(atan2(p.z, p.x), p.y);
     let f = r - (drum.radius - s.x - margin);
     let g_phi = s.y / r;
     let g = vec3((p.x - g_phi * p.z) / r, s.z, (p.z + g_phi * p.x) / r);
@@ -123,27 +123,23 @@ fn vessel_confine(p_in: vec3<f32>, margin: f32) -> Confined {
     return out;
 }
 
-/// A world point in the drum's own frame, which turns with the glass.
-fn vessel_from_world(p: vec3<f32>) -> vec3<f32> {
-    let c = cos(drum.angle);
-    let s = sin(drum.angle);
-    return vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+/// What a point at rest in the turning drum is accelerated by: flung outward by the spin, and
+/// left behind as the spin changes.
+fn vessel_gravity(p: vec3<f32>) -> vec3<f32> {
+    let w = drum.spin;
+    let a = drum.spin_rate;
+    return vec3(w * w * p.x - a * p.z, 0.0, w * w * p.z + a * p.x);
 }
 
-fn vessel_to_world(p: vec3<f32>) -> vec3<f32> {
-    let c = cos(drum.angle);
-    let s = sin(drum.angle);
-    return vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+/// A velocity after `dt` of the Coriolis turn: about the axis, twice as fast as the drum, the
+/// other way. Exact, so free-flying water keeps its speed.
+fn vessel_coriolis(v: vec3<f32>, dt: f32) -> vec3<f32> {
+    let phi = -2.0 * drum.spin * dt;
+    let c = cos(phi);
+    let s = sin(phi);
+    return vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
 }
 
-fn vessel_wall_velocity(p: vec3<f32>) -> vec3<f32> {
-    return vec3(drum.spin * p.z, 0.0, -drum.spin * p.x);
-}
-
-fn vessel_air_velocity(p: vec3<f32>) -> vec4<f32> {
-    let inside = dot(p.xz, p.xz) < drum.radius * drum.radius && abs(p.y) < drum.half_width;
-    if (inside) {
-        return vec4(vessel_wall_velocity(p), 1.0);
-    }
-    return vec4(0.0);
+fn vessel_has_air(p: vec3<f32>) -> bool {
+    return dot(p.xz, p.xz) < drum.radius * drum.radius && abs(p.y) < drum.half_width;
 }

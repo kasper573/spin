@@ -1,7 +1,9 @@
 //! The whole application: bevy's defaults plus every plugin of ours, on the browser page or
 //! headless for the bench and the tests.
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
+use bevy::render::settings::RenderCreation;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
@@ -33,14 +35,19 @@ pub fn build() -> App {
     app
 }
 
-/// The simulation without a window or the page: rendering still runs, into nothing.
-pub fn build_headless() -> App {
+/// The simulation without a window or the page: rendering still runs, into nothing, on the
+/// calling thread and with the GPU device given.
+pub fn build_headless(render: RenderCreation) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: render,
                 ..default()
             })
             .disable::<WinitPlugin>(),

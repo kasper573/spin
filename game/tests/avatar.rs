@@ -7,7 +7,7 @@ use game::core::fluid::Fluid;
 use game::core::math::{add_scaled, cross, dot, norm, quat_from_basis};
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::DEFAULT_RING;
+use game::systems::drum::{DEFAULT_RING, GROUND_DEPTH};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_gravity, standing_spin};
@@ -21,19 +21,14 @@ fn state_mut(app: &mut App) -> Mut<'_, Simulation> {
     app.world_mut().resource_mut::<Simulation>()
 }
 
-fn radius(p: [f64; 3]) -> f64 {
-    (p[0] * p[0] + p[2] * p[2]).sqrt()
+/// How high the avatar's centre is above the glass.
+fn altitude(sim: &Simulation) -> f64 {
+    sim.drum.height_above_glass(sim.avatar().p)
 }
 
-/// Speed relative to the ground under the avatar's feet.
+/// Speed over the ground, which stands still in the drum's frame.
 fn ground_slip(sim: &Simulation) -> f64 {
-    let body = sim.avatar();
-    let wall = sim.drum.wall_velocity(body.p);
-    norm(&[
-        body.v[0] - wall[0],
-        body.v[1] - wall[1],
-        body.v[2] - wall[2],
-    ])
+    norm(&sim.avatar().v)
 }
 
 fn weight_in_g(sim: &Simulation) -> f64 {
@@ -72,8 +67,7 @@ fn level(app: &mut App) {
     let mut sim = state_mut(app);
     let body = sim.avatar();
     let (p, v, w) = (body.p, body.v, body.w);
-    let r = radius(p);
-    let up = [-p[0] / r, 0.0, -p[2] / r];
+    let up = sim.drum.depth_and_outward(p).1.map(|x| -x);
     let ahead = body.rotate(&[0.0, 0.0, -1.0]);
     let mut forward = ahead;
     add_scaled(&mut forward, &up, -dot(&ahead, &up));
@@ -103,13 +97,13 @@ fn standing_on_the_ring_weighs_one_g_at_eye_height() {
     assert!((g - 1.0).abs() < 0.03, "weight {g} g");
     assert!(ground_slip(sim) < 0.05, "slip {}", ground_slip(sim));
     let eye = avatar::eye(sim.avatar());
-    let height = DEFAULT_RING.floor_radius().0 as f64 - radius(eye);
+    let height = sim.drum.height_above_glass(eye) - GROUND_DEPTH.0 as f64;
     assert!(
         (height - EYE_HEIGHT.0 as f64).abs() < 0.05,
         "eye {height} m above the ground"
     );
     let up = sim.avatar().rotate(&[0.0, 1.0, 0.0]);
-    let inward = [-eye[0] / radius(eye), 0.0, -eye[2] / radius(eye)];
+    let inward = sim.drum.depth_and_outward(eye).1.map(|x| -x);
     let alignment = up[0] * inward[0] + up[2] * inward[2];
     assert!(alignment > 0.99, "up {up:?} vs inward {inward:?}");
 }
@@ -184,17 +178,18 @@ fn up_thrust_lifts_off_and_the_ground_comes_back_to_meet_it() {
     let mut app = testing::headless();
     testing::run(&mut app, Seconds(1.0));
     let start = state(&app).avatar().p;
+    let floor = altitude(state(&app));
     hold(&mut app, PilotInput::firing(&[Thruster::Up]), 0.8);
     let sim = state(&app);
     assert!(sim.avatar().ground.is_none(), "still on the ground");
     // full thrust beats the standing gravity by the margin it was equalized with, less what
     // spooling up cost
-    let rising = radius(start) - radius(sim.avatar().p);
+    let rising = altitude(sim) - floor;
     let thrust = equalized_thrust(EARTH_GRAVITY).0;
     let climb = (thrust - EARTH_GRAVITY.0) * (0.8 - SPOOL_TIME.0 as f64 / 2.0);
     assert!(rising > 0.3, "rose only {rising} m");
-    let inward = -(sim.avatar().v[0] * sim.avatar().p[0] + sim.avatar().v[2] * sim.avatar().p[2])
-        / radius(sim.avatar().p);
+    let up = sim.drum.depth_and_outward(sim.avatar().p).1.map(|x| -x);
+    let inward = dot(&sim.avatar().v, &up);
     assert!(
         inward > climb * 0.6 && inward < climb * 1.1,
         "climbing at {inward} m/s, thrust nets {climb} m/s"
@@ -208,7 +203,7 @@ fn up_thrust_lifts_off_and_the_ground_comes_back_to_meet_it() {
             break;
         }
         airborne += 0.05;
-        highest = highest.max(radius(start) - radius(sim.avatar().p));
+        highest = highest.max(altitude(sim) - floor);
     }
     assert!(highest > 1.0, "rose {highest} m");
     assert!(airborne < 4.0, "never landed");
@@ -216,12 +211,16 @@ fn up_thrust_lifts_off_and_the_ground_comes_back_to_meet_it() {
     let sim = state(&app);
     assert!(sim.avatar().ground.is_some(), "never settled");
     assert!(ground_slip(sim) < 0.15, "slip {}", ground_slip(sim));
+    // the ground stands still under a hop; only the Coriolis turn moves the landing a little
     let travelled = norm(&[
-        sim.avatar().p[0] - start[0],
         0.0,
+        sim.avatar().p[1] - start[1],
         sim.avatar().p[2] - start[2],
     ]);
-    assert!(travelled > 5.0, "the ground carried it only {travelled} m");
+    assert!(
+        travelled < 2.0,
+        "landed {travelled} m from where it took off"
+    );
 }
 
 #[test]
@@ -231,7 +230,8 @@ fn flight_assist_brakes_a_ghost_to_a_stop_in_vacuum() {
     {
         let mut player = Player;
         let mut sim = state_mut(&mut app);
-        player.teleport(&mut sim, [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
+        let axis = -(DEFAULT_RING.radius.0 as f64);
+        player.teleport(&mut sim, [axis, 20.0, 0.0], [axis, 0.0, 0.0]);
     }
     hold(&mut app, PilotInput::firing(&[Thruster::Right]), 1.0);
     assert!(
@@ -240,11 +240,12 @@ fn flight_assist_brakes_a_ghost_to_a_stop_in_vacuum() {
         state(&app).avatar().v
     );
     testing::run(&mut app, Seconds(3.0));
-    assert!(
-        norm(&state(&app).avatar().v) < 0.05,
-        "v {:?}",
-        state(&app).avatar().v
-    );
+    // at rest among the stars, which turn past the drum
+    let sim = state(&app);
+    let stars = sim.drum.star_velocity(sim.avatar().p);
+    let v = sim.avatar().v;
+    let adrift = norm(&[v[0] - stars[0], v[1] - stars[1], v[2] - stars[2]]);
+    assert!(adrift < 0.05, "v {v:?} against the stars' {stars:?}");
 }
 
 #[test]
@@ -255,25 +256,28 @@ fn a_ghost_in_the_drum_is_carried_round_and_flung_out() {
     {
         let mut sim = state_mut(&mut app);
         sim.drum.spin = RadiansPerSecond(1.0);
-        sim.avatar_mut()
-            .place([6.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]);
+        let inside = sim.drum.from_water([6.0, 0.0, 0.0]);
+        sim.avatar_mut().place(inside, [0.0, 0.0, 0.0, 1.0]);
+        sim.avatar_mut().v = sim.drum.star_velocity(inside);
     }
     testing::run(&mut app, Seconds(2.0));
     {
         let sim = state(&app);
         let body = sim.avatar();
-        let r = radius(body.p);
         assert!(sim.drum.encloses(body.p), "already out at {:?}", body.p);
-        let tangential = (body.v[0] * body.p[2] - body.v[2] * body.p[0]) / r;
-        assert!(tangential > 0.75 * r, "carried at {tangential} vs {r}");
+        // carried round with the air: within a quarter of the drum's own speed there, and
+        // drifting outward
+        let round = DEFAULT_RING.radius.0 as f64 + body.p[0];
+        assert!(
+            body.v[2].abs() < 0.25 * round && body.v[1].abs() < 0.5 && body.v[0] > 0.0,
+            "moving through the air at {:?}",
+            body.v
+        );
     }
     testing::run(&mut app, Seconds(20.0));
+    // flung out to the glass, where the air ends and the assist holds it among the stars
     let sim = state(&app);
-    assert!(
-        !sim.drum.encloses(sim.avatar().p),
-        "still inside at {:?}",
-        sim.avatar().p
-    );
+    assert!(altitude(sim) < 0.1, "still inside at {:?}", sim.avatar().p);
 }
 
 #[test]
@@ -282,14 +286,15 @@ fn a_solid_avatar_outside_stays_outside() {
     {
         let mut player = Player;
         let mut sim = state_mut(&mut app);
-        player.teleport(&mut sim, [0.0, 12.0, 0.0], [0.0, 0.0, 0.0]);
+        let axis = -(DEFAULT_RING.radius.0 as f64);
+        player.teleport(&mut sim, [axis, 12.0, 0.0], [axis, 0.0, 0.0]);
     }
     testing::run(&mut app, Seconds(3.0));
     let sim = state(&app);
     let p = sim.avatar().p;
     assert!(!sim.drum.encloses(p), "entered the drum at {p:?}");
     assert!(
-        radius(p) < DEFAULT_RING.radius.0 as f64 + 5.0 && p[1].abs() < 20.0,
+        altitude(sim) > -5.0 && sim.drum.axial(p).abs() < 20.0,
         "flew off to {p:?}"
     );
 }
@@ -382,17 +387,17 @@ fn every_thruster_is_heard_from_where_it_sits() {
     }
 }
 
-/// Half fill the drum with water, moving with the glass.
+/// Half fill the drum with water, at rest in it.
 fn flood(app: &mut App) {
     for k in 0..30 {
-        let a = k as f32 * 0.52;
+        let a = k as f64 * 0.52;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource::<Simulation>().inject(
-                    &mut fluid,
-                    [a.cos() * 7.0, (k % 3) as f32 * 3.0 - 3.0, a.sin() * 7.0],
-                    1500,
-                )
+                let sim = world.resource::<Simulation>();
+                let at =
+                    sim.drum
+                        .from_water([a.cos() * 7.0, (k % 3) as f64 * 3.0 - 3.0, a.sin() * 7.0]);
+                sim.inject(&mut fluid, at, 1500)
             });
         testing::run(app, Seconds(0.2));
     }
@@ -410,12 +415,12 @@ fn the_thrusters_push_through_water_and_out_of_it() {
         sim.avatar().wet
     );
     level(&mut app);
-    let start = radius(state(&app).avatar().p);
+    let start = altitude(state(&app));
     // a hop is a chord through the ring, so the rise is measured at its highest
     let mut risen: f64 = 0.0;
     for _ in 0..12 {
         hold(&mut app, PilotInput::firing(&[Thruster::Up]), 0.1);
-        risen = risen.max(start - radius(state(&app).avatar().p));
+        risen = risen.max(altitude(state(&app)) - start);
     }
     assert!(risen > 1.5, "up thrust through water rose only {risen} m");
     testing::run(&mut app, Seconds(4.0));
@@ -458,9 +463,8 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
     );
     assert!(expected > 1.3, "the bigger ring pulls {expected} g");
     assert!(ground_slip(sim) < 0.1, "slip {}", ground_slip(sim));
-    // the fall to the new floor lands at another point round the ring, and the gyros keep the
-    // attitude it left with, so the hull rests on the ground however it landed
-    let height = sim.drum.ring.floor_radius().0 as f64 - radius(sim.avatar().p);
+    // the frame follows the glass, so the avatar keeps its footing on the new floor
+    let height = altitude(sim) - GROUND_DEPTH.0 as f64;
     assert!(
         sim.avatar().ground.is_some() && height > 0.0 && height < 2.0 * avatar::RADIUS,
         "centre {height} m above the new ground"
@@ -469,9 +473,9 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
     assert_eq!(same_power, settings.thrust);
     let hop = |app: &mut App| {
         level(app);
-        let start = radius(state(app).avatar().p);
+        let start = altitude(state(app));
         hold(app, PilotInput::firing(&[Thruster::Up]), 1.0);
-        let risen = start - radius(state(app).avatar().p);
+        let risen = altitude(state(app)) - start;
         testing::run(app, Seconds(5.0));
         assert!(state(app).avatar().ground.is_some(), "never came down");
         risen
@@ -502,19 +506,20 @@ fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
     {
         let mut sim = state_mut(&mut app);
         let mut player = Player;
-        player.teleport(&mut sim, [30.0, 5.0, 0.0], [0.0; 3]);
+        let outside = sim.drum.from_water([30.0, 5.0, 0.0]);
+        player.teleport(&mut sim, outside, [0.0; 3]);
     }
     testing::run(&mut app, Seconds(0.5));
-    let before = state(&app).avatar().p;
-    assert!(radius(before) > 25.0, "drifted to {before:?}");
+    let before = (altitude(state(&app)), state(&app).avatar().p[1]);
+    assert!(before.0 < -15.0, "drifted to {before:?}");
     {
         let mut settings = app.world_mut().resource_mut::<Settings>();
         Dial::Diameter.set(&mut settings, 30.0);
     }
     testing::run(&mut app, Seconds(0.5));
-    let after = state(&app).avatar().p;
+    let after = (altitude(state(&app)), state(&app).avatar().p[1]);
     assert!(
-        radius(after) > 25.0 && (after[1] - before[1]).abs() < 0.5,
+        after.0 < -15.0 && (after.1 - before.1).abs() < 0.5,
         "the resize moved the ghost from {before:?} to {after:?}"
     );
 }

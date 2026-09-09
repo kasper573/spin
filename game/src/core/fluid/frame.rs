@@ -1,21 +1,30 @@
 //! What the CPU hands the GPU every frame: the solver parameters and body poses of each
-//! substep, particles to append, and the bodies' sample tables. Layouts mirror `common.wgsl`.
+//! substep, particles to append, and the bodies' sample tables, all in the canonical water's
+//! units and the vessel's frame; and what comes back, in the world's units. Layouts mirror
+//! `common.wgsl`.
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::ShaderType;
 
+use super::resolution::canonical;
 use super::{
     EPS_LAMBDA, FluidParams, MAX_BODIES, REST_DENSITY, Resolution, SCORR_K, TABLE_CELLS, WET_REF,
 };
-use crate::core::math::Vec3d;
+use crate::core::math::{Vec3d, mat3mul, quat_rotate};
 use crate::core::rigid::{Body, BodyShape, Hull, WaterCoupling};
+use crate::core::units::Seconds;
+use crate::core::vessel::WaterFrame;
 
 /// Units per unit in the shaders' fixed-point accumulators.
 const FIXED: f64 = 65536.0;
 pub const ACCUMULATORS_PER_BODY: usize = 16;
-/// An accumulator slot no body uses, stamped with the frame's ticket so a readback tells which
-/// frame it reports.
-pub const STAMP_SLOT: usize = ACCUMULATORS_PER_BODY - 1;
+/// Frames the accumulators keep apart, each in its own slots: a readback this many frames late
+/// still finds every frame it covers.
+pub const ACCUMULATOR_FRAMES: usize = 32;
+pub const ACCUMULATORS_PER_FRAME: usize = ACCUMULATORS_PER_BODY * MAX_BODIES;
+/// The slot after every frame's, stamped with the latest frame's ticket so a readback tells
+/// which frames it reports.
+pub const STAMP_SLOT: usize = ACCUMULATORS_PER_FRAME * ACCUMULATOR_FRAMES;
 
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct FluidFrame {
@@ -73,39 +82,52 @@ pub struct Params {
     pub pending: u32,
     pub inv_cell: f32,
     pub cells: u32,
-    pub pad: UVec2,
+    /// The first accumulator of this frame's slots.
+    pub accumulators: u32,
+    pub pad: u32,
+    /// What thinning scales the kept particles' positions and velocities by.
+    pub thin_scale: f32,
+    pub thin_scale_v: f32,
 }
 
 impl Params {
-    pub fn new(dt: f32, p: &FluidParams, res: Resolution, count: u32, bodies: &Bodies) -> Self {
+    pub fn new(dt: Seconds, p: &FluidParams, res: Resolution, count: u32, bodies: &Bodies) -> Self {
+        let (length, time) = (res.length(), res.time());
         Params {
-            dt,
-            h: res.h(),
-            h_sq: res.h_sq(),
-            poly: res.poly6(),
-            spiky: res.spiky(),
-            w_zero: res.w_zero(),
-            mass: res.mass(),
+            dt: (dt.0 as f64 / time) as f32,
+            h: canonical::H,
+            h_sq: canonical::H_SQ,
+            poly: canonical::POLY6,
+            spiky: canonical::SPIKY,
+            w_zero: canonical::W_ZERO,
+            mass: canonical::MASS,
             rest_density: REST_DENSITY,
             scorr_k: SCORR_K,
-            scorr_wq: res.scorr_wq(),
+            scorr_wq: canonical::SCORR_WQ,
             eps_lambda: EPS_LAMBDA,
-            max_delta: res.max_delta(),
-            max_speed: p.max_speed.0,
-            margin: res.margin(),
-            air_k: if p.air { dt / p.air_tau.0 } else { 0.0 },
+            max_delta: canonical::MAX_DELTA,
+            max_speed: (p.max_speed.0 as f64 * time / length) as f32,
+            margin: canonical::MARGIN,
+            air_k: if p.air {
+                (dt.0 as f64 / time) as f32 / p.air_tau.0
+            } else {
+                0.0
+            },
             wall_keep: 1.0 - p.wall_friction,
-            viscosity: p.viscosity * res.mass() / REST_DENSITY,
+            viscosity: p.viscosity * canonical::MASS / REST_DENSITY,
             body_drag: p.body_drag,
             wet_ref: WET_REF,
-            spacing: res.spacing.0,
+            spacing: canonical::SPACING,
             count,
             body_count: bodies.count,
             sample_count: bodies.sample_count,
             pending: 0,
-            inv_cell: 1.0 / res.h(),
+            inv_cell: 1.0 / canonical::H,
             cells: TABLE_CELLS as u32,
-            pad: UVec2::ZERO,
+            accumulators: 0,
+            pad: 0,
+            thin_scale: 1.0,
+            thin_scale_v: 1.0,
         }
     }
 
@@ -113,6 +135,24 @@ impl Params {
         self.pending = pending;
         self
     }
+
+    /// For thinning water of resolution `from` into this one: what the kept particles'
+    /// positions and velocities are scaled by, in the canonical units.
+    pub fn thinning(mut self, from: Resolution, to: Resolution) -> Self {
+        self.thin_scale = (from.length() / to.length()) as f32;
+        self.thin_scale_v = (from.length() / to.length() * to.time() / from.time()) as f32;
+        self
+    }
+
+    pub fn for_frame(mut self, ticket: u32) -> Self {
+        self.accumulators = accumulators_of(ticket);
+        self
+    }
+}
+
+/// The first accumulator of a frame's slots.
+pub fn accumulators_of(ticket: u32) -> u32 {
+    (ticket as usize % ACCUMULATOR_FRAMES * ACCUMULATORS_PER_FRAME) as u32
 }
 
 #[derive(ShaderType, Clone, Copy, Default, Debug)]
@@ -173,25 +213,35 @@ pub struct ShapeSamples {
     pub volume_per_sample: f32,
 }
 
-/// Every shape's samples weighted for this resolution, one after the other.
+/// Every shape's samples in the canonical units of this resolution, one after the other.
 pub fn sample_table(
     shapes: &[ShapePoints],
     resolution: Resolution,
 ) -> (Vec<ShapeSamples>, Vec<[f32; 4]>) {
+    let length = resolution.length() as f32;
     let mut layout = Vec::new();
     let mut table = Vec::new();
     for shape in shapes {
         layout.push(ShapeSamples {
             first: table.len() as u32,
             count: shape.points.len() as u32,
-            volume_per_sample: shape.volume_per_sample,
+            volume_per_sample: shape.volume_per_sample / (length * length * length),
         });
-        table.extend(resolution.sample_weights(&shape.points));
+        let points: Vec<[f32; 3]> = shape.points.iter().map(|p| p.map(|x| x / length)).collect();
+        table.extend(canonical::sample_weights(&points));
     }
     (layout, table)
 }
 
-pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> Bodies {
+/// The bodies as the water sees them: in the water's frame, in the canonical units.
+pub fn pack(
+    bodies: &[Body],
+    shapes: &[BodyShape],
+    layout: &[ShapeSamples],
+    frame: &WaterFrame,
+    resolution: Resolution,
+) -> Bodies {
+    let (length, time) = (resolution.length(), resolution.time());
     let mut out = Bodies::default();
     let mut boundary = 0u32;
     for (item, body) in out.gpu.items.iter_mut().zip(bodies.iter().take(MAX_BODIES)) {
@@ -201,27 +251,29 @@ pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> B
         };
         let count = if body.solid { samples.count } else { 0 };
         let Hull { radius, centre } = shape.hull;
-        let shape_v = Vec4::new(
-            centre[0] as f32,
-            centre[1] as f32,
-            centre[2] as f32,
-            radius as f32,
-        );
-        let m = body.m.map(|v| v as f32);
+        let p = frame.to_water(body.p).map(|x| x / length);
+        let v = frame.vector_to_water(body.v).map(|x| x * time / length);
+        let w = frame.vector_to_water(body.w).map(|x| x * time);
+        let m = rotated_rows(&frame.rotation, &body.m);
         *item = GpuBody {
-            position: v4(body.p, if body.solid { 1.0 } else { 0.0 }),
+            position: v4(p, if body.solid { 1.0 } else { 0.0 }),
             row_x: Vec4::new(m[0], m[1], m[2], 0.0),
             row_y: Vec4::new(m[3], m[4], m[5], 0.0),
             row_z: Vec4::new(m[6], m[7], m[8], 0.0),
-            velocity: v4(body.v, 0.0),
-            angular: v4(body.w, 0.0),
-            shape: shape_v,
+            velocity: v4(v, 0.0),
+            angular: v4(w, 0.0),
+            shape: Vec4::new(
+                (centre[0] / length) as f32,
+                (centre[1] / length) as f32,
+                (centre[2] / length) as f32,
+                (radius / length) as f32,
+            ),
             slots: UVec4::new(samples.first, count, boundary, 0),
             extra: Vec4::new(
                 samples.volume_per_sample,
-                body.inv_m as f32,
+                (body.inv_m * length * length * length) as f32,
                 0.0,
-                shape.reach() as f32,
+                (shape.reach() / length) as f32,
             ),
         };
         boundary += count;
@@ -231,22 +283,50 @@ pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> B
     out
 }
 
-pub fn decode_coupling(raw: &[i32]) -> Vec<WaterCoupling> {
-    raw.chunks_exact(ACCUMULATORS_PER_BODY)
+/// One frame's coupling, from its accumulator slots, in the bodies' frame and units: the
+/// accumulators hold the buoyancy as the velocity it gave each body and its torque impulse per
+/// unit mass, which keeps every body's sums in the fixed-point range whatever it weighs.
+pub fn decode_coupling(
+    slots: &[i32],
+    resolution: Resolution,
+    frame: &WaterFrame,
+) -> Vec<WaterCoupling> {
+    let (length, time) = (resolution.length(), resolution.time());
+    let velocity = length / time;
+    slots
+        .chunks_exact(ACCUMULATORS_PER_BODY)
+        .take(MAX_BODIES)
         .map(|c| {
             let f = |i: usize| c[i] as f64 / FIXED;
+            let vector = |i: usize| frame.vector_from_water([f(i), f(i + 1), f(i + 2)]);
             WaterCoupling {
-                buoyancy: [f(0), f(1), f(2)],
-                buoyancy_torque: [f(3), f(4), f(5)],
-                flow: [f(6), f(7), f(8)],
+                buoyancy: vector(0).map(|x| x * velocity),
+                buoyancy_torque: vector(3).map(|x| x * velocity * length),
+                flow: vector(6).map(|x| x * velocity),
                 coupling: f(9),
                 wet: f(10),
                 seconds: 0.0,
                 substeps: 0.0,
-                age: 0.0,
             }
         })
         .collect()
+}
+
+/// The rows of a body's rotation matrix once the whole thing is turned by `q`.
+fn rotated_rows(q: &[f64; 4], m: &[f64; 9]) -> [f32; 9] {
+    let columns = [
+        mat3mul(m, &[1.0, 0.0, 0.0]),
+        mat3mul(m, &[0.0, 1.0, 0.0]),
+        mat3mul(m, &[0.0, 0.0, 1.0]),
+    ]
+    .map(|c| quat_rotate(q, &c));
+    let mut out = [0.0; 9];
+    for (i, column) in columns.iter().enumerate() {
+        for row in 0..3 {
+            out[row * 3 + i] = column[row] as f32;
+        }
+    }
+    out
 }
 
 fn v4(v: Vec3d, w: f32) -> Vec4 {

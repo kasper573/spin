@@ -1,7 +1,8 @@
 //! Water rendering: the isosurface the GPU extracts is drawn straight from its buffers by a
 //! cel-shaded material, through a placeholder mesh whose vertex shader looks the geometry up.
-//! The surface comes out in the drum's own frame, so the mesh is turned with the drum and water
-//! at rest in it rides round without being re-extracted.
+//! The surface comes out in the water's frame, about the drum's centre, relative to an anchor
+//! cell near the viewer and in the water's own units, so the mesh is scaled to metres, turned
+//! and placed into the bodies' frame about the viewer.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::PrimitiveTopology;
@@ -14,8 +15,10 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
+use crate::core::fluid::Fluid;
 use crate::core::fluid::{FluidBuffers, MAX_INDICES};
-use crate::systems::scene::SUN_DIRECTION;
+use crate::core::vessel::Vessel;
+use crate::systems::scene::{self, SUN_DIRECTION, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
 
 const SHADER: &str = "embedded://game/systems/shaders/water.wgsl";
@@ -26,7 +29,13 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .add_systems(Startup, spawn)
-            .add_systems(Update, tick.in_set(SimSet::Observe));
+            .add_systems(
+                Update,
+                (
+                    anchor.after(scene::locate).before(SimSet::Command),
+                    tick.in_set(SimSet::Observe),
+                ),
+            );
     }
 }
 
@@ -75,6 +84,11 @@ struct Water(Handle<WaterMaterial>);
 #[derive(Component)]
 struct WaterMesh;
 
+/// The surface is extracted about the site, so its vertices stay small near the viewer.
+fn anchor(sim: Res<Simulation>, mut fluid: ResMut<Fluid>) {
+    fluid.set_anchor(sim.drum.to_water([0.0; 3]));
+}
+
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
@@ -108,14 +122,27 @@ fn spawn(
 
 fn tick(
     sim: Res<Simulation>,
+    fluid: Res<Fluid>,
+    viewpoint: Res<Viewpoint>,
+    sky: Res<Sky>,
     water: Res<Water>,
     mut materials: ResMut<Assets<WaterMaterial>>,
     mut meshes: Query<&mut Transform, With<WaterMesh>>,
 ) {
     if let Some(mut material) = materials.get_mut(&water.0) {
         material.clock = Vec4::new(sim.time.0, 0.0, 0.0, 0.0);
+        material.sun = sky.sun.extend(0.0);
     }
+    let (origin, metres_per_unit) = fluid.surface_origin();
+    let frame = sim.drum.water_frame();
+    let rotation = {
+        let [x, y, z, w] = frame.rotation;
+        Quat::from_xyzw(x as f32, y as f32, z as f32, w as f32).inverse()
+    };
     for mut transform in &mut meshes {
-        transform.rotation = Quat::from_rotation_y(sim.drum.angle.0 as f32);
+        *transform = viewpoint
+            .place(sim.drum.from_water(origin))
+            .with_rotation(rotation)
+            .with_scale(Vec3::splat(metres_per_unit as f32));
     }
 }

@@ -1,4 +1,5 @@
-// Types and grid helpers shared by every kernel of the fluid solver. Particles are binned into a
+// Types and grid helpers shared by every kernel of the fluid solver. Everything is in the
+// canonical water's units (see `resolution.rs`) and the vessel's frame. Particles are binned into a
 // box of cells that wraps round on itself, so the grid has no bounds: a cell and another one a
 // whole box away share a slot, and any point anywhere lands in one. The box keeps neighbouring
 // cells next to each other in memory, which the neighbour searches live on. Each particle
@@ -36,7 +37,12 @@ struct Params {
     inv_cell: f32,
     // slots in the cell table, a power of two
     cells: u32,
-    pad: vec2<u32>,
+    // the first accumulator of this frame's slots
+    accumulators: u32,
+    pad: u32,
+    // what thinning scales the kept particles' positions and velocities by
+    thin_scale: f32,
+    thin_scale_v: f32,
 }
 
 struct GpuBody {

@@ -19,7 +19,8 @@ use crate::core::audio::{self, Fader, Placement, Voice};
 use crate::core::avatar::{self, Thruster};
 use crate::core::units::Seconds;
 use crate::systems::controls::Controls;
-use crate::systems::player::{Player, PlayerCamera};
+use crate::systems::player::PlayerCamera;
+use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
 /// How far in front of the eye the widget hangs.
@@ -80,7 +81,7 @@ fn on_top(width: f32) -> GizmoConfig {
 }
 
 fn draw(
-    player: Res<Player>,
+    viewpoint: Res<Viewpoint>,
     sim: Res<Simulation>,
     cameras: Query<&Projection, With<PlayerCamera>>,
     mut arms: Gizmos<ArmGizmos>,
@@ -89,7 +90,7 @@ fn draw(
     let Some(Projection::Perspective(lens)) = cameras.iter().next() else {
         return;
     };
-    let view = player.view(sim.avatar());
+    let view = viewpoint.view(sim.avatar());
     let half_height = DEPTH * (lens.fov / 2.0).tan();
     let half_width = half_height * lens.aspect_ratio;
     let arm = ARM * half_height;

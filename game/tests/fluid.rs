@@ -2,19 +2,20 @@ use bevy::prelude::*;
 use game::core::fluid::{
     Fluid, MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, Particle, Resolution, grid_reach,
 };
+use game::core::math::norm;
 use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
-use game::systems::drum::{DEFAULT_RING, LARGEST_RING};
+use game::systems::drum::DEFAULT_RING;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{SUBSTEP_RATE, Simulation};
 use game::systems::testing;
 
-fn inject(app: &mut App, centre: [f32; 3], count: u32) -> u32 {
+/// Inject water around a point of the water's frame, about the drum's centre.
+fn inject(app: &mut App, centre: [f64; 3], count: u32) -> u32 {
     app.world_mut()
         .resource_scope(|world, mut fluid: Mut<Fluid>| {
-            world
-                .resource::<Simulation>()
-                .inject(&mut fluid, centre, count)
+            let sim = world.resource::<Simulation>();
+            sim.inject(&mut fluid, sim.drum.from_water(centre), count)
         })
 }
 
@@ -40,7 +41,7 @@ fn water_stays_inside_the_drum() {
     let mut app = testing::headless();
     set_spin(&mut app, 0.8);
     for k in 0..6 {
-        let a = k as f32;
+        let a = k as f64;
         inject(&mut app, [a.cos() * 7.5, 0.0, a.sin() * 7.5], 300);
         testing::run(&mut app, Seconds(0.3));
     }
@@ -51,9 +52,12 @@ fn water_stays_inside_the_drum() {
         let [x, y, z] = p.position;
         assert!(x.is_finite() && y.is_finite() && z.is_finite(), "{p:?}");
         let r = (x * x + z * z).sqrt();
-        assert!(r <= DEFAULT_RING.radius.0 + 1e-3, "particle at radius {r}");
         assert!(
-            y.abs() <= DEFAULT_RING.half_width.0 + 1e-3,
+            r <= DEFAULT_RING.radius.0 as f64 + 1e-3,
+            "particle at radius {r}"
+        );
+        assert!(
+            y.abs() <= DEFAULT_RING.half_width.0 as f64 + 1e-3,
             "particle at y {y}"
         );
     }
@@ -64,10 +68,10 @@ fn water_follows_the_ring_when_it_is_made_smaller() {
     let mut app = testing::headless();
     set_spin(&mut app, 1.0);
     for k in 0..6 {
-        let a = k as f32;
+        let a = k as f64;
         inject(
             &mut app,
-            [a.cos() * 9.0, (k % 3) as f32 * 4.0 - 4.0, a.sin() * 9.0],
+            [a.cos() * 9.0, (k % 3) as f64 * 4.0 - 4.0, a.sin() * 9.0],
             300,
         );
         testing::run(&mut app, Seconds(0.3));
@@ -92,6 +96,8 @@ fn water_follows_the_ring_when_it_is_made_smaller() {
     }
 }
 
+/// Water dropped at the axis of the spinning drum ends up on the glass, riding round with it:
+/// at rest in the drum's own frame.
 #[test]
 fn spinning_drum_throws_water_onto_the_glass() {
     let mut app = testing::headless();
@@ -103,7 +109,7 @@ fn spinning_drum_throws_water_onto_the_glass() {
         .iter()
         .filter(|p| {
             (p.position[0].powi(2) + p.position[2].powi(2)).sqrt()
-                > DEFAULT_RING.floor_radius().0 - 1.5
+                > DEFAULT_RING.floor_radius().0 as f64 - 1.5
         })
         .count();
     assert!(
@@ -111,15 +117,7 @@ fn spinning_drum_throws_water_onto_the_glass() {
         "{near_glass} of {} near the glass",
         particles.len()
     );
-    let riding = particles
-        .iter()
-        .filter(|p| {
-            let [x, _, z] = p.position;
-            let r = (x * x + z * z).sqrt().max(1e-6);
-            let tangential = (p.velocity[0] * z - p.velocity[2] * x) / r;
-            (tangential - 1.0 * r).abs() < 1.5
-        })
-        .count();
+    let riding = particles.iter().filter(|p| norm(&p.velocity) < 1.5).count();
     assert!(
         riding as f32 > particles.len() as f32 * 0.7,
         "{riding} of {} ride with the glass",
@@ -169,10 +167,10 @@ fn water_grows_a_surface() {
 fn settled_water_holds_still_in_the_drums_frame() {
     let mut app = testing::headless();
     for k in 0..10 {
-        let a = k as f32 * 0.7;
+        let a = k as f64 * 0.7;
         inject(
             &mut app,
-            [a.cos() * 8.0, (k % 3) as f32 * 2.0 - 2.0, a.sin() * 8.0],
+            [a.cos() * 8.0, (k % 3) as f64 * 2.0 - 2.0, a.sin() * 8.0],
             1000,
         );
         testing::run(&mut app, Seconds(0.2));
@@ -206,7 +204,7 @@ fn settled_water_holds_still_in_the_drums_frame() {
 
 /// A ring a few hundred metres across with tens of thousands of cubic metres of water in it,
 /// which is more particles than the water keeps, so it has coarsened a few times.
-fn big_ring(width: f32) -> App {
+fn big_ring(width: f32) -> testing::Headless {
     let mut app = testing::headless();
     testing::run(&mut app, Seconds(0.5));
     {
@@ -216,10 +214,10 @@ fn big_ring(width: f32) -> App {
     }
     set_spin(&mut app, 0.2);
     testing::run(&mut app, Seconds(1.0));
-    let r = app.world().resource::<Simulation>().drum.ring.radius.0 - 2.0;
+    let r = app.world().resource::<Simulation>().drum.ring.radius.0 as f64 - 2.0;
     let mut left = 61_359_000.0f32;
     for k in 0..200 {
-        let a = k as f32 * std::f32::consts::TAU / 100.0;
+        let a = k as f64 * std::f64::consts::TAU / 100.0;
         let per = app
             .world()
             .resource::<Fluid>()
@@ -228,7 +226,7 @@ fn big_ring(width: f32) -> App {
             .0;
         let count = (left / (200 - k) as f32 / per).max(1.0) as u32;
         left -= count as f32 * per;
-        let y = (k % 7) as f32 * width / 8.0 - width / 2.0;
+        let y = ((k % 7) as f32 * width / 8.0 - width / 2.0) as f64;
         inject(&mut app, [a.cos() * r, y, a.sin() * r], count);
         testing::run(&mut app, Seconds(0.1));
     }
@@ -251,33 +249,38 @@ fn a_big_ring_of_water_keeps_its_whole_surface() {
     }
 }
 
+/// Whatever size the vessel is, the finest water it may hold keeps it within the surface grid.
 #[test]
-fn the_surface_grid_reaches_the_largest_ring_at_the_finest_water() {
-    let reach = grid_reach(Resolution::FINEST);
-    assert!(
-        reach >= LARGEST_RING.radius && reach >= LARGEST_RING.half_width,
-        "grid reaches {reach:?}"
-    );
+fn the_finest_water_for_a_vessel_keeps_it_within_the_surface_grid() {
+    for reach in [1.0, 10.5, 500.0, 1e4, 1e6, 1e9, 1e12, 1e20, 1e30] {
+        let finest = Resolution::finest_for(Metres(reach));
+        assert!(
+            grid_reach(finest).0 >= reach && finest.spacing.0.is_finite(),
+            "a vessel reaching {reach} m gets water spaced {:?}",
+            finest.spacing
+        );
+    }
+    assert_eq!(Resolution::finest_for(Metres(10.5)), Resolution::FINEST);
 }
 
-/// Drops of a few particles scattered through the largest ring: every one gets its surface,
+/// Drops of a few particles scattered through a ring a kilometre across: every one gets its surface,
 /// however many blocks of the grid they touch between them.
 #[test]
-fn spray_all_over_the_largest_ring_is_meshed() {
+fn spray_all_over_a_big_ring_is_meshed() {
     let mut app = testing::headless();
     testing::run(&mut app, Seconds(0.5));
     {
         let mut settings = app.world_mut().resource_mut::<Settings>();
-        Dial::Diameter.set(&mut settings, LARGEST_RING.radius.0 * 2.0);
-        Dial::Width.set(&mut settings, LARGEST_RING.half_width.0 * 2.0);
+        Dial::Diameter.set(&mut settings, 999.0);
+        Dial::Width.set(&mut settings, 999.0);
     }
     set_spin(&mut app, 0.0);
     testing::run(&mut app, Seconds(0.5));
     let drops = 6000;
     for k in 0..drops {
-        let a = k as f32 * 2.399;
-        let r = 20.0 + (k % 97) as f32 * 4.9;
-        let y = (k % 89) as f32 * 11.0 - 490.0;
+        let a = k as f64 * 2.399;
+        let r = 20.0 + (k % 97) as f64 * 4.9;
+        let y = (k % 89) as f64 * 11.0 - 490.0;
         inject(&mut app, [a.cos() * r, y, a.sin() * r], 10);
     }
     testing::run(&mut app, Seconds(0.1));

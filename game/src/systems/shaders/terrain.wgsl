@@ -1,8 +1,8 @@
 // The ground's colour, computed per fragment on top of the standard material: bare dirt where it
 // has been dug toward the glass, grass at the initial depth and above, tiled in metre squares of
 // two tints across the wheel's surface so that walking over it reads as motion and distance. The
-// tiles are measured along the arc and the axis in the wheel's own frame, whole tiles round the
-// ring, so they stay square and sharp whatever size the ring is.
+// mesh carries each point's place in the tiling, in tiles round the ring and along its axis,
+// and its height above the glass, so the tiles stay square and sharp whatever size the ring is.
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -20,9 +20,6 @@
 #endif
 
 struct Terrain {
-    // x: the drum's angle (rad), y: the glass radius (m), z: tile size round the ring (m),
-    // w: tile size along the axis (m)
-    tiling: vec4<f32>,
     dirt: vec4<f32>,
     grass: vec4<f32>,
     grass_dark: vec4<f32>,
@@ -46,15 +43,15 @@ fn checker(u: f32, v: f32) -> f32 {
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    let p = in.world_position.xyz;
-    let angle = terrain.tiling.x;
-    let radius = terrain.tiling.y;
-    let phi = atan2(p.z, p.x) + angle;
-    let u = phi * radius / terrain.tiling.z;
-    let v = p.y / terrain.tiling.w;
-    let light = checker(u, v);
+    var light = 0.0;
+    var height = 0.0;
+#ifdef VERTEX_UVS_A
+    light = checker(in.uv.x, in.uv.y);
+#endif
+#ifdef VERTEX_UVS_B
+    height = in.uv_b.x;
+#endif
     let grass = mix(terrain.grass_dark.rgb, terrain.grass.rgb, light);
-    let height = radius - length(p.xz);
     let t = smoothstep(0.15, 0.45, height);
     let colour = mix(terrain.dirt.rgb, grass, t);
     pbr_input.material.base_color = vec4(colour, 1.0);

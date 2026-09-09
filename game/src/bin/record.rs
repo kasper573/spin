@@ -165,12 +165,17 @@ fn cue(app: &mut App, cue: Cue) {
         Cue::None => {}
         Cue::Flood => {
             for k in 0..30 {
-                let a = k as f32 * 0.52;
+                let a = k as f64 * 0.52;
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                        world.resource::<Simulation>().inject(
+                        let sim = world.resource::<Simulation>();
+                        sim.inject(
                             &mut fluid,
-                            [a.cos() * 7.0, (k % 3) as f32 * 3.0 - 3.0, a.sin() * 7.0],
+                            sim.drum.from_water([
+                                a.cos() * 7.0,
+                                (k % 3) as f64 * 3.0 - 3.0,
+                                a.sin() * 7.0,
+                            ]),
                             1500,
                         )
                     });

@@ -2,7 +2,14 @@
 // kept sorted by hashed grid cell so a particle's neighbours are in the 27 cells around it.
 // Boundary samples of solid bodies (Akinci et al. 2012) contribute to density and its gradient
 // like heavy particles.
-#import vessel::{Confined, vessel_confine, vessel_wall_velocity, vessel_air_velocity}
+//
+// The water lives in its vessel's frame, whose walls stand still, and feels the frame's motion
+// as the accelerations the `vessel` module reports. That module must define:
+//   vessel_confine(p, margin) -> Confined     a point put back inside, and the walls it met
+//   vessel_gravity(p) -> vec3<f32>            the frame's acceleration of a point at rest
+//   vessel_coriolis(v, dt) -> vec3<f32>       a velocity after dt of the frame's turning
+//   vessel_has_air(p) -> bool                 whether the vessel's air, at rest in it, is here
+#import vessel::{Confined, vessel_confine, vessel_gravity, vessel_coriolis, vessel_has_air}
 #import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell}
 
 @group(0) @binding(1) var<storage, read_write> position: array<vec4<f32>>;
@@ -23,6 +30,10 @@
 @group(2) @binding(2) var<storage, read> boundary: array<Boundary>;
 @group(2) @binding(3) var<storage, read> sample_state: array<SampleState>;
 
+// the agitation a particle starts foaming at and the range it foams fully over
+const FOAM_ONSET: f32 = 1.875;
+const FOAM_RANGE: f32 = 5.0;
+
 struct Predicted {
     q: vec3<f32>,
     v: vec3<f32>,
@@ -41,11 +52,10 @@ fn clamp_speed(v: vec3<f32>) -> vec3<f32> {
 fn predict_particle(i: u32) -> Predicted {
     let p = position[i].xyz;
     var v = velocity[i].xyz;
-    if (params.air_k > 0.0) {
-        let air = vessel_air_velocity(p);
-        if (air.w > 0.0) {
-            v += (air.xyz - v) * params.air_k;
-        }
+    v += vessel_gravity(p) * params.dt;
+    v = vessel_coriolis(v, params.dt);
+    if (params.air_k > 0.0 && vessel_has_air(p)) {
+        v -= v * params.air_k;
     }
     v = clamp_speed(v);
     let c = vessel_confine(p + v * params.dt, params.margin);
@@ -82,15 +92,17 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 /// Keep every other particle of the sorted water, in place of copying the sort back: with the
-/// particles twice as heavy and the kernel twice as wide, the water is as dense as before.
+/// particles twice as heavy and the kernel twice as wide, the water is as dense as before. The
+/// kept particles are rescaled into the coarser water's units.
 @compute @workgroup_size(64)
 fn thin(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.pending) {
         return;
     }
-    position[i] = position_sorted[2u * i];
-    velocity[i] = velocity_next[2u * i];
+    let p = position_sorted[2u * i];
+    position[i] = vec4(p.xyz * params.thin_scale, p.w);
+    velocity[i] = vec4(velocity_next[2u * i].xyz * params.thin_scale_v, 0.0);
 }
 
 @compute @workgroup_size(64)
@@ -309,7 +321,8 @@ fn delta(@builtin(global_invocation_id) id: vec3<u32>) {
     pred_out[i] = vec4(exclude_from_bodies(confined.p), 0.0);
 }
 
-/// Velocities from positions; wall contact = no penetration + viscous drag toward the wall's speed.
+/// Velocities from positions; wall contact = no penetration + viscous drag toward the wall, which
+/// stands still in the vessel's frame.
 @compute @workgroup_size(64)
 fn update_velocities(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
@@ -323,19 +336,17 @@ fn update_velocities(@builtin(global_invocation_id) id: vec3<u32>) {
     let first = contact[2u * i];
     let second = contact[2u * i + 1u];
     if (first.w > 0.0) {
-        let wall = vessel_wall_velocity(q);
-        var rv = v - wall;
-        let vn0 = dot(rv, first.xyz);
+        let vn0 = dot(v, first.xyz);
         if (vn0 < 0.0) {
-            rv -= vn0 * first.xyz;
+            v -= vn0 * first.xyz;
         }
         if (second.w > 0.0) {
-            let vn1 = dot(rv, second.xyz);
+            let vn1 = dot(v, second.xyz);
             if (vn1 < 0.0) {
-                rv -= vn1 * second.xyz;
+                v -= vn1 * second.xyz;
             }
         }
-        v = wall + rv * params.wall_keep;
+        v *= params.wall_keep;
     }
     velocity[i] = vec4(clamp_speed(v), 0.0);
 }
@@ -379,15 +390,16 @@ fn viscosity(@builtin(global_invocation_id) id: vec3<u32>) {
             sw += w_zero;
         }
     }
-    // agitation: relative motion against neighbours and slip against the walls
+    // agitation: relative motion against neighbours and slip against the walls, in spacings
+    // per second of the water's own clock, so that big water foams at the pace it moves
     var agitation = 0.0;
     if (sw > 0.0) {
         agitation = length(slip) / sw;
     }
     if (contact[2u * i].w > 0.0) {
-        agitation += 0.5 * length(ui - vessel_wall_velocity(xi));
+        agitation += 0.5 * length(ui);
     }
-    let wanted = clamp((agitation - 0.6) / 1.6, 0.0, 1.0);
+    let wanted = clamp((agitation - FOAM_ONSET) / FOAM_RANGE, 0.0, 1.0);
     let foam = position[i].w;
     if (wanted > foam) {
         position[i].w = foam + (wanted - foam) * 0.25;

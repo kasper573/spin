@@ -1,11 +1,11 @@
-//! The viewer as the avatar in the simulation: the camera is fixed in the hull at the eye,
-//! looking straight ahead, and the pilot's keys and mouse fire its thrusters, the mouse the
+//! The viewer as the avatar in the simulation: the camera rides the hull at the eye, looking
+//! straight ahead, and the pilot's keys and mouse fire its thrusters, the mouse the
 //! turning ones, so the body turns to look.
 use bevy::prelude::*;
 
 use crate::core::avatar::{self, AvatarInput, Gyros};
 use crate::core::math::{Quatd, Vec3d, cross, norm, quat_from_basis};
-use crate::core::rigid::Body;
+use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
 /// The camera that rides the avatar.
@@ -38,12 +38,6 @@ impl Player {
         AvatarInput {
             levels: pilot.levels.map(|l| l as f64),
         }
-    }
-
-    /// Where the eye is and which way it faces.
-    pub fn view(&self, hull: &Body) -> Transform {
-        let eye = avatar::eye(hull);
-        Transform::from_xyz(eye[0] as f32, eye[1] as f32, eye[2] as f32).with_rotation(quat(hull.q))
     }
 
     /// Put the avatar at rest with its eye at `eye`, facing `target` with its head toward the
@@ -84,16 +78,12 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn quat(q: Quatd) -> Quat {
-    Quat::from_xyzw(q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32)
-}
-
 fn ride(
-    player: Res<Player>,
     sim: Res<Simulation>,
+    viewpoint: Res<Viewpoint>,
     mut cameras: Query<&mut Transform, With<PlayerCamera>>,
 ) {
-    let view = player.view(sim.avatar());
+    let view = viewpoint.view(sim.avatar());
     for mut camera in &mut cameras {
         *camera = view;
     }

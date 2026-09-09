@@ -7,25 +7,35 @@ use serde::{Deserialize, Serialize};
 use crate::core::avatar::Gyros;
 use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
+use crate::core::math::{cross, rotate_y};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
-use crate::core::vessel::Vessel;
 use crate::core::web;
+use crate::systems::drum::Site;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
 const KEY: &str = "spin-gravity-wheel/v7";
 const AUTOSAVE_INTERVAL: Seconds = Seconds(2.0);
 
+/// Snapshots before this version kept the water and the avatar in the world's frame rather
+/// than the drum's; the avatar of such a snapshot is stood back on the ground.
+const DRUM_FRAME: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub version: u32,
     pub settings: Settings,
     pub avatar: AvatarPose,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
+    /// The point of the wall the avatar is measured from.
+    #[serde(default)]
+    pub site: Site,
     pub time: Seconds,
     /// How much water each particle stands for.
     pub water: Resolution,
-    /// Seven floats per particle: position, velocity, foam.
+    /// Seven floats per particle, in the drum's frame: position, velocity, foam.
     #[serde(with = "codec::f32s")]
     pub fluid: Vec<f32>,
     #[serde(with = "codec::f32s")]
@@ -64,6 +74,7 @@ impl Plugin for PersistencePlugin {
 pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
     let avatar = sim.avatar();
     Snapshot {
+        version: DRUM_FRAME,
         settings: settings.clone(),
         avatar: AvatarPose {
             position: avatar.p,
@@ -73,13 +84,14 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapsho
         },
         spin: sim.drum.spin,
         angle: sim.drum.angle,
+        site: sim.drum.site,
         time: sim.time,
         water: fluid.resolution(),
         fluid: fluid
             .particles()
             .flat_map(|p| {
-                let [x, y, z] = p.position;
-                let [vx, vy, vz] = p.velocity;
+                let [x, y, z] = p.position.map(|x| x as f32);
+                let [vx, vy, vz] = p.velocity.map(|v| v as f32);
                 [x, y, z, vx, vy, vz, p.foam]
             })
             .collect(),
@@ -100,21 +112,43 @@ pub fn apply(
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-999.0, 999.0));
     sim.drum.target_spin = settings.spin;
     sim.drum.angle = Radians(finite_f64(snapshot.angle.0));
+    let half_width = sim.drum.ring.half_width.0 as f64;
+    sim.drum.site = Site {
+        phi: finite_f64(snapshot.site.phi).rem_euclid(std::f64::consts::TAU),
+        y: finite_f64(snapshot.site.y).clamp(-half_width, half_width),
+    };
     sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
-    let margin = fluid.resolution().margin();
+    let margin = fluid.resolution().margin().0 as f64;
+    let legacy = snapshot.version < DRUM_FRAME;
+    let angle = sim.drum.angle.0;
+    let spin = sim.drum.spin.0 as f64;
     for chunk in snapshot.fluid.chunks_exact(7) {
         if chunk.iter().all(|v| v.is_finite()) {
-            let mut position = [chunk[0], chunk[1], chunk[2]];
-            sim.drum.confine(&mut position, margin);
+            let mut position = [chunk[0], chunk[1], chunk[2]].map(|x| x as f64);
+            let mut velocity = [chunk[3], chunk[4], chunk[5]].map(|v| v as f64);
+            if legacy {
+                let carried = cross(&[0.0, spin, 0.0], &position);
+                velocity = rotate_y(
+                    &[
+                        velocity[0] - carried[0],
+                        velocity[1] - carried[1],
+                        velocity[2] - carried[2],
+                    ],
+                    -angle,
+                );
+                position = rotate_y(&position, -angle);
+            }
             fluid.add(Particle {
-                position,
-                velocity: [chunk[3], chunk[4], chunk[5]],
+                position: sim.drum.place_inside(position, margin),
+                velocity,
                 foam: chunk[6].clamp(0.0, 1.0),
             });
         }
     }
-    pose_avatar(&snapshot.avatar, sim);
+    if !legacy {
+        pose_avatar(&snapshot.avatar, sim);
+    }
     sim.avatar_mut().solid = settings.collisions;
 }
 
@@ -134,8 +168,7 @@ struct Autosave(Timer);
 
 /// A saved resolution, unless it is nonsense, in which case the water starts out fine.
 fn water_resolution(saved: Resolution) -> Resolution {
-    let finest = Resolution::FINEST.spacing.0;
-    if saved.spacing.0.is_finite() && saved.spacing.0 >= finest && saved.spacing.0 < finest * 64.0 {
+    if saved.spacing.0.is_finite() && saved.spacing.0 >= Resolution::FINEST.spacing.0 {
         saved
     } else {
         Resolution::FINEST

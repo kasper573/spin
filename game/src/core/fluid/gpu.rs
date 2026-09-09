@@ -18,15 +18,17 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQue
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
-use super::frame::{ACCUMULATORS_PER_BODY, FluidFrame, GpuBodies, Params, STAMP_SLOT};
+use super::frame::{
+    ACCUMULATORS_PER_FRAME, FluidFrame, GpuBodies, Params, STAMP_SLOT, accumulators_of,
+};
 use super::surface::{self, SurfaceBuffers, SurfaceParams, TABLE_SLOTS};
-use super::{FluidReady, ITERATIONS, MAX_BODIES, MAX_PARTICLES, MAX_SAMPLES, TABLE_CELLS};
+use super::{FluidReady, ITERATIONS, MAX_PARTICLES, MAX_SAMPLES, TABLE_CELLS};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
 /// Threads per workgroup of the particle kernels, and of the scan's.
 const WORKGROUP: u32 = 64;
 const SCAN_THREADS: usize = 256;
-const ACCUMULATORS: usize = ACCUMULATORS_PER_BODY * MAX_BODIES;
+const ACCUMULATORS: usize = STAMP_SLOT + 4;
 
 #[derive(Resource, Clone, ExtractResource)]
 pub struct FluidBuffers {
@@ -301,7 +303,7 @@ const SPECS: [Spec; 21] = [
         shader: BODIES,
         entry: "drag",
         particles: &[0, 1, 2, 4, 9, 12],
-        vessel: false,
+        vessel: true,
         bodies: &[0, 2, 4],
         surface: &[],
         read_only: BODY_READS,
@@ -312,7 +314,7 @@ const SPECS: [Spec; 21] = [
         shader: SURFACE,
         entry: "mark",
         particles: &[0, 1],
-        vessel: true,
+        vessel: false,
         bodies: &[],
         surface: &[0, 4],
         read_only: SURFACE_READS,
@@ -345,7 +347,7 @@ const SPECS: [Spec; 21] = [
         shader: SURFACE,
         entry: "extract",
         particles: &[0, 1, 9, 12],
-        vessel: true,
+        vessel: false,
         bodies: &[],
         surface: &[0, 1, 3, 6, 8, 9],
         read_only: SURFACE_READS,
@@ -421,6 +423,7 @@ struct RawBuffers {
     position_sorted: Buffer,
     velocity_next: Buffer,
     cell_count: Buffer,
+    accum: Buffer,
     counters: Buffer,
     table: Buffer,
     cell_table: Buffer,
@@ -653,6 +656,7 @@ fn prepare(
         position_sorted: particles[2].clone(),
         velocity_next: particles[3].clone(),
         cell_count: particles[7].clone(),
+        accum: bodies[3].clone(),
         counters: surface[2].clone(),
         table: surface[3].clone(),
         cell_table: surface[7].clone(),
@@ -788,6 +792,11 @@ fn dispatch(
             vessel_now,
             joining,
         );
+    }
+    if frame.coupling {
+        let first = accumulators_of(frame.ticket) as u64 * 4;
+        let bytes = ACCUMULATORS_PER_FRAME as u64 * 4;
+        encoder.clear_buffer(&raw.accum, first, Some(bytes));
     }
     for (k, substep) in frame.substeps.iter().enumerate() {
         let (po, bo) = (groups.params_offsets[k], groups.bodies_offsets[k]);

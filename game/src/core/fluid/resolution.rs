@@ -1,13 +1,63 @@
-//! How much water one particle stands for. Every kernel constant of the solver follows from the
-//! rest spacing, so the water can be made coarser as a whole: twice the water per particle for
-//! the same number of particles.
+//! How much water one particle stands for, and the one water the GPU ever simulates. Every
+//! resolution is the canonical water with its units scaled: the rest spacing is a unit of
+//! length, and since this is water under gravity, its seconds are √(spacing / finest spacing)
+//! real seconds, so that it flows the same at any scale and never leaves the range single
+//! precision holds. The vessel sets a floor on how fine the water can be, so that a vessel of
+//! any size is at most a fixed number of spacings across and nothing too small to matter at
+//! that size is ever simulated.
 use std::f32::consts::PI;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::units::{Litres, Metres};
+use crate::core::units::{Hertz, Litres, Metres, Seconds};
 
 pub const REST_DENSITY: f32 = 1000.0;
+/// How far from its axis the water's vessel may reach, in spacings of the finest water it holds.
+pub const SPACINGS_FROM_AXIS: f32 = 1500.0;
+/// How often the canonical water steps, in its own seconds.
+pub const STEP_RATE: Hertz = Hertz(60.0);
+
+/// The canonical water's constants, in its own units: particles a unit apart, a kernel two
+/// units wide, and the rest density's worth of mass each.
+pub mod canonical {
+    use super::{PI, REST_DENSITY};
+
+    pub const SPACING: f32 = 1.0;
+    pub const H: f32 = 2.0;
+    pub const H_SQ: f32 = H * H;
+    pub const MASS: f32 = REST_DENSITY;
+    pub const POLY6: f32 = 315.0 / (64.0 * PI * (H_SQ * H_SQ * H_SQ * H_SQ * H));
+    pub const SPIKY: f32 = -45.0 / (PI * (H_SQ * H_SQ * H_SQ));
+    /// The poly6 kernel at zero distance.
+    pub const W_ZERO: f32 = POLY6 * H_SQ * H_SQ * H_SQ;
+    /// The poly6 kernel at the artificial pressure's reference distance, 0.3 h.
+    pub const SCORR_WQ: f32 =
+        POLY6 * (H_SQ - 0.09 * H_SQ) * (H_SQ - 0.09 * H_SQ) * (H_SQ - 0.09 * H_SQ);
+    /// The most a constraint iteration may move a particle.
+    pub const MAX_DELTA: f32 = 0.5 * SPACING;
+    /// How far particles keep from the walls.
+    pub const MARGIN: f32 = 0.5 * SPACING;
+
+    /// Akinci volume weights Ψ for boundary samples in canonical units: each sample stands in
+    /// for the rest density its neighbours don't cover.
+    pub fn sample_weights(points: &[[f32; 3]]) -> Vec<[f32; 4]> {
+        points
+            .iter()
+            .map(|p| {
+                let mut s = 0.0f32;
+                for q in points {
+                    let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+                    let r2 = dx * dx + dy * dy + dz * dz;
+                    if r2 < H_SQ {
+                        let t = H_SQ - r2;
+                        s += POLY6 * t * t * t;
+                    }
+                }
+                [p[0], p[1], p[2], REST_DENSITY / s]
+            })
+            .collect()
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Resolution {
@@ -27,6 +77,27 @@ impl Resolution {
         spacing: Metres(0.32),
     };
 
+    /// The finest water a vessel reaching this far from its axis holds.
+    pub fn finest_for(reach: Metres) -> Resolution {
+        Resolution {
+            spacing: Metres(
+                Resolution::FINEST
+                    .spacing
+                    .0
+                    .max(reach.0 / SPACINGS_FROM_AXIS),
+            ),
+        }
+    }
+
+    /// This resolution, or `floor` if that is coarser.
+    pub fn at_least(self, floor: Resolution) -> Resolution {
+        if self.spacing.0 < floor.spacing.0 {
+            floor
+        } else {
+            self
+        }
+    }
+
     /// Every particle stands for twice the water.
     pub fn coarser(self) -> Resolution {
         Resolution {
@@ -40,67 +111,23 @@ impl Resolution {
         Litres(s * s * s * 1000.0)
     }
 
-    /// Kernel support radius.
-    pub fn h(self) -> f32 {
-        2.0 * self.spacing.0
+    /// Metres per unit of the canonical water's length.
+    pub fn length(self) -> f64 {
+        self.spacing.0 as f64
     }
 
-    pub fn h_sq(self) -> f32 {
-        self.h() * self.h()
+    /// Real seconds per second of the canonical water.
+    pub fn time(self) -> f64 {
+        (self.spacing.0 as f64 / Resolution::FINEST.spacing.0 as f64).sqrt()
     }
 
-    pub fn mass(self) -> f32 {
-        let s = self.spacing.0;
-        REST_DENSITY * s * s * s
-    }
-
-    pub fn poly6(self) -> f32 {
-        315.0 / (64.0 * PI * self.h().powi(9))
-    }
-
-    pub fn spiky(self) -> f32 {
-        -45.0 / (PI * self.h().powi(6))
-    }
-
-    /// The poly6 kernel at zero distance.
-    pub fn w_zero(self) -> f32 {
-        self.poly6() * self.h_sq().powi(3)
-    }
-
-    /// The poly6 kernel at the artificial pressure's reference distance.
-    pub fn scorr_wq(self) -> f32 {
-        let dq = 0.3 * self.h();
-        self.poly6() * (self.h_sq() - dq * dq).powi(3)
-    }
-
-    /// The most a constraint iteration may move a particle.
-    pub fn max_delta(self) -> f32 {
-        0.5 * self.spacing.0
+    /// The real time one step of this water covers.
+    pub fn step(self) -> Seconds {
+        Seconds((STEP_RATE.period().0 as f64 * self.time()) as f32)
     }
 
     /// How far particles keep from the walls.
-    pub fn margin(self) -> f32 {
-        0.5 * self.spacing.0
-    }
-
-    /// Akinci volume weights Ψ for boundary samples: each sample stands in for the rest density
-    /// its neighbours don't cover.
-    pub fn sample_weights(self, points: &[[f32; 3]]) -> Vec<[f32; 4]> {
-        let (h_sq, poly6) = (self.h_sq(), self.poly6());
-        points
-            .iter()
-            .map(|p| {
-                let mut s = 0.0f32;
-                for q in points {
-                    let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
-                    let r2 = dx * dx + dy * dy + dz * dz;
-                    if r2 < h_sq {
-                        let t = h_sq - r2;
-                        s += poly6 * t * t * t;
-                    }
-                }
-                [p[0], p[1], p[2], REST_DENSITY / s]
-            })
-            .collect()
+    pub fn margin(self) -> Metres {
+        Metres(canonical::MARGIN * self.spacing.0)
     }
 }

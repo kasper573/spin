@@ -61,7 +61,7 @@ fn snapshot_round_trips_through_json() {
         );
     }
     assert_eq!(restored.fluid.len(), 40 * 7);
-    assert_eq!(restored.fluid[0], particles[0].position[0]);
+    assert_eq!(restored.fluid[0], particles[0].position[0] as f32);
 }
 
 #[test]

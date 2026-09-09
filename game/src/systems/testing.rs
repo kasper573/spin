@@ -1,11 +1,16 @@
 //! Automation hooks: scripts push JSON commands through the platform and read back a status line;
 //! plus the headless app the bench and the tests drive frame by frame.
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::diagnostic::{DiagnosticsStore, FrameCount};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::renderer::initialize_renderer;
+use bevy::render::settings::{Backends, RenderCreation, RenderResources, WgpuSettings};
 use bevy::render::storage::ShaderBuffer;
 use serde::{Deserialize, Serialize};
 
@@ -161,9 +166,11 @@ fn execute(world: &mut World, command: ScriptCommand) {
     match command {
         ScriptCommand::Inject { x, y, z, count } => {
             world.resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world
-                    .resource::<Simulation>()
-                    .inject(&mut fluid, [x, y, z], count)
+                world.resource::<Simulation>().inject(
+                    &mut fluid,
+                    [x as f64, y as f64, z as f64],
+                    count,
+                )
             });
         }
         ScriptCommand::Sculpt {
@@ -294,13 +301,54 @@ fn publish(
 
 /// The simulation with rendering into nothing, stepped by hand. No wall-clock time passes in it:
 /// the simulation advances only by `run`, so what a test observes never depends on how fast the
-/// machine is.
-pub fn headless() -> App {
-    let mut app = app::build_headless();
+/// machine is. One such app exists at a time in a process, and they all draw with the process's
+/// one GPU device.
+pub fn headless() -> Headless {
+    let turn = GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut app = app::build_headless(RenderCreation::Manual(device()));
     app.finish();
     app.cleanup();
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
-    app
+    Headless { app, _turn: turn }
+}
+
+/// A headless app and its turn on the GPU, which it keeps until it is dropped.
+pub struct Headless {
+    app: App,
+    _turn: MutexGuard<'static, ()>,
+}
+
+impl Deref for Headless {
+    type Target = App;
+
+    fn deref(&self) -> &App {
+        &self.app
+    }
+}
+
+impl DerefMut for Headless {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+}
+
+static GPU: Mutex<()> = Mutex::new(());
+
+/// What a texture copy aligns the start of every row to.
+const ROW_ALIGNMENT: usize = 256;
+
+/// The process's one GPU device, made on first use and kept for the life of the process. A
+/// process that makes a device for every app it runs faults the GPU sooner or later: the driver
+/// corrupts a later device's command streams once earlier ones have been torn down.
+fn device() -> RenderResources {
+    static DEVICE: OnceLock<RenderResources> = OnceLock::new();
+    DEVICE
+        .get_or_init(|| {
+            let settings = WgpuSettings::default();
+            let backends = settings.backends.unwrap_or(Backends::all());
+            bevy::tasks::block_on(initialize_renderer(backends, None, &settings))
+        })
+        .clone()
 }
 
 /// Run frames until this much simulated time has passed, a frame's worth at a time, each frame
@@ -385,15 +433,28 @@ pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> 
     handle
 }
 
-/// Run frames until the image has been rendered and read back: RGBA bytes, row by row.
+/// Run frames until the image has been rendered and read back: RGBA bytes, row by row, with
+/// the padding the copy aligned each row to taken out.
 pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
-    read_back(app, Readback::texture(image.clone()))
+    let padded = read_back(app, Readback::texture(image.clone()));
+    let width = app
+        .world()
+        .resource::<Assets<Image>>()
+        .get(image)
+        .map_or(0, |image| image.width() as usize);
+    let row = width * 4;
+    let stride = row.div_ceil(ROW_ALIGNMENT) * ROW_ALIGNMENT;
+    padded
+        .chunks(stride)
+        .flat_map(|line| line[..row.min(line.len())].iter().copied())
+        .collect()
 }
 
 /// The water's surface as last extracted: each vertex's position with its foam, read back from
 /// the GPU.
 pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
     let surface = app.world().resource::<FluidBuffers>().surface.clone();
+    let metres = app.world().resource::<Fluid>().resolution().length() as f32;
     let count = read_u32s(app, surface.counters.clone())
         .first()
         .copied()
@@ -403,7 +464,7 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
         .take(count)
         .map(|v| {
             let f = |i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
-            [f(0), f(4), f(8), f(12)]
+            [f(0) * metres, f(4) * metres, f(8) * metres, f(12)]
         })
         .collect()
 }

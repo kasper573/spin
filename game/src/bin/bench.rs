@@ -11,16 +11,17 @@ use game::systems::testing;
 fn main() {
     let mut app = testing::headless();
     for round in 0..40 {
-        let a = round as f32 * 0.5;
+        let a = round as f64 * 0.5;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource::<Simulation>().inject(
+                let sim = world.resource::<Simulation>();
+                sim.inject(
                     &mut fluid,
-                    [
+                    sim.drum.from_water([
                         a.cos() * 8.0,
-                        ((round % 3) as f32 - 1.0) * 3.0,
+                        ((round % 3) as f64 - 1.0) * 3.0,
                         a.sin() * 8.0,
-                    ],
+                    ]),
                     500,
                 )
             });
@@ -30,16 +31,17 @@ fn main() {
     measure(&mut app, "a sixth full");
 
     for round in 0..75 {
-        let a = round as f32 * 0.7 + 0.3;
+        let a = round as f64 * 0.7 + 0.3;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource::<Simulation>().inject(
+                let sim = world.resource::<Simulation>();
+                sim.inject(
                     &mut fluid,
-                    [
+                    sim.drum.from_water([
                         a.cos() * 7.0,
-                        ((round % 5) as f32 - 2.0) * 2.0,
+                        ((round % 5) as f64 - 2.0) * 2.0,
                         a.sin() * 7.0,
-                    ],
+                    ]),
                     600,
                 )
             });

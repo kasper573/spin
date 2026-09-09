@@ -16,6 +16,9 @@ pub struct Radians(pub f64);
 pub struct RadiansPerSecond(pub f32);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct RadiansPerSecondSquared(pub f32);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Litres(pub f32);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]

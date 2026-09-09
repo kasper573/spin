@@ -6,7 +6,7 @@ mod contacts;
 pub use body::{Body, BodyShape, Ground, Hull, WaterCoupling};
 pub use contacts::collide_vessel;
 
-use crate::core::math::quat_from_rotation_vector;
+use crate::core::math::{add_scaled, quat_from_rotation_vector, quat_rotate};
 use crate::core::units::{MetresPerSecond, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 
@@ -31,10 +31,13 @@ impl Default for BodyParams {
     }
 }
 
-/// One substep: apply the water's impulses (if any arrived) and the air's drag, integrate, and
-/// resolve contacts with the vessel. The air pushes on the hull's
-/// centre of pressure and spins it toward its own rotation, so a ballasted hull that drifts
-/// through it turns ballast-first, and where there is no air nothing turns it at all.
+/// One substep: apply the water's impulses (if any arrived), the vessel's frame and the air's
+/// drag, integrate, and resolve contacts with the vessel. The frame's turning is felt as the
+/// Coriolis turn of the velocity, exactly, and then as its rest acceleration; in that order,
+/// so that what the walls take back of the rest acceleration was never turned, and a body at
+/// rest on them stays at rest. The air, at rest in the frame, pushes on the hull's centre of
+/// pressure and stills its spin, so a ballasted hull that drifts through it turns
+/// ballast-first, and where there is no air nothing turns it at all.
 pub fn step(
     dt: f64,
     vessel: &impl Vessel,
@@ -50,23 +53,22 @@ pub fn step(
     };
     let spin = vessel.angular_velocity();
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
+    let coriolis = quat_from_rotation_vector(&spin.map(|s| -2.0 * s * dt));
     for (i, b) in bodies.iter_mut().enumerate() {
         if let Some(impulse) = water.and_then(|w| w.get(i)) {
-            let since = quat_from_rotation_vector(&spin.map(|s| s * impulse.age));
             // water may push a body with a few times the vessel's artificial gravity, no more
             let shape = &shapes[b.shape];
             let max_accel = 20.0 + 4.0 * spin_mag * spin_mag * shape.reach();
-            b.couple(&impulse.turned(&since), max_accel);
+            b.couple(impulse, max_accel);
         }
-        if air_k > 0.0
-            && let Some(a) = vessel.air_velocity(b.p)
-        {
+        b.v = quat_rotate(&coriolis, &b.v);
+        add_scaled(&mut b.v, &vessel.rest_acceleration(b.p), dt);
+        if air_k > 0.0 && vessel.has_air(b.p) {
             let at = b.to_world(&shapes[b.shape].hull.centre_of_pressure());
             let hull = b.point_velocity(&at);
-            let push = [a[0] - hull[0], a[1] - hull[1], a[2] - hull[2]];
-            let impulse = push.map(|p| p * air_k / b.inv_m);
+            let impulse = hull.map(|h| -h * air_k / b.inv_m);
             b.apply_impulse(&impulse, &at);
-            relax(&mut b.w, &spin, air_k);
+            relax(&mut b.w, &[0.0; 3], air_k);
         }
         b.integrate(dt, params.max_speed, params.max_spin);
     }

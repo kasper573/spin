@@ -1,9 +1,14 @@
-//! The container the fluid and bodies live in, seen only through its walls. Bodies collide with
-//! it on the CPU through [`Vessel`]; the water meets it on the GPU through a shader module named
-//! `vessel` (see `particles.wgsl` for the functions it must define) bound at group 1, whose
-//! layout and per-frame bind group the vessel's plugin provides.
+//! The container the fluid and bodies live in, seen only through its walls. Everything is
+//! simulated in the vessel's own frame, the one its walls stand still in: the bodies about a
+//! point of the vessel near them, with the vessel's motion felt as the accelerations its frame
+//! gives them, so their coordinates stay small however far the vessel reaches; the water about
+//! the vessel's own centre, on the GPU, through a shader module named `vessel` (see
+//! `particles.wgsl` for the functions it must define) bound at group 1, whose layout and
+//! per-frame bind group the vessel's plugin provides.
 use bevy::prelude::*;
 use bevy::render::render_resource::{BindGroup, BindGroupLayoutDescriptor};
+
+use crate::core::math::{Quatd, Vec3d, quat_conjugate, quat_rotate};
 
 /// The layout of bind group 1 of every fluid kernel, inserted into the render app by the vessel.
 #[derive(Resource, Clone)]
@@ -18,6 +23,35 @@ pub struct VesselBinding {
 }
 
 pub const MAX_CONTACT_NORMALS: usize = 2;
+
+/// Where the bodies' frame sits in the water's: both are fixed to the vessel, the water's about
+/// the vessel's centre and the bodies' about a point of the vessel, turned so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterFrame {
+    /// The bodies' origin in the water's frame.
+    pub origin: Vec3d,
+    /// Turns a vector of the bodies' frame into the water's.
+    pub rotation: Quatd,
+}
+
+impl WaterFrame {
+    pub fn to_water(&self, p: Vec3d) -> Vec3d {
+        let r = quat_rotate(&self.rotation, &p);
+        [
+            self.origin[0] + r[0],
+            self.origin[1] + r[1],
+            self.origin[2] + r[2],
+        ]
+    }
+
+    pub fn vector_to_water(&self, v: Vec3d) -> Vec3d {
+        quat_rotate(&self.rotation, &v)
+    }
+
+    pub fn vector_from_water(&self, v: Vec3d) -> Vec3d {
+        quat_rotate(&quat_conjugate(&self.rotation), &v)
+    }
+}
 
 /// Walls a point was pushed away from, as inward unit normals.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -67,17 +101,21 @@ impl Penetrations {
     }
 }
 
+/// The vessel as the bodies meet it, in their frame.
 pub trait Vessel {
-    /// Move a point that left the vessel back inside, `margin` away from the walls.
-    fn confine(&self, p: &mut [f32; 3], margin: f32) -> Contact;
+    /// Where the bodies' frame sits in the water's.
+    fn water_frame(&self) -> WaterFrame;
+    /// The frame's own angular velocity.
+    fn angular_velocity(&self) -> Vec3d;
+    /// The acceleration the frame's motion gives a body at rest at `p`: what it feels as
+    /// gravity there.
+    fn rest_acceleration(&self, p: Vec3d) -> Vec3d;
+    /// Whether the vessel's air, which rests in its frame, is at `p`.
+    fn has_air(&self, p: Vec3d) -> bool;
+    /// The velocity, in the frame, of something at rest among the stars at `p`.
+    fn star_velocity(&self, p: Vec3d) -> Vec3d;
     /// Every wall a point inside the vessel is currently inside of.
-    fn penetrations(&self, p: [f64; 3]) -> Penetrations;
+    fn penetrations(&self, p: Vec3d) -> Penetrations;
     /// Every wall a sphere overlaps, from whichever side of the wall it is on.
-    fn sphere_penetrations(&self, centre: [f64; 3], radius: f64) -> Penetrations;
-    /// Velocity of the wall material at a point.
-    fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3];
-    /// Velocity of the air at a point, or none where there is no air.
-    fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]>;
-    /// Angular velocity of the vessel as a whole.
-    fn angular_velocity(&self) -> [f64; 3];
+    fn sphere_penetrations(&self, centre: Vec3d, radius: f64) -> Penetrations;
 }

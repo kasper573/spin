@@ -38,6 +38,18 @@ pub fn norm(v: &Vec3d) -> f64 {
     dot(v, v).sqrt()
 }
 
+/// A vector turned about the y axis by `angle`, the way a positive spin about y turns things.
+#[inline]
+pub fn rotate_y(v: &Vec3d, angle: f64) -> Vec3d {
+    let (s, c) = angle.sin_cos();
+    [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c]
+}
+
+/// The quaternion of a turn about the y axis by `angle`.
+pub fn quat_about_y(angle: f64) -> Quatd {
+    [0.0, (angle / 2.0).sin(), 0.0, (angle / 2.0).cos()]
+}
+
 /// Hamilton product of two quaternions (x, y, z, w): the rotation `b` then `a`.
 pub fn quat_mul(a: &Quatd, b: &Quatd) -> Quatd {
     [

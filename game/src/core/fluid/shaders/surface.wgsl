@@ -5,9 +5,10 @@
 // crossed cells go into a second hash table, and one quad is laid per crossing edge, joining the
 // vertices of the four cells round it through that table. Nothing is kept per block, so what
 // the tables hold grows only with the particles, however scattered they are. Every kernel binds
-// at most eight storage buffers, the least a WebGPU device promises. Vertices come out
-// in the vessel's frame, so the mesh turns with the vessel between extractions.
-#import vessel::{vessel_to_world, vessel_from_world}
+// at most eight storage buffers, the least a WebGPU device promises. Vertices come out in the
+// vessel's frame, in the water's own units, relative to an anchor cell, so they stay small near
+// the viewer however far the vessel reaches, and the mesh turns with the vessel between
+// extractions.
 #import fluid_common::{params, coords_of, cell_key, cell_slot, neighbour_cell}
 
 struct SurfaceParams {
@@ -19,6 +20,8 @@ struct SurfaceParams {
     max_blocks: u32,
     table_mask: u32,
     cell_mask: u32,
+    // the cell the vertices come out relative to
+    anchor: vec3<i32>,
 }
 
 struct Vertex {
@@ -164,17 +167,17 @@ fn mark(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.count) {
         return;
     }
-    let p = vessel_from_world(position[i].xyz) / surface.cell;
+    let p = position[i].xyz / surface.cell;
     let reach = 2.0;
     let lo = vec3<i32>(floor(p - reach)) + vec3(1);
     let hi = vec3<i32>(ceil(p + reach)) - vec3(1);
     let b_lo = (lo - vec3(1)) >> vec3(2u);
     let b_hi = hi >> vec3(2u);
-    for (var x = b_lo.x; x <= b_hi.x; x++) {
-        for (var y = b_lo.y; y <= b_hi.y; y++) {
-            for (var z = b_lo.z; z <= b_hi.z; z++) {
-                mark_block(vec3(x, y, z));
-            }
+    // two blocks per axis at most, whatever the position holds
+    for (var n = 0u; n < 8u; n++) {
+        let b = b_lo + vec3<i32>(i32(n >> 2u), i32((n >> 1u) & 1u), i32(n & 1u));
+        if (all(b <= b_hi)) {
+            mark_block(b);
         }
     }
 }
@@ -215,7 +218,7 @@ fn corner_position(block: vec3<i32>, corner: vec3<i32>) -> vec3<f32> {
 /// Splatted density and foam at a corner of a block: the smooth kernel of every particle within
 /// reach.
 fn splat(b: vec3<i32>, corner: vec3<i32>) -> vec2<f32> {
-    let p = vessel_to_world(corner_position(b, corner));
+    let p = corner_position(b, corner);
     var d = 0.0;
     var f = 0.0;
     let c = coords_of(p);
@@ -308,7 +311,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     if (slot >= surface.max_vertices) {
         return;
     }
-    let p = (vec3<f32>(b * BLOCK + cell) + sum / crossings) * surface.cell;
+    let p = (vec3<f32>(b * BLOCK + cell - surface.anchor) + sum / crossings) * surface.cell;
     let gradient = vec3(
         (d[1] - d[0]) + (d[3] - d[2]) + (d[5] - d[4]) + (d[7] - d[6]),
         (d[2] - d[0]) + (d[3] - d[1]) + (d[6] - d[4]) + (d[7] - d[5]),

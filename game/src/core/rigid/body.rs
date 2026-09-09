@@ -1,4 +1,4 @@
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, quat_integrate, quat_rotate};
+use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, quat_integrate};
 use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
 
 /// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
@@ -8,7 +8,9 @@ use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
 /// own velocity, so the coupling stays stable whenever the readback lands.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WaterCoupling {
+    /// The velocity the buoyancy gave the body.
     pub buoyancy: Vec3d,
+    /// The buoyancy's torque impulse per unit of the body's mass.
     pub buoyancy_torque: Vec3d,
     /// Σ k·v of the water around the hull.
     pub flow: Vec3d,
@@ -19,9 +21,6 @@ pub struct WaterCoupling {
     /// Simulated time the sums cover, and how many substeps it was taken in.
     pub seconds: f64,
     pub substeps: f64,
-    /// Simulated seconds from the middle of the time the sums cover to the moment they are
-    /// applied; the water and the hull turn with the vessel meanwhile.
-    pub age: f64,
 }
 
 impl WaterCoupling {
@@ -47,17 +46,6 @@ impl WaterCoupling {
             wet: self.wet * f,
             seconds: self.seconds * f,
             substeps: self.substeps * f,
-            age: self.age,
-        }
-    }
-
-    /// The sums as they stand after everything they were taken from has turned by `q`.
-    pub fn turned(&self, q: &Quatd) -> WaterCoupling {
-        WaterCoupling {
-            buoyancy: quat_rotate(q, &self.buoyancy),
-            buoyancy_torque: quat_rotate(q, &self.buoyancy_torque),
-            flow: quat_rotate(q, &self.flow),
-            ..*self
         }
     }
 
@@ -275,19 +263,21 @@ impl Body {
             }
         }
 
-        let cap = max_accel * water.seconds / self.inv_m;
-        let mut j = water.buoyancy;
+        let cap = max_accel * water.seconds;
+        let mut dv = water.buoyancy;
         let mut l = water.buoyancy_torque;
-        let jm = (j[0] * j[0] + j[1] * j[1] + j[2] * j[2]).sqrt();
-        if jm > cap {
-            let s = cap / jm;
+        let dvm = (dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]).sqrt();
+        if dvm > cap {
+            let s = cap / dvm;
             for k in 0..3 {
-                j[k] *= s;
+                dv[k] *= s;
                 l[k] *= s;
             }
         }
-        add_scaled(&mut self.v, &j, self.inv_m);
-        add_scaled(&mut self.w, &mat3mul(&self.iw, &l), 1.0);
+        add_scaled(&mut self.v, &dv, 1.0);
+        if self.inv_m > 0.0 {
+            add_scaled(&mut self.w, &mat3mul(&self.iw, &l), 1.0 / self.inv_m);
+        }
     }
 
     /// Move by a substep, with the speed and spin held under the safety clamps.

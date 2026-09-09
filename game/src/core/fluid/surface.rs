@@ -1,15 +1,18 @@
 //! The water's isosurface, extracted on the GPU into vertex and index buffers that a material
 //! can draw straight from; see `surface.wgsl`. The extraction grid lives in the vessel's own
-//! frame and only the blocks of it the water touches are visited, so the surface costs the same
-//! however large the vessel is and holds still on water at rest in it. Everything here is sized
-//! by the particle cap, so no water, however much or however scattered, outgrows it.
+//! frame, in the canonical water's units, and only the blocks of it the water touches are
+//! visited, so the surface costs the same however large the vessel is and holds still on water
+//! at rest in it. Everything here is sized by the particle cap, so no water, however much or
+//! however scattered, outgrows it.
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{Buffer, ShaderType};
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 
+use super::resolution::canonical;
 use super::{MAX_PARTICLES, Resolution};
+use crate::core::math::Vec3d;
 use crate::core::units::Metres;
 
 /// A particle's splat reaches two blocks along each axis, so a drop on its own marks eight, and
@@ -22,6 +25,9 @@ pub const MAX_VERTICES: usize = 8 * MAX_PARTICLES;
 pub const CELL_SLOTS: usize = 2 * MAX_VERTICES;
 pub const MAX_INDICES: usize = 6 * 6 * MAX_PARTICLES;
 const ISO: f32 = 0.9;
+/// The extraction grid's cell, and how far a particle's splat reaches, in spacings.
+const CELL: f32 = 0.8 * canonical::SPACING;
+const SPLAT_RADIUS: f32 = 1.6 * canonical::SPACING;
 
 #[derive(Resource, Clone, Default, PartialEq, ExtractResource, ShaderType)]
 pub struct SurfaceParams {
@@ -33,22 +39,38 @@ pub struct SurfaceParams {
     pub max_blocks: u32,
     pub table_mask: u32,
     pub cell_mask: u32,
+    /// The cell the vertices come out relative to.
+    pub anchor: IVec3,
 }
 
 impl SurfaceParams {
-    pub fn new(resolution: Resolution) -> Self {
-        let spacing = resolution.spacing.0;
-        let splat_radius = 1.6 * spacing;
+    pub fn new(resolution: Resolution, anchor: Vec3d) -> Self {
+        let cell = cell(resolution) as f64;
         SurfaceParams {
-            cell: cell(resolution),
-            inv_r2: 1.0 / (splat_radius * splat_radius),
+            cell: CELL,
+            inv_r2: 1.0 / (SPLAT_RADIUS * SPLAT_RADIUS),
             iso: ISO,
             max_vertices: MAX_VERTICES as u32,
             max_indices: MAX_INDICES as u32,
             max_blocks: MAX_BLOCKS as u32,
             table_mask: TABLE_SLOTS as u32 - 1,
             cell_mask: CELL_SLOTS as u32 - 1,
+            anchor: IVec3::new(
+                (anchor[0] / cell).round() as i32,
+                (anchor[1] / cell).round() as i32,
+                (anchor[2] / cell).round() as i32,
+            ),
         }
+    }
+
+    /// The point of the vessel's frame the vertices are relative to, in metres.
+    pub fn origin(&self, resolution: Resolution) -> Vec3d {
+        let cell = cell(resolution) as f64;
+        [
+            self.anchor.x as f64 * cell,
+            self.anchor.y as f64 * cell,
+            self.anchor.z as f64 * cell,
+        ]
     }
 }
 
@@ -58,8 +80,9 @@ pub fn grid_reach(resolution: Resolution) -> Metres {
     Metres(512.0 * 4.0 * cell(resolution))
 }
 
+/// The grid's cell in metres at this resolution.
 fn cell(resolution: Resolution) -> f32 {
-    0.8 * resolution.spacing.0
+    CELL * resolution.spacing.0
 }
 
 #[derive(Clone)]

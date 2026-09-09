@@ -10,6 +10,7 @@ use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotInput, Player};
+use crate::systems::scene::Viewpoint;
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -224,7 +225,7 @@ fn mouse(
         controls.inject_carry += settings.flow.0 * dt / fluid.resolution().litres_per_particle().0;
         let count = controls.inject_carry.floor();
         controls.inject_carry -= count;
-        let at = target.point + target.normal * INJECT_DEPTH.0;
+        let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
         sim.inject(&mut fluid, at.to_array(), count as u32);
     } else {
         controls.inject_carry = 0.0;
@@ -233,19 +234,15 @@ fn mouse(
         controls.sculpting = true;
         let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
-        let phi = sim
-            .drum
-            .wheel_angle(target.point.x as f64, target.point.z as f64);
-        sim.drum.landscape.sculpt(
-            phi,
-            target.point.y as f64,
-            BRUSH_SIZE.0 as f64,
-            amount as f64,
-        );
+        let phi = sim.drum.wheel_angle_of(target.point.to_array());
+        let y = sim.drum.axial(target.point.to_array());
+        sim.drum
+            .landscape
+            .sculpt(phi, y, BRUSH_SIZE.0 as f64, amount as f64);
     }
 }
 
-fn marker(controls: Res<Controls>, aim: Res<Aim>, mut gizmos: Gizmos) {
+fn marker(controls: Res<Controls>, aim: Res<Aim>, viewpoint: Res<Viewpoint>, mut gizmos: Gizmos) {
     let Some(target) = aim.0 else {
         return;
     };
@@ -254,14 +251,18 @@ fn marker(controls: Res<Controls>, aim: Res<Aim>, mut gizmos: Gizmos) {
     } else {
         MARKER_RADIUS.0
     };
-    let rotation = Quat::from_rotation_arc(Vec3::Z, target.normal);
+    let normal = target.normal.as_vec3();
+    let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
     let colour = if controls.active {
         Color::srgba(1.0, 1.0, 1.0, 0.9)
     } else {
         Color::srgba(1.0, 1.0, 1.0, 0.35)
     };
     gizmos.circle(
-        Isometry3d::new(target.point + target.normal * 0.01, rotation),
+        Isometry3d::new(
+            viewpoint.local(target.point.to_array()) + normal * 0.01,
+            rotation,
+        ),
         radius,
         colour,
     );

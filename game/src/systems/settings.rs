@@ -7,7 +7,7 @@ use crate::core::avatar;
 use crate::core::units::{
     EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecondSquared, RadiansPerSecond,
 };
-use crate::systems::drum::{DEFAULT_RING, LARGEST_RING, Ring};
+use crate::systems::drum::{DEFAULT_RING, Ring};
 use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
 
 /// How many of a dial's fine steps it takes before the steps grow tenfold.
@@ -151,14 +151,14 @@ impl Dial {
         }
     }
 
-    /// Every dial runs up to 999 of its unit, apart from the friction and viscosity fractions.
+    /// The rates run up to 999 of their unit, the fractions to one, and the ring's size has no
+    /// end: the simulation represents any size.
     pub fn max(self) -> f32 {
         match self {
             Dial::Spin | Dial::Thrust => 999.0,
             Dial::Flow => 999_000.0,
             Dial::Viscosity | Dial::WallFriction => 1.0,
-            Dial::Diameter => LARGEST_RING.radius.0 * 2.0,
-            Dial::Width => LARGEST_RING.half_width.0 * 2.0,
+            Dial::Diameter | Dial::Width => f32::MAX,
         }
     }
 

@@ -16,6 +16,8 @@
 //! it is in. Nothing else steers it: the ballast rights the hull only through what pushes on the
 //! hull, the ground, the water or the air, and the gyros then bring it back to where it was held.
 //! Where there is no air and nothing to push on, only the pilot turns it.
+//!
+//! All of this happens in the vessel's own frame, where its walls and its air stand still.
 use serde::{Deserialize, Serialize};
 
 use crate::core::math::{
@@ -293,7 +295,7 @@ pub fn drive(
     add_scaled(&mut thrust, &body.rotate(&[0.0, 1.0, 0.0]), net[1] * power);
     add_scaled(&mut thrust, &body.rotate(&[0.0, 0.0, 1.0]), net[2] * power);
     match (body.solid, body.ground) {
-        (true, Some(ground)) => walk(body, &thrust, power, &ground, vessel, dt),
+        (true, Some(ground)) => walk(body, &thrust, power, &ground, dt),
         (true, None) => add_scaled(&mut body.v, &thrust, dt),
         (false, _) => fly(body, &thrust, power, vessel, dt),
     }
@@ -302,23 +304,11 @@ pub fn drive(
 
 /// Legs: push along the ground until the feet move over it at walking speed in the direction
 /// thrust, within what friction allows; thrust along the ground's normal acts as it is.
-fn walk(
-    body: &mut Body,
-    thrust: &Vec3d,
-    power: f64,
-    ground: &Ground,
-    vessel: &impl Vessel,
-    dt: f64,
-) {
+fn walk(body: &mut Body, thrust: &Vec3d, power: f64, ground: &Ground, dt: f64) {
     let n = ground.normal;
-    let ground_velocity = vessel.wall_velocity(ground.point);
     let along = limited(flatten(thrust, &n).map(|t| t / power.max(1e-9)), 1.0);
     let speed = WALK_SPEED.0 as f64;
-    let wanted = [
-        ground_velocity[0] + along[0] * speed,
-        ground_velocity[1] + along[1] * speed,
-        ground_velocity[2] + along[2] * speed,
-    ];
+    let wanted = along.map(|a| a * speed);
     let feet = body.point_velocity(&ground.point);
     let slip = flatten(
         &[
@@ -337,7 +327,11 @@ fn walk(
 /// Thrusters and the flight assist, which brakes toward the surrounding air, or toward the stars
 /// where there is none.
 fn fly(body: &mut Body, thrust: &Vec3d, power: f64, vessel: &impl Vessel, dt: f64) {
-    let rest = vessel.air_velocity(body.p).unwrap_or([0.0; 3]);
+    let rest = if vessel.has_air(body.p) {
+        [0.0; 3]
+    } else {
+        vessel.star_velocity(body.p)
+    };
     add_scaled(&mut body.v, thrust, dt);
     let slip = [
         rest[0] - body.v[0],
@@ -359,8 +353,8 @@ fn hold(body: &mut Body, thrusters: &Thrusters, gyros: &mut Gyros, vessel: &impl
     };
     let mut rate = match (footing, gyros.footing) {
         (Some(now), Some(last)) => rotation_vector(&quat_between(&last, &now)).map(|c| c / dt),
-        _ if vessel.air_velocity(body.p).is_some() => vessel.angular_velocity(),
-        _ => [0.0; 3],
+        _ if vessel.has_air(body.p) => [0.0; 3],
+        _ => vessel.angular_velocity().map(|w| -w),
     };
     gyros.footing = footing;
     let held = gyros.held;

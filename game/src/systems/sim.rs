@@ -1,11 +1,16 @@
 //! The running simulation: the drum and the avatar are stepped on the CPU and the
 //! water follows on the GPU. Real time takes one substep per frame, no longer than a sixtieth
 //! of a second, so a fast display gets smooth bodies and a slow frame is split into a few
-//! substeps; beyond that, time stretches rather than the frame. The water steps at exactly
-//! sixty hertz whatever the display does, so it costs the same at any frame rate: each of its
-//! steps is taken at the moment the bodies' substeps pass a sixtieth, with the drum and the
-//! bodies as they are then. Requested time (the tests, the bench, scripts) always steps at
-//! exactly sixty hertz, so the water steps with every substep.
+//! substeps; beyond that, time stretches rather than the frame. The water steps at its own
+//! fixed pace whatever the display does, so it costs the same at any frame rate: a sixtieth of
+//! a second for the finest water, and longer in proportion for coarser water, whose waves are
+//! slower. Each of its steps is taken at the moment the bodies' substeps pass its due time,
+//! with the drum and the bodies as they are then. Requested time (the tests, the bench,
+//! scripts) always steps at exactly sixty hertz.
+//!
+//! The bodies are simulated in the drum's own frame about a site on its wall, so their
+//! coordinates stay small however large the ring; the site follows the avatar as the scene
+//! asks, and everything measured from the old site is carried over to the new one.
 //!
 //! The initial state is a ring world: ground all the way round the drum, spinning exactly fast
 //! enough that the avatar standing on it weighs what it would on Earth, and nothing else.
@@ -13,18 +18,18 @@ use bevy::prelude::*;
 
 use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
-    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
+    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME, Resolution,
 };
-use crate::core::math::{norm, quat_from_basis};
+use crate::core::math::{Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
-    RadiansPerSecond, Seconds,
+    RadiansPerSecond, RadiansPerSecondSquared, Seconds,
 };
 use crate::core::vessel::Vessel;
-use crate::systems::drum::{DEFAULT_RING, Drum, Ring};
+use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, Shift};
 
-/// The water's step rate, and the most the bodies are stepped by at once.
+/// The most the bodies are stepped by at once.
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
@@ -58,6 +63,7 @@ pub struct Footing {
 pub struct SubstepRecord {
     pub dt: Seconds,
     pub spin: RadiansPerSecond,
+    pub spin_rate: RadiansPerSecondSquared,
     pub angle: Radians,
     pub bodies: Bodies,
 }
@@ -119,7 +125,7 @@ impl Simulation {
         let mut drum = Drum::new(ring);
         drum.spin = standing_spin(ring);
         drum.target_spin = drum.spin;
-        let avatar = standing_avatar(&shapes[AVATAR_SHAPE], &drum);
+        let avatar = standing_avatar(&shapes[AVATAR_SHAPE]);
         let thrusters =
             Thrusters::with_power(avatar::equalized_thrust(standing_gravity(drum.spin, ring)));
         Simulation {
@@ -155,33 +161,23 @@ impl Simulation {
     }
 }
 
-/// The avatar upright on the ground at wheel angle zero, facing spinward and moving with the
-/// ground, so that it starts out standing rather than falling.
-fn standing_avatar(shape: &BodyShape, drum: &Drum) -> Body {
-    let r = standing_radius(drum.ring).0 as f64;
-    let p = [r, 0.0, 0.0];
+/// The avatar upright on the ground at the site, at rest on it and facing spinward, so that
+/// it starts out standing rather than falling.
+fn standing_avatar(shape: &BodyShape) -> Body {
+    let p = [
+        -(GROUND_DEPTH.0 as f64 + avatar::standing_height()),
+        0.0,
+        0.0,
+    ];
     let up = [-1.0, 0.0, 0.0];
-    let ground_velocity = drum.wall_velocity(p);
-    let forward = if ground_velocity[2] < 0.0 {
-        [0.0, 0.0, -1.0]
-    } else {
-        [0.0, 0.0, 1.0]
-    };
-    let back = [-forward[0], -forward[1], -forward[2]];
+    let back = [0.0, 0.0, 1.0];
     let right = [
         up[1] * back[2] - up[2] * back[1],
         up[2] * back[0] - up[0] * back[2],
         up[0] * back[1] - up[1] * back[0],
     ];
     let q = quat_from_basis(&right, &up, &back);
-    Body::new(
-        AVATAR_SHAPE,
-        shape,
-        p,
-        q,
-        ground_velocity,
-        drum.angular_velocity(),
-    )
+    Body::new(AVATAR_SHAPE, shape, p, q, [0.0; 3], [0.0; 3])
 }
 
 impl Simulation {
@@ -215,7 +211,7 @@ impl Simulation {
             None
         };
         self.clamp_speeds();
-        let water_step = max_dt as f64;
+        let water_step = fluid.step().0 as f64;
         for k in 0..steps {
             self.drum.advance(dt as f64);
             avatar::drive(
@@ -240,10 +236,11 @@ impl Simulation {
             if self.water_due >= water_step * (1.0 - 1e-6) {
                 self.water_due = (self.water_due - water_step).max(0.0);
                 self.substeps.push(SubstepRecord {
-                    dt: Seconds(max_dt),
+                    dt: Seconds(water_step as f32),
                     spin: self.drum.spin,
+                    spin_rate: self.drum.spin_rate,
                     angle: self.drum.angle,
-                    bodies: fluid.pack(&self.bodies, &self.shapes),
+                    bodies: fluid.pack(&self.bodies, &self.shapes, &self.drum.water_frame()),
                 });
             }
         }
@@ -276,11 +273,12 @@ impl Simulation {
     }
 
     /// Back to the initial ring world of the same size, but the settings, the target spin, the
-    /// thrusters' power and the avatar stay as they are.
+    /// thrusters' power, the site and the avatar stay as they are.
     pub fn reset(&mut self) {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
         let target = self.drum.target_spin;
+        let site = self.drum.site;
         let power = self.thrusters.power;
         let gyros = self.gyros;
         let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
@@ -288,9 +286,30 @@ impl Simulation {
         self.params = params;
         self.body_params = body_params;
         self.drum.target_spin = target;
+        self.drum.site = site;
         self.thrusters.power = power;
         self.gyros = gyros;
         self.bodies[0] = avatar;
+    }
+
+    /// Move the site to the wall below a point of the frame, and carry everything measured
+    /// from the old site over to the new one.
+    pub fn resite(&mut self, below: Vec3d) -> Shift {
+        let shift = self.drum.resite(below);
+        let turn = quat_about_y(shift.arc / self.drum.ring.radius.0 as f64);
+        for body in &mut self.bodies {
+            let p = self.drum.carried(body.p, shift);
+            let q = quat_mul(&turn, &body.q);
+            let v = self.drum.carried_vector(body.v, shift);
+            let w = self.drum.carried_vector(body.w, shift);
+            body.place(p, q);
+            body.v = v;
+            body.w = w;
+            body.ground = None;
+        }
+        self.gyros.held = quat_mul(&turn, &self.gyros.held);
+        self.gyros.footing = self.gyros.footing.map(|n| quat_rotate(&turn, &n));
+        shift
     }
 
     pub fn shapes(&self) -> &[BodyShape] {
@@ -305,28 +324,16 @@ impl Simulation {
     pub fn footing(&self) -> Footing {
         let avatar = self.avatar();
         match avatar.ground {
-            Some(ground) => {
-                let wall = self.drum.wall_velocity(ground.point);
-                let feet = avatar.point_velocity(&ground.point);
-                Footing {
-                    weight: (ground.support.0 * avatar.inv_m / EARTH_GRAVITY.0) as f32,
-                    ground_speed: norm(&[feet[0] - wall[0], feet[1] - wall[1], feet[2] - wall[2]])
-                        as f32,
-                    airborne: false,
-                }
-            }
-            None => {
-                let air = self.drum.air_velocity(avatar.p).unwrap_or([0.0; 3]);
-                Footing {
-                    weight: 0.0,
-                    ground_speed: norm(&[
-                        avatar.v[0] - air[0],
-                        avatar.v[1] - air[1],
-                        avatar.v[2] - air[2],
-                    ]) as f32,
-                    airborne: avatar.solid,
-                }
-            }
+            Some(ground) => Footing {
+                weight: (ground.support.0 * avatar.inv_m / EARTH_GRAVITY.0) as f32,
+                ground_speed: norm(&avatar.point_velocity(&ground.point)) as f32,
+                airborne: false,
+            },
+            None => Footing {
+                weight: 0.0,
+                ground_speed: norm(&avatar.v) as f32,
+                airborne: avatar.solid,
+            },
         }
     }
 
@@ -334,18 +341,13 @@ impl Simulation {
         &mut self.bodies[0]
     }
 
-    /// Add up to `count` particles around a point inside the drum, moving with the glass.
-    pub fn inject(&self, fluid: &mut Fluid, centre: [f32; 3], count: u32) -> u32 {
+    /// Add up to `count` particles of water around a point of the frame, at rest in the drum.
+    pub fn inject(&self, fluid: &mut Fluid, centre: Vec3d, count: u32) -> u32 {
         let drum = &self.drum;
-        fluid.inject(
-            centre,
-            |p| {
-                drum.wall_velocity([p[0] as f64, p[1] as f64, p[2] as f64])
-                    .map(|v| v as f32)
-            },
-            count,
-            |p| drum.place_inside(p),
-        )
+        let margin = fluid.resolution().margin().0 as f64;
+        fluid.inject(drum.to_water(centre), count, |p| {
+            drum.place_inside(p, margin)
+        })
     }
 }
 
@@ -377,11 +379,12 @@ fn step(
     if !ready.get() {
         return;
     }
+    fluid.set_floor(Resolution::finest_for(sim.drum.ring.reach()));
     sim.advance(Seconds(time.delta_secs()), &mut fluid);
     let substeps: Vec<(Seconds, Bodies)> = sim
         .substeps
         .iter()
         .map(|r| (r.dt, r.bodies.clone()))
         .collect();
-    *frame = fluid.frame(&sim.params, &substeps);
+    *frame = fluid.frame(&sim.params, &substeps, &sim.drum.water_frame());
 }

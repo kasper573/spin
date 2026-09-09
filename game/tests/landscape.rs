@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
-use game::core::units::{Radians, RadiansPerSecond, Seconds};
+use game::core::units::{RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{DEFAULT_RING, Drum, Landscape, wheel_angle};
+use game::systems::drum::{DEFAULT_RING, Drum, Landscape, Site};
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing;
@@ -33,23 +33,30 @@ fn heights_are_clamped_on_load() {
 }
 
 #[test]
-fn terrain_pushes_particles_out_and_turns_with_the_drum() {
+fn raised_ground_is_a_wall_where_it_is_raised_only() {
     let mut drum = Drum {
-        angle: Radians(0.7),
+        site: Site { phi: 0.7, y: 0.0 },
         ..Drum::default()
     };
     for _ in 0..20 {
-        drum.landscape
-            .sculpt(wheel_angle(9.0, 0.0, 0.7), 0.0, 1.5, 0.05);
+        drum.landscape.sculpt(0.7, 0.0, 1.5, 0.05);
     }
-    let mut p = [9.9, 0.0, 0.0];
-    let contact = drum.confine(&mut p, 0.05);
-    assert!(!contact.is_empty());
-    let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
-    assert!(r < 9.1, "particle left at radius {r}");
-    let mut elsewhere = [0.0, 0.0, 9.8];
-    let contact = drum.confine(&mut elsewhere, 0.05);
-    assert!(contact.is_empty());
+    let under = drum.wall_point(0.0, 0.0);
+    let inside = [under[0] - 0.6, under[1], under[2]];
+    let hit = drum.penetrations(inside).iter().next();
+    assert!(
+        hit.is_some_and(|pen| pen.depth > 0.3 && pen.normal[0] < -0.9),
+        "no ground under the brush: {hit:?}"
+    );
+    let elsewhere = drum.wall_point(1.2, 0.0);
+    let (_, outward) = drum.depth_and_outward(elsewhere);
+    let clear = [
+        elsewhere[0] - 0.6 * outward[0],
+        elsewhere[1],
+        elsewhere[2] - 0.6 * outward[2],
+    ];
+    let hit = drum.penetrations(clear).iter().next();
+    assert!(hit.is_none(), "ground away from the brush: {hit:?}");
 }
 
 #[test]
@@ -64,28 +71,25 @@ fn water_settles_on_top_of_raised_ground() {
         }
     }
     for k in 0..8 {
-        let a = k as f32 * 0.8;
+        let a = k as f64 * 0.8;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource::<Simulation>().inject(
-                    &mut fluid,
-                    [a.cos() * 7.5, 0.0, a.sin() * 7.5],
-                    400,
-                )
+                let sim = world.resource::<Simulation>();
+                let at = sim.drum.from_water([a.cos() * 7.5, 0.0, a.sin() * 7.5]);
+                sim.inject(&mut fluid, at, 400)
             });
         testing::run(&mut app, Seconds(0.2));
     }
     testing::run(&mut app, Seconds(6.0));
     let particles = testing::particles(&mut app);
     let sim = app.world().resource::<Simulation>();
-    let angle = sim.drum.angle.0;
     let radius = sim.drum.ring.radius.0 as f64;
     let height = sim.drum.landscape.max_height() as f64;
     assert!(height > 1.5, "landscape height {height}");
     for p in &particles {
-        let [x, y, z] = p.position.map(|v| v as f64);
+        let [x, y, z] = p.position;
         let r = (x * x + z * z).sqrt();
-        let (h, _, _) = sim.drum.landscape.sample(wheel_angle(x, z, angle), y);
+        let (h, _, _) = sim.drum.landscape.sample(z.atan2(x), y);
         assert!(
             r <= radius - h + 0.06,
             "particle inside terrain: r {r}, ground at {}",
