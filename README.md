@@ -9,7 +9,8 @@ thrusters walk you over the ground, lift you off it and roll you, and a hop is a
 through space that the curving floor comes back up to meet. Water is a position-based fluid solved in compute
 shaders, rafts are rigid wooden boards with Coulomb friction against the moving ground, and the
 water is drawn as an isosurface the GPU extracts every frame, with a cel-shaded material and foam.
-It needs a browser with WebGPU (current Chrome, Edge, Safari or Firefox).
+It needs a browser with WebGPU (current Chrome, Edge, Safari or Firefox); Chrome on Linux only
+offers a GPU adapter with `chrome://flags/#enable-vulkan` turned on.
 
 ## The ring
 

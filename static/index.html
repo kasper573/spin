@@ -74,6 +74,11 @@
         if (!navigator.gpu) {
           throw new Error("this page needs WebGPU: use a current Chrome, Edge, Safari or Firefox");
         }
+        if (!(await navigator.gpu.requestAdapter())) {
+          throw new Error(
+            "the browser has WebGPU but offers no GPU adapter: Chrome on Linux only offers one with chrome://flags/#enable-vulkan turned on",
+          );
+        }
         await init();
       } catch (e) {
         const log = document.getElementById("error-log");
