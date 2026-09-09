@@ -9,7 +9,6 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::storage::ShaderBuffer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::avatar::Look;
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
@@ -81,12 +80,15 @@ pub enum ScriptCommand {
         roll_left: f32,
         #[serde(default)]
         roll_right: f32,
+        #[serde(default)]
+        pitch_up: f32,
+        #[serde(default)]
+        pitch_down: f32,
+        #[serde(default)]
+        yaw_left: f32,
+        #[serde(default)]
+        yaw_right: f32,
         seconds: f32,
-    },
-    /// Turn the head to an absolute yaw and pitch relative to the hull.
-    Look {
-        yaw: f64,
-        pitch: f64,
     },
     Advance {
         seconds: f32,
@@ -118,7 +120,7 @@ pub struct ScriptStatus {
     pub ground_speed: f32,
     pub airborne: bool,
     /// How hard each thruster is firing, in the order of `Thruster::ALL`.
-    pub thrust: [f32; 8],
+    pub thrust: [f32; 12],
     /// Peak acceleration of a thruster.
     pub thrust_power: f32,
     pub diameter: f32,
@@ -209,7 +211,7 @@ fn execute(world: &mut World, command: ScriptCommand) {
                 let mut sim = world.resource_mut::<Simulation>();
                 sim.avatar_mut().solid = false;
                 player.teleport(
-                    sim.avatar_mut(),
+                    &mut sim,
                     [x as f64, y as f64, z as f64],
                     [look_x as f64, look_y as f64, look_z as f64],
                 );
@@ -224,18 +226,22 @@ fn execute(world: &mut World, command: ScriptCommand) {
             down,
             roll_left,
             roll_right,
+            pitch_up,
+            pitch_down,
+            yaw_left,
+            yaw_right,
             seconds,
         } => {
             let now = world.resource::<Simulation>().time;
             *world.resource_mut::<ScriptedThrust>() = ScriptedThrust {
                 pilot: PilotInput {
-                    levels: [forward, back, left, right, up, down, roll_left, roll_right],
+                    levels: [
+                        forward, back, left, right, up, down, roll_left, roll_right, pitch_up,
+                        pitch_down, yaw_left, yaw_right,
+                    ],
                 },
                 until: Seconds(now.0 + seconds),
             };
-        }
-        ScriptCommand::Look { yaw, pitch } => {
-            world.resource_mut::<Player>().look = Look { yaw, pitch };
         }
         ScriptCommand::Advance { seconds } => {
             world.resource_mut::<Simulation>().request(Seconds(seconds))
@@ -251,7 +257,7 @@ fn execute(world: &mut World, command: ScriptCommand) {
 /// Keep the scripted keys held until their time is up.
 fn steer(thrust: Res<ScriptedThrust>, player: Res<Player>, mut sim: ResMut<Simulation>) {
     if sim.time < thrust.until {
-        sim.avatar_input = player.input(sim.avatar(), thrust.pilot);
+        sim.avatar_input = player.input(thrust.pilot);
     }
 }
 
@@ -266,7 +272,7 @@ fn publish(
     let status = ScriptStatus {
         frame: frame.0,
         particles: fluid.len(),
-        litres: Simulation::water(&fluid).0,
+        litres: fluid.litres().0,
         rafts: sim.rafts().len(),
         spin: sim.drum.spin,
         angle: sim.drum.angle,
@@ -372,6 +378,24 @@ pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> 
 /// Run frames until the image has been rendered and read back: RGBA bytes, row by row.
 pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
     read_back(app, Readback::texture(image.clone()))
+}
+
+/// The water's surface as last extracted: each vertex's position with its foam, read back from
+/// the GPU.
+pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
+    let surface = app.world().resource::<FluidBuffers>().surface.clone();
+    let count = read_u32s(app, surface.counters.clone())
+        .first()
+        .copied()
+        .unwrap_or(0) as usize;
+    read_back(app, Readback::buffer(surface.vertices))
+        .chunks_exact(32)
+        .take(count)
+        .map(|v| {
+            let f = |i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
+            [f(0), f(4), f(8), f(12)]
+        })
+        .collect()
 }
 
 /// How many triangles the water's surface currently has, read back from the GPU.

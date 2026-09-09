@@ -1,5 +1,7 @@
 //! Water rendering: the isosurface the GPU extracts is drawn straight from its buffers by a
 //! cel-shaded material, through a placeholder mesh whose vertex shader looks the geometry up.
+//! The surface comes out in the drum's own frame, so the mesh is turned with the drum and water
+//! at rest in it rides round without being re-extracted.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::PrimitiveTopology;
@@ -69,6 +71,10 @@ impl Material for WaterMaterial {
 #[derive(Resource)]
 struct Water(Handle<WaterMaterial>);
 
+/// The mesh the surface is drawn through, turned with the drum.
+#[derive(Component)]
+struct WaterMesh;
+
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
@@ -92,6 +98,7 @@ fn spawn(
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; MAX_INDICES]);
     commands.insert_resource(Water(material.clone()));
     commands.spawn((
+        WaterMesh,
         Mesh3d(meshes.add(placeholder)),
         MeshMaterial3d(material),
         NoFrustumCulling,
@@ -99,8 +106,16 @@ fn spawn(
     ));
 }
 
-fn tick(sim: Res<Simulation>, water: Res<Water>, mut materials: ResMut<Assets<WaterMaterial>>) {
+fn tick(
+    sim: Res<Simulation>,
+    water: Res<Water>,
+    mut materials: ResMut<Assets<WaterMaterial>>,
+    mut meshes: Query<&mut Transform, With<WaterMesh>>,
+) {
     if let Some(mut material) = materials.get_mut(&water.0) {
-        material.clock = Vec4::new(sim.time.0, sim.drum.angle.0 as f32, 0.0, 0.0);
+        material.clock = Vec4::new(sim.time.0, 0.0, 0.0, 0.0);
+    }
+    for mut transform in &mut meshes {
+        transform.rotation = Quat::from_rotation_y(sim.drum.angle.0 as f32);
     }
 }

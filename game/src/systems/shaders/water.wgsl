@@ -1,15 +1,16 @@
 #import bevy_pbr::mesh_view_bindings::view
+#import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
 
 struct Water {
     sun: vec4<f32>,
     deep: vec4<f32>,
     shallow: vec4<f32>,
-    // x: time (s), y: drum angle (rad)
+    // x: time (s)
     clock: vec4<f32>,
 }
 
 struct SurfaceVertex {
-    // xyz: position, w: foam
+    // xyz: position in the drum's frame, w: foam
     position: vec4<f32>,
     normal: vec4<f32>,
 }
@@ -25,10 +26,12 @@ struct Fragment {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) foam: f32,
+    // in the drum's frame, so surface detail turns with the water
+    @location(3) wheel_position: vec3<f32>,
 }
 
 @vertex
-fn vertex(@builtin(vertex_index) i: u32) -> Fragment {
+fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32) -> Fragment {
     var out: Fragment;
     if (i >= counters[1]) {
         // past the extracted surface: park the vertex outside the clip volume
@@ -36,10 +39,13 @@ fn vertex(@builtin(vertex_index) i: u32) -> Fragment {
         return out;
     }
     let v = vertices[indices[i]];
-    out.clip = view.clip_from_world * vec4(v.position.xyz, 1.0);
-    out.world_position = v.position.xyz;
-    out.world_normal = v.normal.xyz;
+    let world_from_local = get_world_from_local(instance);
+    let world = mesh_position_local_to_world(world_from_local, vec4(v.position.xyz, 1.0));
+    out.clip = view.clip_from_world * world;
+    out.world_position = world.xyz;
+    out.world_normal = mesh_normal_local_to_world(v.normal.xyz, instance);
     out.foam = v.position.w;
+    out.wheel_position = v.position.xyz;
     return out;
 }
 
@@ -81,11 +87,7 @@ fn fragment(in: Fragment, @builtin(front_facing) front: bool) -> @location(0) ve
     let spec = step(0.985, max(dot(n, h), 0.0));
 
     // foam noise sits still in the drum's frame, so it turns with the water instead of sliding
-    let angle = water.clock.y;
-    let c = cos(angle);
-    let s = sin(angle);
-    let p = in.world_position;
-    let wheel = vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+    let wheel = in.wheel_position;
     let grain = noise3(wheel * 22.0 + vec3(0.0, water.clock.x * 0.6, 0.0));
     let grain2 = noise3(wheel * 9.0 - vec3(water.clock.x * 0.3, 0.0, 0.0));
     let foam = smoothstep(0.45, 0.75, in.foam + (grain - 0.5) * 0.45 + (grain2 - 0.5) * 0.25);

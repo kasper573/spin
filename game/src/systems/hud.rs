@@ -80,7 +80,7 @@ pub fn hud_text(
         "click the view to take control\n\n"
     });
     out.push_str("thrust   W/S fore/aft | A/D left/right | Space/Shift up/down | Q/E roll\n");
-    out.push_str("mouse    look | LMB water | RMB raft | MMB raise land (Ctrl lowers)\n\n");
+    out.push_str("mouse    pitch/yaw | LMB water | RMB raft | MMB raise land (Ctrl lowers)\n\n");
     out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
         let held = if controls.held_dial == Some(dial) {
@@ -124,7 +124,7 @@ pub fn hud_text(
     };
     out.push_str(&format!(
         "\n{footing}\nwater {:.1} m3 | rafts {} | spin {:.3} rad/s | {:.0} fps | sim {:.0}%",
-        Simulation::water(fluid).0 / 1000.0,
+        fluid.litres().0 / 1000.0,
         sim.rafts().len(),
         sim.drum.spin.0,
         fps,

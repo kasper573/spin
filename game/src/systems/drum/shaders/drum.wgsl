@@ -123,6 +123,19 @@ fn vessel_confine(p_in: vec3<f32>, margin: f32) -> Confined {
     return out;
 }
 
+/// A world point in the drum's own frame, which turns with the glass.
+fn vessel_from_world(p: vec3<f32>) -> vec3<f32> {
+    let c = cos(drum.angle);
+    let s = sin(drum.angle);
+    return vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}
+
+fn vessel_to_world(p: vec3<f32>) -> vec3<f32> {
+    let c = cos(drum.angle);
+    let s = sin(drum.angle);
+    return vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+}
+
 fn vessel_wall_velocity(p: vec3<f32>) -> vec3<f32> {
     return vec3(drum.spin * p.z, 0.0, -drum.spin * p.x);
 }

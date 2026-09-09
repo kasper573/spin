@@ -4,11 +4,15 @@ Live: https://kasper573.github.io/spin/
 
 A browser simulation of a ring world: a glass drum spinning in zero g with ground all the way
 round its inside, built in Rust on Bevy. You stand on that ground and weigh exactly what you would
-on Earth, because the drum spins at precisely the rate that carries you round at one g; eight
-thrusters walk you over the ground, lift you off it and roll you, and a hop is a straight line
+on Earth, because the drum spins at precisely the rate that carries you round at one g; twelve
+thrusters walk you over the ground, lift you off it and turn you, and a hop is a straight line
 through space that the curving floor comes back up to meet. Water is a position-based fluid solved in compute
 shaders, rafts are rigid wooden boards with Coulomb friction against the moving ground, and the
 water is drawn as an isosurface the GPU extracts every frame, with a cel-shaded material and foam.
+Nothing in the water has a fixed size: the neighbour grid hashes an unbounded space, the
+isosurface is extracted only in the blocks the water touches, and past a budget of particles the
+water coarsens, keeping its volume with fewer, larger particles, so the ring can be as big and as
+full as the dials allow.
 It needs a browser with WebGPU (current Chrome, Edge, Safari or Firefox); Chrome on Linux only
 offers a GPU adapter with `chrome://flags/#enable-vulkan` turned on.
 
@@ -16,8 +20,8 @@ offers a GPU adapter with `chrome://flags/#enable-vulkan` turned on.
 
 | | |
 | --- | --- |
-| glass radius | 10.5 m to start (diameter 6–40 m by F6) |
-| width | 12 m to start (2–20 m by F7) |
+| glass radius | 10.5 m to start (diameter 6–999 m by F6) |
+| width | 12 m to start (2–999 m by F7) |
 | ground | 0.5 m deep all round, so the floor is 10 m from the axis |
 | spin | 1.0055 rad/s, one turn every 6.25 s, so that your centre of mass rides at 9.80665 m/s² |
 | you | 80 kg, eye 1.7 m above the ground, walk 1.5 m/s, thrusters 1.78 times the standing gravity each (17.5 m/s² at one g) |
@@ -71,15 +75,23 @@ One crate, `game/`, split into two layers plus thin binaries:
 ## Controls
 
 You are a body in the simulation like everything else: a ballasted sphere with mass, drag,
-friction and buoyancy, whose weighted underside always brings it back upright, with eight
-thrusters and legs that push against whatever ground it stands on. Click the view to take the
-mouse; the mouse turns your head and Escape releases it. W/S, A/D, Space/Shift and Q/E each fire
-a thruster: forward and back, left and right, up and down, roll left and roll right. Thrusters
-spool up and down over a third of a second, and the cross in the bottom-left corner shows each
-one where it sits on you, filling as it fires: pushing forward lights the arm at the back, the
-bent arms at the shoulders being the roll pair. Every thruster is the same jet, heard from where
-it sits (the one pushing you forward roars from behind, the one pushing you left is louder in
-your right ear) at a quarter loudness as soon as it fires and at full when it is at full.
+friction and buoyancy, with twelve thrusters and legs that push against whatever ground it
+stands on. Your eyes look straight out of the hull, so you turn by turning the hull. Click the
+view to take the mouse and Escape releases it. W/S, A/D, Space/Shift and Q/E each fire a
+thruster: forward and back, left and right, up and down, roll left and roll right. The mouse
+fires the pitch and yaw pairs: moving it asks for turn in that direction, at full when it moves
+fast, and the turn stops when the mouse does. Gyros hold whatever attitude the turning thrusters
+leave you in: standing, they carry it round with the ground under your feet, so walking keeps you
+as upright as you stood; in the air and afloat they carry it with the drum's air, so a hop lands
+you tilted by the angle you flew round the ring and a spell adrift in water moving against the
+drum leaves you leaning, until you level yourself again with the mouse. Outside the drum nothing
+turns you but your own thrusters and whatever you bump into. Thrusters spool up and down
+over a third of a second, and the cross in the bottom-left corner shows each pushing one where it
+sits on you, filling as it fires: pushing forward lights the arm at the back. Three rings around
+the cross, one about each axis, show the turning pairs: an arrow grows along the ring the way you
+are turning. Every pushing thruster is the same jet, heard from where it sits (the one pushing
+you forward roars from behind, the one pushing you left is louder in your right ear) at a quarter
+loudness as soon as it fires and at full when it is at full; the turning ones are a lighter puff.
 Opposed thrusters cancel each other out; the widget still shows both firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in
@@ -99,7 +111,8 @@ lower it). New water and rafts start out moving with the ground.
 
 Every setting is a key, listed on screen with its current value. Hold F1–F8 (spin, flow,
 viscosity, wall friction, raft friction, ring diameter, ring width, thruster power) and turn the
-mouse wheel to change it; G toggles air drag and Enter solid or ghost. Changing the ring's size
+mouse wheel to change it, in steps that grow with the value so the top of a dial is a few hundred
+clicks away; G toggles air drag and Enter solid or ghost. Changing the ring's size
 keeps everything else: the water and the landscape stretch to fit, and whatever the new walls
 would cut through is pulled inside them. The spin stays, so a bigger ring pulls harder; T
 equalizes the thruster power to the standing gravity again, the way the initial state is set up,

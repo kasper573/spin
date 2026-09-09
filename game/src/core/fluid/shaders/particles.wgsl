@@ -1,8 +1,9 @@
 // Position-based fluid (Macklin & Müller 2013) on the GPU, one thread per particle. Particles are
-// kept sorted by grid cell so a particle's neighbours are the 27 cells around it. Boundary samples
-// of solid bodies (Akinci et al. 2012) contribute to density and its gradient like heavy particles.
+// kept sorted by hashed grid cell so a particle's neighbours are in the 27 cells around it.
+// Boundary samples of solid bodies (Akinci et al. 2012) contribute to density and its gradient
+// like heavy particles.
 #import vessel::{Confined, vessel_confine, vessel_wall_velocity, vessel_air_velocity}
-#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, cell_at, coords_of, cell_of}
+#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell}
 
 @group(0) @binding(1) var<storage, read_write> position: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> velocity: array<vec4<f32>>;
@@ -13,16 +14,14 @@
 @group(0) @binding(7) var<storage, read_write> contact: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> cell_count: array<atomic<u32>>;
 @group(0) @binding(9) var<storage, read> cell_start: array<u32>;
-@group(0) @binding(10) var<storage, read_write> slot: array<u32>;
+// per particle: its slot, its place within the slot, and its cell key
+@group(0) @binding(10) var<storage, read_write> slot: array<vec4<u32>>;
 @group(0) @binding(11) var<storage, read> pending: array<vec4<f32>>;
+@group(0) @binding(12) var<storage, read_write> key: array<u32>;
 
 @group(2) @binding(0) var<uniform> bodies: Bodies;
 @group(2) @binding(2) var<storage, read> boundary: array<Boundary>;
 @group(2) @binding(3) var<storage, read> sample_state: array<SampleState>;
-
-// a sort slot packs the cell (high bits) with the particle's index within it (low bits)
-const SLOT_BITS: u32 = 16u;
-const SLOT_MASK: u32 = 0xffffu;
 
 struct Predicted {
     q: vec3<f32>,
@@ -64,9 +63,9 @@ fn count(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.count) {
         return;
     }
-    let ci = u32(cell_of(predict_particle(i).q));
-    let s = atomicAdd(&cell_count[ci], 1u);
-    slot[i] = (ci << SLOT_BITS) | (s & SLOT_MASK);
+    let cell = coords_of(predict_particle(i).q);
+    let ci = cell_slot(cell);
+    slot[i] = vec4(ci, atomicAdd(&cell_count[ci], 1u), cell_key(cell), 0u);
 }
 
 @compute @workgroup_size(64)
@@ -75,10 +74,23 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.count) {
         return;
     }
-    let packed = slot[i];
-    let dest = cell_start[packed >> SLOT_BITS] + (packed & SLOT_MASK);
+    let s = slot[i];
+    let dest = cell_start[s.x] + s.y;
     position_sorted[dest] = position[i];
     velocity_next[dest] = velocity[i];
+    key[dest] = s.z;
+}
+
+/// Keep every other particle of the sorted water, in place of copying the sort back: with the
+/// particles twice as heavy and the kernel twice as wide, the water is as dense as before.
+@compute @workgroup_size(64)
+fn thin(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= params.pending) {
+        return;
+    }
+    position[i] = position_sorted[2u * i];
+    velocity[i] = velocity_next[2u * i];
 }
 
 @compute @workgroup_size(64)
@@ -138,33 +150,30 @@ fn lambda(@builtin(global_invocation_id) id: vec3<u32>) {
     var grad = vec3(0.0);
     var sum = 0.0;
     let c = coords_of(qi);
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dz = -1; dz <= 1; dz++) {
-                let ci = cell_at(c + vec3(dx, dy, dz));
-                if (ci < 0) {
-                    continue;
-                }
-                let end = cell_start[ci + 1];
-                for (var j = cell_start[ci]; j < end; j++) {
-                    if (j == i) {
-                        continue;
-                    }
-                    let r = qi - pred_in[j].xyz;
-                    let r2 = dot(r, r);
-                    if (r2 >= params.h_sq) {
-                        continue;
-                    }
-                    dens += params.mass * poly(r2);
-                    let len = sqrt(r2);
-                    if (len < 1e-6) {
-                        continue;
-                    }
-                    let g = spiky_gradient(r, len) * mr;
-                    grad += g;
-                    sum += dot(g, g);
-                }
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let pj = pred_in[j];
+            if (kj != k || j == i) {
+                continue;
             }
+            let r = qi - pj.xyz;
+            let r2 = dot(r, r);
+            if (r2 >= params.h_sq) {
+                continue;
+            }
+            dens += params.mass * poly(r2);
+            let len = sqrt(r2);
+            if (len < 1e-6) {
+                continue;
+            }
+            let g = spiky_gradient(r, len) * mr;
+            grad += g;
+            sum += dot(g, g);
         }
     }
     for (var b = 0u; b < params.body_count; b++) {
@@ -272,34 +281,30 @@ fn delta(@builtin(global_invocation_id) id: vec3<u32>) {
     let mr = params.mass / params.rest_density;
     var dq = vec3(0.0);
     let c = coords_of(qi);
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dz = -1; dz <= 1; dz++) {
-                let ci = cell_at(c + vec3(dx, dy, dz));
-                if (ci < 0) {
-                    continue;
-                }
-                let end = cell_start[ci + 1];
-                for (var j = cell_start[ci]; j < end; j++) {
-                    if (j == i) {
-                        continue;
-                    }
-                    let pj = pred_in[j];
-                    let r = qi - pj.xyz;
-                    let r2 = dot(r, r);
-                    if (r2 >= params.h_sq) {
-                        continue;
-                    }
-                    let len = sqrt(r2);
-                    if (len < 1e-6) {
-                        continue;
-                    }
-                    let wr = poly(r2) / params.scorr_wq;
-                    let w2 = wr * wr;
-                    let scorr = -params.scorr_k * w2 * w2;
-                    dq += spiky_gradient(r, len) * (mr * (li + pj.w + scorr));
-                }
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let pj = pred_in[j];
+            if (kj != k || j == i) {
+                continue;
             }
+            let r = qi - pj.xyz;
+            let r2 = dot(r, r);
+            if (r2 >= params.h_sq) {
+                continue;
+            }
+            let len = sqrt(r2);
+            if (len < 1e-6) {
+                continue;
+            }
+            let wr = poly(r2) / params.scorr_wq;
+            let w2 = wr * wr;
+            let scorr = -params.scorr_k * w2 * w2;
+            dq += spiky_gradient(r, len) * (mr * (li + pj.w + scorr));
         }
     }
     for (var b = 0u; b < params.body_count; b++) {
@@ -378,30 +383,28 @@ fn viscosity(@builtin(global_invocation_id) id: vec3<u32>) {
     var slip = vec3(0.0);
     var sw = 0.0;
     let c = coords_of(xi);
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dz = -1; dz <= 1; dz++) {
-                let ci = cell_at(c + vec3(dx, dy, dz));
-                if (ci < 0) {
-                    continue;
-                }
-                let end = cell_start[ci + 1];
-                for (var j = cell_start[ci]; j < end; j++) {
-                    if (j == i) {
-                        continue;
-                    }
-                    let r = xi - position[j].xyz;
-                    let r2 = dot(r, r);
-                    if (r2 >= params.h_sq) {
-                        continue;
-                    }
-                    let w_zero = poly(r2);
-                    let dv = velocity[j].xyz - ui;
-                    accel += dv * (params.viscosity * w_zero);
-                    slip += dv * w_zero;
-                    sw += w_zero;
-                }
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let pj = position[j];
+            let vj = velocity[j];
+            if (kj != k || j == i) {
+                continue;
             }
+            let r = xi - pj.xyz;
+            let r2 = dot(r, r);
+            if (r2 >= params.h_sq) {
+                continue;
+            }
+            let w_zero = poly(r2);
+            let dv = vj.xyz - ui;
+            accel += dv * (params.viscosity * w_zero);
+            slip += dv * w_zero;
+            sw += w_zero;
         }
     }
     // agitation: relative motion against neighbours and slip against the walls

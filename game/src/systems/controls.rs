@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::core::fluid::Fluid;
-use crate::core::units::{Metres, MetresPerSecond};
+use crate::core::units::{Metres, MetresPerSecond, PixelsPerSecond};
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
@@ -16,6 +16,8 @@ use crate::systems::sim::{SimSet, Simulation};
 
 /// Water appears this far in front of the surface the crosshair rests on.
 const INJECT_DEPTH: Metres = Metres(1.0);
+/// Mouse speed (pixels per second) at which a turning thruster is asked for full.
+const MOUSE_FULL_SPEED: PixelsPerSecond = PixelsPerSecond(800.0);
 const MARKER_RADIUS: Metres = Metres(0.3);
 /// The sculpting brush: how wide it is and how fast it raises the ground.
 const BRUSH_SIZE: Metres = Metres(2.0);
@@ -67,18 +69,11 @@ impl ClearAction {
         }
     }
 
-    pub fn apply(
-        self,
-        settings: &mut Settings,
-        sim: &mut Simulation,
-        fluid: &mut Fluid,
-        player: &mut Player,
-    ) {
+    pub fn apply(self, settings: &mut Settings, sim: &mut Simulation, fluid: &mut Fluid) {
         match self {
             ClearAction::ResetAll => {
                 *settings = Settings::default();
                 *sim = Simulation::default();
-                *player = Player::default();
                 fluid.clear();
             }
             ClearAction::ClearWater => fluid.clear(),
@@ -142,21 +137,24 @@ fn pointer_lock(
     }
 }
 
-/// Reads the mouse and the thruster keys (in the order of `Thruster::ALL`) into the avatar's
-/// input; scripted input comes after.
+/// Reads the thruster keys and the mouse (in the order of `Thruster::ALL`) into the avatar's
+/// input; scripted input comes after. The mouse asks for pitch and yaw by how fast it moves:
+/// the turning thrusters fire as long as it keeps moving, at full when it moves this fast.
 pub fn pilot(
     controls: Res<Controls>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
-    mut player: ResMut<Player>,
+    time: Res<Time>,
+    player: Res<Player>,
     mut sim: ResMut<Simulation>,
 ) {
     if !controls.active {
         sim.avatar_input = default();
         return;
     }
-    player.turn(motion.delta);
     let held = |key: KeyCode| keys.pressed(key) as u8 as f32;
+    let speed = motion.delta / time.delta_secs().max(1e-3) / MOUSE_FULL_SPEED.0;
+    let turning = |v: f32| v.clamp(0.0, 1.0);
     let pilot = PilotInput {
         levels: [
             held(KeyCode::KeyW),
@@ -167,9 +165,13 @@ pub fn pilot(
             held(KeyCode::ShiftLeft).max(held(KeyCode::ShiftRight)),
             held(KeyCode::KeyQ),
             held(KeyCode::KeyE),
+            turning(-speed.y),
+            turning(speed.y),
+            turning(-speed.x),
+            turning(speed.x),
         ],
     };
-    sim.avatar_input = player.input(sim.avatar(), pilot);
+    sim.avatar_input = player.input(pilot);
 }
 
 fn keys(
@@ -179,7 +181,6 @@ fn keys(
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
     mut fluid: ResMut<Fluid>,
-    mut player: ResMut<Player>,
 ) {
     controls.held_dial = Dial::ALL.into_iter().find(|dial| keys.pressed(dial.key()));
     if let Some(dial) = controls.held_dial
@@ -200,7 +201,7 @@ fn keys(
     if keys.pressed(ClearAction::CHORD) {
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
-                action.apply(&mut settings, &mut sim, &mut fluid, &mut player);
+                action.apply(&mut settings, &mut sim, &mut fluid);
             }
         }
     }
@@ -227,7 +228,7 @@ fn mouse(
     };
     let dt = time.delta_secs();
     if mouse.pressed(MouseButton::Left) && !mouse.just_pressed(MouseButton::Left) {
-        controls.inject_carry += settings.flow.0 * dt / litres_per_particle();
+        controls.inject_carry += settings.flow.0 * dt / fluid.resolution().litres_per_particle().0;
         let count = controls.inject_carry.floor();
         controls.inject_carry -= count;
         let at = target.point + target.normal * INJECT_DEPTH.0;
@@ -256,11 +257,6 @@ fn mouse(
             amount as f64,
         );
     }
-}
-
-fn litres_per_particle() -> f32 {
-    use crate::core::fluid::{PARTICLE_MASS, REST_DENSITY};
-    PARTICLE_MASS / REST_DENSITY * 1000.0
 }
 
 fn marker(controls: Res<Controls>, aim: Res<Aim>, mut gizmos: Gizmos) {

@@ -1,10 +1,12 @@
 //! What the thrusters look and sound like. The widget is a three-axis cross in the bottom-left of
 //! the view, in the frame the thrusters sit in: up, down, left and right arms at full length,
-//! the forward and back arms receding diagonally, and a bent arm at each shoulder for the roll
-//! pair. Each arm is a thruster where it is mounted, and fills from the centre outward as that
-//! thruster spools up: pushing forward lights the arm at the back. Each thruster also has a
-//! voice, the same jet for all of them, heard from where it sits around the head and as loud as
-//! its level says.
+//! the forward and back arms receding diagonally. Each arm is a linear thruster where it is
+//! mounted, and fills from the centre outward as that thruster spools up: pushing forward lights
+//! the arm at the back. Around the cross, three rings form a ball, one about each axis, for the
+//! turning pairs: as the hull turns, an arrow grows along that axis's ring from its front the way
+//! the hull is turning, as far round as the pair's net level says. Each thruster also has a
+//! voice, a jet for the pushing ones and a lighter puff for the turning ones, heard from where it
+//! sits around the head and as loud as its level says.
 //!
 //! The cross is projected onto the image plane by hand rather than left to the camera: a solid
 //! drawn off-axis under a wide lens skews toward the vanishing point.
@@ -30,12 +32,14 @@ const ARM: f32 = 0.17;
 /// other arms' length; the back arm comes out the opposite way.
 const RECEDING: Vec2 = Vec2::new(0.707, 0.707);
 const RECEDING_LENGTH: f32 = 0.85;
-/// The roll arms' radius as a multiple of the arm length, and the arc each sweeps in degrees
-/// counter-clockwise from the cross's right, so the right one runs from below its shoulder up
-/// and over toward the left, and the left one mirrors it.
-const SHOULDER: f32 = 1.3;
-const SHOULDER_ARC: (f32, f32) = (-60.0, 75.0);
-const ARC_SEGMENTS: usize = 24;
+/// The rings' radius as a multiple of the arm length, how far past them the widget keeps from
+/// the view's edge, how far round a ring an arrow reaches at full turn, and the size of its head
+/// as a fraction of the arm length.
+const RING: f32 = 1.25;
+const RING_MARGIN: f32 = 0.6;
+const RING_SEGMENTS: usize = 48;
+const FULL_TURN: f32 = 90.0;
+const ARROWHEAD: f32 = 0.1;
 const STEREO: ChannelCount = NonZero::new(2).unwrap();
 const IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.9);
 const FIRING: Color = Color::srgb(1.0, 0.32, 0.04);
@@ -94,41 +98,94 @@ fn draw(
     let half_height = DEPTH * (lens.fov / 2.0).tan();
     let half_width = half_height * lens.aspect_ratio;
     let arm = ARM * half_height;
-    let margin = (SHOULDER + 0.6) * arm;
+    let margin = (RING + RING_MARGIN) * arm;
     let centre = view.translation + view.forward() * DEPTH
         - view.right() * (half_width - margin)
         - view.up() * (half_height - margin);
     let place = |p: Vec2| centre + view.right() * (p.x * arm) + view.up() * (p.y * arm);
     for thruster in Thruster::ALL {
+        if thruster.turns() {
+            continue;
+        }
         let mount = thruster.mount().map(|m| (m / avatar::RADIUS) as f32);
-        let points = match thruster {
-            Thruster::RollLeft | Thruster::RollRight => shoulder(mount[0]),
-            _ => vec![Vec2::ZERO, screen(mount)],
-        };
+        let points = [Vec2::ZERO, screen(mount)];
         arms.linestrip(points.iter().map(|p| place(*p)), IDLE);
         let level = sim.thrusters.level(thruster) as f32;
         if level > 0.0 {
             fills.linestrip(fill(&points, level).into_iter().map(place), FIRING);
         }
     }
-    fills.sphere(Isometry3d::from_translation(centre), arm * 0.06, IDLE);
+    for (axis, turn) in [
+        (Axis::Pitch, sim.thrusters.pitch() as f32),
+        (Axis::Yaw, sim.thrusters.yaw() as f32),
+        (Axis::Roll, sim.thrusters.roll() as f32),
+    ] {
+        arms.linestrip(ring(axis, 0.0, 360.0).into_iter().map(place), IDLE);
+        if turn != 0.0 {
+            fills.linestrip(arrow(axis, turn).into_iter().map(place), FIRING);
+        }
+    }
+}
+
+/// The hull's turning axes, each with a ring around it: pitch about the right axis, yaw about
+/// the up axis and roll about the back axis, turning the right-hand way about each.
+#[derive(Clone, Copy)]
+enum Axis {
+    Pitch,
+    Yaw,
+    Roll,
+}
+
+impl Axis {
+    /// The axis in the thrusters' frame (x right, y up, z back).
+    fn direction(self) -> Vec3 {
+        match self {
+            Axis::Pitch => Vec3::X,
+            Axis::Yaw => Vec3::Y,
+            Axis::Roll => Vec3::Z,
+        }
+    }
+
+    /// Where an arrow along the ring starts: straight ahead for the pitch and yaw rings, the top
+    /// of the head for the roll ring.
+    fn front(self) -> Vec3 {
+        match self {
+            Axis::Pitch | Axis::Yaw => Vec3::NEG_Z,
+            Axis::Roll => Vec3::Y,
+        }
+    }
+}
+
+/// A stretch of an axis's ring, by angle turned about the axis from the ring's front in degrees.
+fn ring(axis: Axis, from: f32, to: f32) -> Vec<Vec2> {
+    let segments = ((to - from).abs() / 360.0 * RING_SEGMENTS as f32)
+        .ceil()
+        .max(1.0) as usize;
+    (0..=segments)
+        .map(|i| {
+            let a = (from + (to - from) * i as f32 / segments as f32).to_radians();
+            let p = Quat::from_axis_angle(axis.direction(), a) * axis.front() * RING;
+            screen(p.to_array())
+        })
+        .collect()
+}
+
+/// An arrow from the front of a ring along it, as far round as `turn` says (-1 to 1) and with
+/// its head at the far end, pointing the way the hull is turning.
+fn arrow(axis: Axis, turn: f32) -> Vec<Vec2> {
+    let mut shaft = ring(axis, 0.0, turn.clamp(-1.0, 1.0) * FULL_TURN);
+    let tip = shaft[shaft.len() - 1];
+    let along = (tip - shaft[shaft.len() - 2]).normalize_or_zero();
+    let across = along.perp();
+    shaft.push(tip - along * ARROWHEAD + across * ARROWHEAD * 0.6);
+    shaft.push(tip);
+    shaft.push(tip - along * ARROWHEAD - across * ARROWHEAD * 0.6);
+    shaft
 }
 
 /// Where a point of the hull in the thrusters' frame (x right, y up, z back) lands on the widget.
 fn screen(direction: [f32; 3]) -> Vec2 {
     Vec2::new(direction[0], direction[1]) - RECEDING * (direction[2] * RECEDING_LENGTH)
-}
-
-/// The bent arm at a shoulder (`side` 1 right, -1 left): an arc from below the shoulder up and
-/// over toward the other side, the way that shoulder's roll thruster lifts it.
-fn shoulder(side: f32) -> Vec<Vec2> {
-    (0..=ARC_SEGMENTS)
-        .map(|i| {
-            let t = i as f32 / ARC_SEGMENTS as f32;
-            let a = (SHOULDER_ARC.0 + (SHOULDER_ARC.1 - SHOULDER_ARC.0) * t).to_radians();
-            Vec2::new(side * a.cos() * SHOULDER, a.sin() * SHOULDER)
-        })
-        .collect()
 }
 
 /// The first `level` of a polyline, by length, from its start.
@@ -182,8 +239,13 @@ impl Decodable for ThrusterSound {
     type Decoder = ThrusterDecoder;
 
     fn decoder(&self) -> ThrusterDecoder {
+        let seed = self.0 as u64;
         ThrusterDecoder {
-            voice: Voice::new(self.0 as u64),
+            voice: if self.0.turns() {
+                Voice::puff(seed)
+            } else {
+                Voice::new(seed)
+            },
             placement: Placement::around(self.0.mount()),
             right: None,
         }

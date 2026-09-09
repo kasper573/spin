@@ -4,12 +4,14 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::avatar;
-use crate::core::fluid::Fluid;
 use crate::core::units::{
     EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecondSquared, RadiansPerSecond,
 };
 use crate::systems::drum::{DEFAULT_RING, LARGEST_RING, Ring};
 use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
+
+/// How many of a dial's fine steps it takes before the steps grow tenfold.
+const FINE_STEPS: f32 = 100.0;
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -53,12 +55,14 @@ impl Settings {
         let defaults = Settings::default();
         for dial in Dial::ALL {
             let value = dial.get(&self);
-            let value = if value.is_finite() {
-                value.clamp(dial.min(), dial.max())
-            } else {
-                dial.get(&defaults)
-            };
-            dial.set(&mut self, value);
+            if !(dial.min()..=dial.max()).contains(&value) {
+                let value = if value.is_finite() {
+                    value.clamp(dial.min(), dial.max())
+                } else {
+                    dial.get(&defaults)
+                };
+                dial.set(&mut self, value);
+            }
         }
         self
     }
@@ -159,17 +163,18 @@ impl Dial {
         }
     }
 
+    /// Every dial runs up to 999 of its unit, apart from the friction and viscosity fractions.
     pub fn max(self) -> f32 {
         match self {
-            Dial::Spin => 2.0,
-            Dial::Flow => 200_000.0,
+            Dial::Spin | Dial::Thrust => 999.0,
+            Dial::Flow => 999_000.0,
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 1.0,
             Dial::Diameter => LARGEST_RING.radius.0 * 2.0,
             Dial::Width => LARGEST_RING.half_width.0 * 2.0,
-            Dial::Thrust => 60.0,
         }
     }
 
+    /// The finest step of the dial, taken near zero.
     pub fn step(self) -> f32 {
         match self {
             Dial::Spin => 0.05,
@@ -178,6 +183,15 @@ impl Dial {
             Dial::Diameter | Dial::Width => 1.0,
             Dial::Thrust => 0.5,
         }
+    }
+
+    /// The step taken at a value: ten times coarser for every ten times the value grows past
+    /// `FINE_STEPS` steps, so a dial that runs to 999 still turns through its range in a few
+    /// hundred clicks without losing the fine steps near zero.
+    pub fn step_at(self, value: f32) -> f32 {
+        let fine = self.step();
+        let coarse = (value.abs() / (fine * FINE_STEPS)).log10().floor() + 1.0;
+        fine * 10f32.powf(coarse.max(0.0))
     }
 
     pub fn get(self, s: &Settings) -> f32 {
@@ -207,10 +221,16 @@ impl Dial {
         }
     }
 
-    /// Move one step up (`direction` > 0) or down, snapping to the step grid.
+    /// Move one step up (`direction` > 0) or down, snapping to the grid of the step taken.
     pub fn adjust(self, s: &mut Settings, direction: i32) {
-        let steps = (self.get(s) / self.step()).round() + direction as f32;
-        self.set(s, steps * self.step());
+        let value = self.get(s);
+        let step = if direction < 0 {
+            self.step_at(value - self.step_at(value) * 0.5)
+        } else {
+            self.step_at(value)
+        };
+        let steps = (value / step).round() + direction as f32;
+        self.set(s, steps * step);
     }
 
     pub fn value_text(self, s: &Settings) -> String {
@@ -223,10 +243,14 @@ impl Dial {
             Dial::Flow => format!("{:.1} m3/s", v / 1000.0),
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => format!("{v:.2}"),
             Dial::Diameter | Dial::Width => format!("{v:.0} m"),
-            Dial::Thrust => format!(
-                "{v:.1} m/s2 ({:.2} g standing)",
-                s.thrust.0 / s.standing_gravity().0.max(1e-9)
-            ),
+            Dial::Thrust => {
+                let standing = s.standing_gravity().0;
+                if standing > 0.01 {
+                    format!("{v:.1} m/s2 ({:.2} g standing)", s.thrust.0 / standing)
+                } else {
+                    format!("{v:.1} m/s2")
+                }
+            }
         }
     }
 }
@@ -323,10 +347,8 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>, mut fluid: ResMut<Fluid>) {
-    let ring = settings.ring();
-    sim.resize(ring);
-    fluid.fit(ring.extent());
+fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
+    sim.resize(settings.ring());
     sim.drum.target_spin = settings.spin;
     sim.thrusters.power = settings.thrust;
     sim.params.viscosity = settings.viscosity;

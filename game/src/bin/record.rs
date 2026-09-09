@@ -3,13 +3,14 @@
 //! wading through water and out of it, and the ring made bigger with the thrusters equalized to
 //! it, rendered headless frame by frame into `target/record/` as PNGs beside the thrusters'
 //! voices as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
+//! The body turns to look, so looking round is a matter of the turning thrusters.
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
 use bevy::prelude::*;
 use game::core::audio::{self, Placement, Voice};
-use game::core::avatar::Thruster;
+use game::core::avatar::{TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::units::Seconds;
 use game::systems::player::{PilotInput, Player};
@@ -33,41 +34,58 @@ enum Cue {
     Equalize,
 }
 
-/// A stretch of the script: how long it lasts, the thrusters held and where the head looks.
+/// A stretch of the script: how long it lasts and the thrusters held, at what level.
 struct Phase {
     seconds: f32,
     pilot: PilotInput,
-    yaw: f64,
-    pitch: f64,
     caption: &'static str,
     cue: Cue,
 }
 
+/// The time the turning thrusters at `level` take to turn the body by `radians`.
+fn turn_time(radians: f64, level: f32) -> f32 {
+    (radians / (TURN_RATE * level as f64)) as f32
+}
+
 fn script() -> Vec<Phase> {
     use Thruster::*;
-    let level = 0.3;
     let pi = std::f64::consts::PI;
-    let phase = |seconds, held: &[Thruster], yaw, pitch, caption| Phase {
+    let phase = |seconds, held: &[Thruster], caption| Phase {
         seconds,
         pilot: PilotInput::firing(held),
-        yaw,
-        pitch,
         caption,
         cue: Cue::None,
     };
-    let cued = |cue, seconds, held: &[Thruster], yaw, pitch, caption| Phase {
-        cue,
-        ..phase(seconds, held, yaw, pitch, caption)
+    let eased = |seconds, held: &[Thruster], level: f32, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            pilot,
+            ..phase(seconds, &[], caption)
+        }
     };
+    let cued = |cue, seconds, held: &[Thruster], caption| Phase {
+        cue,
+        ..phase(seconds, held, caption)
+    };
+    let glance = 0.5;
     let mut phases = vec![
-        phase(
-            2.0,
-            &[],
-            0.0,
-            1.0,
-            "standing still, looking up round the ring",
+        eased(
+            turn_time(0.7, glance),
+            &[PitchUp],
+            glance,
+            "standing still, looking up round the ring (mouse up)",
         ),
-        phase(1.5, &[], 0.0, level, "standing still"),
+        phase(1.5, &[], "standing still, looking up round the ring"),
+        eased(
+            turn_time(0.7, glance),
+            &[PitchDown],
+            glance,
+            "looking down again (mouse down)",
+        ),
+        phase(1.0, &[], "standing still"),
     ];
     let showcase = [
         (Forward, "W: the back thruster pushes forward"),
@@ -78,89 +96,66 @@ fn script() -> Vec<Phase> {
         (Down, "Shift: the top thruster pushes down"),
         (RollLeft, "Q: the right shoulder thruster rolls left"),
         (RollRight, "E: the left shoulder thruster rolls right"),
+        (PitchUp, "mouse up: the chin thruster pitches the face up"),
+        (
+            PitchDown,
+            "mouse down: the forehead thruster pitches it down",
+        ),
+        (YawLeft, "mouse left: the right cheek thruster yaws it left"),
+        (
+            YawRight,
+            "mouse right: the left cheek thruster yaws it right",
+        ),
     ];
     for (thruster, caption) in showcase {
-        phases.push(phase(0.8, &[thruster], 0.0, level, caption));
+        let level = if thruster.turns() { glance } else { 1.0 };
+        phases.push(eased(0.8, &[thruster], level, caption));
         let rest = if thruster == Up { 2.6 } else { 1.0 };
-        phases.push(phase(rest, &[], 0.0, level, caption));
+        phases.push(phase(rest, &[], caption));
     }
     phases.extend([
-        phase(4.0, &[Forward], 0.0, level, "walking spinward (W)"),
-        phase(1.5, &[], 0.0, level, "stopping"),
-        phase(
-            0.8,
-            &[Up],
-            0.0,
-            level,
-            "a hop: a burst of up thrust (Space)",
-        ),
-        phase(
-            2.2,
-            &[],
-            0.0,
-            -0.5,
-            "a hop: the ground comes back up to meet you",
-        ),
-        phase(
-            0.4,
-            &[Forward, Up],
-            0.0,
-            level,
-            "flying forward in bursts (W + Space)",
-        ),
-        phase(0.2, &[Up], 0.0, level, "flying forward in bursts (Space)"),
-        phase(0.4, &[], 0.0, level, "flying forward in bursts"),
-        phase(0.6, &[Up], 0.0, level, "flying forward in bursts (Space)"),
-        phase(0.4, &[], 0.0, level, "flying forward in bursts"),
-        phase(0.6, &[Up], 0.0, level, "flying forward in bursts (Space)"),
-        phase(3.0, &[], 0.0, level, "landing"),
-        phase(1.5, &[], pi, level, "turning round"),
-        phase(4.0, &[Forward], pi, level, "walking against the spin (W)"),
-        phase(1.5, &[], pi, level, "standing still"),
-        cued(
-            Cue::Flood,
-            4.0,
-            &[],
-            pi,
-            level,
-            "flooding the ring with water",
-        ),
-        phase(4.0, &[Forward], pi, level, "wading forward through the water (W)"),
-        phase(
-            2.0,
-            &[Up],
-            pi,
-            level,
-            "thrusting up out of the water (Space)",
-        ),
-        phase(3.5, &[], pi, -0.3, "floating"),
+        phase(4.0, &[Forward], "walking spinward (W)"),
+        phase(1.5, &[], "stopping"),
+        phase(0.8, &[Up], "a hop: a burst of up thrust (Space)"),
+        phase(2.2, &[], "a hop: the ground comes back up to meet you"),
+        phase(0.4, &[Forward, Up], "flying forward in bursts (W + Space)"),
+        phase(0.2, &[Up], "flying forward in bursts (Space)"),
+        phase(0.4, &[], "flying forward in bursts"),
+        phase(0.6, &[Up], "flying forward in bursts (Space)"),
+        phase(0.4, &[], "flying forward in bursts"),
+        phase(0.6, &[Up], "flying forward in bursts (Space)"),
+        phase(3.0, &[], "landing"),
+        phase(turn_time(pi, 1.0), &[YawLeft], "turning round (mouse left)"),
+        phase(0.5, &[], "turning round"),
+        phase(4.0, &[Forward], "walking against the spin (W)"),
+        phase(1.5, &[], "standing still"),
+        cued(Cue::Flood, 4.0, &[], "flooding the ring with water"),
+        phase(4.0, &[Forward], "wading forward through the water (W)"),
+        phase(2.0, &[Up], "thrusting up out of the water (Space)"),
+        phase(3.5, &[], "floating"),
         cued(
             Cue::Enlarge,
             5.0,
             &[],
-            pi,
-            0.6,
             "ring diameter 21 to 30 m, width 12 to 16 m (F6, F7): the spin stays, so it pulls harder",
         ),
-        phase(
-            0.8,
-            &[Up],
-            pi,
-            level,
-            "a hop with the old thruster power (Space)",
-        ),
-        phase(2.0, &[], pi, level, "a hop with the old thruster power"),
+        phase(0.8, &[Up], "a hop with the old thruster power (Space)"),
+        phase(2.0, &[], "a hop with the old thruster power"),
         cued(
             Cue::Equalize,
             1.0,
             &[],
-            pi,
-            level,
             "T: equalize thruster power to gravity",
         ),
-        phase(0.8, &[Up], pi, level, "a hop with the equalized power (Space)"),
-        phase(3.0, &[], pi, -0.3, "a hop with the equalized power"),
-        phase(3.0, &[], pi + 1.2, 0.9, "the glass panes round the ring"),
+        phase(0.8, &[Up], "a hop with the equalized power (Space)"),
+        phase(3.0, &[], "a hop with the equalized power"),
+        eased(
+            turn_time(1.2, glance),
+            &[YawLeft, PitchUp],
+            glance,
+            "the glass panes round the ring (mouse up and left)",
+        ),
+        phase(2.0, &[], "the glass panes round the ring"),
     ]);
     phases
 }
@@ -202,20 +197,14 @@ fn main() {
     let mut srt = String::new();
     let mut soundtrack = Soundtrack::new(out.join("thrusters.wav"));
     let mut frame = 0u32;
-    let mut look = (0.0, 0.0);
     for phase in script() {
         cue(&mut app, phase.cue);
         let frames = (phase.seconds * FPS as f32).round() as u32;
         for _ in 0..frames {
-            look.0 += (phase.yaw - look.0) * 0.1;
-            look.1 += (phase.pitch - look.1) * 0.1;
             {
-                let mut player = app.world_mut().resource_mut::<Player>();
-                player.look.yaw = look.0;
-                player.look.pitch = look.1;
-                let player = *player;
+                let player = *app.world().resource::<Player>();
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
-                sim.avatar_input = player.input(sim.avatar(), phase.pilot);
+                sim.avatar_input = player.input(phase.pilot);
             }
             testing::run(&mut app, frame_time);
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());
@@ -266,7 +255,7 @@ fn main() {
 struct Soundtrack {
     writer: hound::WavWriter<std::io::BufWriter<fs::File>>,
     voices: Vec<(Voice, Placement)>,
-    gains: [f32; 8],
+    gains: [f32; 12],
 }
 
 impl Soundtrack {
@@ -280,13 +269,20 @@ impl Soundtrack {
         Soundtrack {
             writer: hound::WavWriter::create(path, spec).expect("create thrusters.wav"),
             voices: Thruster::ALL
-                .map(|t| (Voice::new(t as u64), Placement::around(t.mount())))
+                .map(|t| {
+                    let voice = if t.turns() {
+                        Voice::puff(t as u64)
+                    } else {
+                        Voice::new(t as u64)
+                    };
+                    (voice, Placement::around(t.mount()))
+                })
                 .to_vec(),
-            gains: [0.0; 8],
+            gains: [0.0; 12],
         }
     }
 
-    fn frame(&mut self, levels: [f64; 8]) {
+    fn frame(&mut self, levels: [f64; 12]) {
         let gains = levels.map(audio::gain);
         let samples = audio::SAMPLE_RATE.get() / FPS;
         for k in 0..samples {

@@ -1,7 +1,7 @@
-//! The viewer's body: a ballasted sphere the height of a person with eight thrusters, one along
-//! each axis of the head's level frame and one at each shoulder for roll, legs that walk it over
-//! whatever ground it stands on, gyros that keep it upright against whatever is pulling it
-//! down, and a head that looks around independently of the hull.
+//! The viewer's body: a ballasted sphere the height of a person with twelve thrusters, one along
+//! each axis of the hull and a pair for each way of turning it, legs that walk it over whatever
+//! ground it stands on, and gyros that hold its attitude wherever the turning thrusters last
+//! left it. The eye is fixed in the hull, so the body turns to look.
 //!
 //! The thrusters spool up and down rather than switch, so their levels are state the hull carries.
 //! Standing on the ground, the horizontal thrust is the legs' orders: they push along the ground,
@@ -10,9 +10,18 @@
 //! pulls lifts the body off it, and in the air every thruster acts as it is. A ghost adds a flight
 //! assist that brakes it against the surrounding air. Ground is whatever wall of the vessel the
 //! body touched last, so a ring's floor works as well as a flat one.
+//!
+//! The turning thrusters ask the gyros for a rate of turn, and the gyros, reaction wheels with
+//! limited authority, hold the hull to the attitude those rates carry along, relative to the air
+//! it is in. Nothing else steers it: the ballast rights the hull only through what pushes on the
+//! hull, the ground, the water or the air, and the gyros then bring it back to where it was held.
+//! Where there is no air and nothing to push on, only the pilot turns it.
 use serde::{Deserialize, Serialize};
 
-use crate::core::math::{Vec3d, add_scaled, cross, dot, norm};
+use crate::core::math::{
+    Quatd, Vec3d, add_scaled, dot, norm, quat_between, quat_conjugate, quat_integrate, quat_mul,
+    quat_rotate, rotation_vector,
+};
 use crate::core::rigid::{Body, BodyShape, Ground};
 use crate::core::units::{EARTH_GRAVITY, Metres, MetresPerSecond, MetresPerSecondSquared, Seconds};
 use crate::core::vessel::Vessel;
@@ -42,17 +51,18 @@ pub const SPOOL_TIME: Seconds = Seconds(0.3);
 /// The flight assist brakes a ghost's motion relative to the air on this time scale, which also
 /// caps its cruising speed at the thrusters' power times it.
 const ASSIST_TAU: f64 = 0.35;
-/// The gyros settle the hull's spin onto the requested one on this time scale, and turn a
-/// leaning hull back upright on this one.
-const GYRO_TAU: f64 = 0.3;
-const RIGHTING_TAU: f64 = 0.6;
-const LOOK_RATE: f64 = 0.0022;
-/// Roll rate (rad/s) the roll thrusters ask of the gyros at full level.
-pub const ROLL_RATE: f64 = 1.6;
-const MAX_PITCH: f64 = 1.55;
+/// The gyros bring the hull back onto its held attitude on this time scale, and can turn it no
+/// harder than this (rad/s²), so a hard knock still moves it before they answer.
+const HOLD_TAU: f64 = 0.15;
+const GYRO_AUTHORITY: f64 = 30.0;
+/// Rate of turn (rad/s) a turning thruster asks of the gyros at full level.
+pub const TURN_RATE: f64 = 1.6;
+/// The mount of a turning thruster sits this far round the hull from straight ahead.
+const TURNING_MOUNT: f64 = 0.7;
 
-/// The eight thrusters. The linear ones point along the axes of the head's level frame; the roll
-/// pair sit at the shoulders, each lifting its own side.
+/// The twelve thrusters. The linear ones point along the axes of the hull; the roll pair sit at
+/// the shoulders, each lifting its own side, the pitch pair at the forehead and chin and the
+/// yaw pair at the cheeks, each pushing the face its way.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Thruster {
     Forward,
@@ -63,10 +73,14 @@ pub enum Thruster {
     Down,
     RollLeft,
     RollRight,
+    PitchUp,
+    PitchDown,
+    YawLeft,
+    YawRight,
 }
 
 impl Thruster {
-    pub const ALL: [Thruster; 8] = [
+    pub const ALL: [Thruster; 12] = [
         Thruster::Forward,
         Thruster::Back,
         Thruster::Left,
@@ -75,20 +89,31 @@ impl Thruster {
         Thruster::Down,
         Thruster::RollLeft,
         Thruster::RollRight,
+        Thruster::PitchUp,
+        Thruster::PitchDown,
+        Thruster::YawLeft,
+        Thruster::YawRight,
     ];
 
-    /// Where the thruster sits on the hull in the level frame (x right, y up, z back): a linear
-    /// one on the side it pushes away from, a roll one at the shoulder it lifts.
+    /// Where the thruster sits on the hull in its frame (x right, y up, z back): a linear one on
+    /// the side it pushes away from, a roll one at the shoulder it lifts, a pitch one above or
+    /// below the face and a yaw one beside it.
     pub fn mount(self) -> Vec3d {
+        let face = -RADIUS * TURNING_MOUNT;
+        let beside = RADIUS * TURNING_MOUNT;
         match self {
             Thruster::RollLeft => [RADIUS, 0.0, 0.0],
             Thruster::RollRight => [-RADIUS, 0.0, 0.0],
+            Thruster::PitchUp => [0.0, -beside, face],
+            Thruster::PitchDown => [0.0, beside, face],
+            Thruster::YawLeft => [beside, 0.0, face],
+            Thruster::YawRight => [-beside, 0.0, face],
             linear => linear.direction().map(|d| -d * RADIUS),
         }
     }
 
-    /// The direction a linear thruster pushes in the level frame (x right, y up, z back); the
-    /// roll pair push nothing along an axis.
+    /// The direction a linear thruster pushes in the hull's frame (x right, y up, z back); the
+    /// turning ones push nothing along an axis.
     pub fn direction(self) -> Vec3d {
         match self {
             Thruster::Forward => [0.0, 0.0, -1.0],
@@ -97,8 +122,13 @@ impl Thruster {
             Thruster::Right => [1.0, 0.0, 0.0],
             Thruster::Up => [0.0, 1.0, 0.0],
             Thruster::Down => [0.0, -1.0, 0.0],
-            Thruster::RollLeft | Thruster::RollRight => [0.0; 3],
+            _ => [0.0; 3],
         }
+    }
+
+    /// Whether the thruster turns the hull rather than pushing it along.
+    pub fn turns(self) -> bool {
+        self.direction() == [0.0; 3]
     }
 }
 
@@ -111,14 +141,14 @@ pub fn equalized_thrust(gravity: MetresPerSecondSquared) -> MetresPerSecondSquar
 /// pushes at full.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Thrusters {
-    levels: [f64; 8],
+    levels: [f64; 12],
     pub power: MetresPerSecondSquared,
 }
 
 impl Default for Thrusters {
     fn default() -> Self {
         Thrusters {
-            levels: [0.0; 8],
+            levels: [0.0; 12],
             power: equalized_thrust(EARTH_GRAVITY),
         }
     }
@@ -128,7 +158,7 @@ impl Thrusters {
     /// Idle thrusters of this power.
     pub fn with_power(power: MetresPerSecondSquared) -> Thrusters {
         Thrusters {
-            levels: [0.0; 8],
+            levels: [0.0; 12],
             power,
         }
     }
@@ -137,7 +167,7 @@ impl Thrusters {
         self.levels[thruster as usize]
     }
 
-    pub fn levels(&self) -> [f64; 8] {
+    pub fn levels(&self) -> [f64; 12] {
         self.levels
     }
 
@@ -149,7 +179,7 @@ impl Thrusters {
         }
     }
 
-    /// The linear thrusters' net push as a multiple of one thruster's, in the level frame.
+    /// The linear thrusters' net push as a multiple of one thruster's, in the hull's frame.
     pub fn net(&self) -> Vec3d {
         let mut net = [0.0; 3];
         for thruster in Thruster::ALL {
@@ -162,48 +192,57 @@ impl Thrusters {
     pub fn roll(&self) -> f64 {
         self.level(Thruster::RollLeft) - self.level(Thruster::RollRight)
     }
+
+    /// The pitch thrusters' net turn, positive lifting the face.
+    pub fn pitch(&self) -> f64 {
+        self.level(Thruster::PitchUp) - self.level(Thruster::PitchDown)
+    }
+
+    /// The yaw thrusters' net turn, positive turning the face to the left.
+    pub fn yaw(&self) -> f64 {
+        self.level(Thruster::YawLeft) - self.level(Thruster::YawRight)
+    }
 }
 
-/// What the pilot asks of the body: how hard to fire each thruster, and in which frame. Opposed
-/// thrusters asked for together both fire and cancel, they do not cancel the asking.
+/// What the pilot asks of the body: how hard to fire each thruster, in the order of
+/// `Thruster::ALL`. Opposed thrusters asked for together both fire and cancel, they do not
+/// cancel the asking.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AvatarInput {
-    /// The head's level frame in world space: unit right, up and back.
-    pub frame: [Vec3d; 3],
-    /// Wanted level of each thruster, 0 to 1, in the order of `Thruster::ALL`.
-    pub levels: [f64; 8],
+    /// Wanted level of each thruster, 0 to 1.
+    pub levels: [f64; 12],
 }
 
 impl Default for AvatarInput {
     fn default() -> Self {
-        AvatarInput {
-            frame: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            levels: [0.0; 8],
+        AvatarInput { levels: [0.0; 12] }
+    }
+}
+
+/// The gyros' reference: the attitude they hold the hull to, carried along by the turning
+/// thrusters, by the air the hull is in and, standing, by the ground turning under its feet.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Gyros {
+    pub held: Quatd,
+    /// The ground's normal under the hull during the last substep it stood on one.
+    pub footing: Option<Vec3d>,
+}
+
+impl Default for Gyros {
+    fn default() -> Self {
+        Gyros {
+            held: [0.0, 0.0, 0.0, 1.0],
+            footing: None,
         }
     }
 }
 
-/// Where the head points relative to the hull.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
-pub struct Look {
-    pub yaw: f64,
-    pub pitch: f64,
-}
-
-impl Look {
-    /// Mouse movement in pixels turns the head.
-    pub fn turn(&mut self, dx: f64, dy: f64) {
-        self.yaw -= dx * LOOK_RATE;
-        self.pitch = (self.pitch - dy * LOOK_RATE).clamp(-MAX_PITCH, MAX_PITCH);
-    }
-
-    /// The head direction that faces `target` from an upright hull whose eye is at `eye`.
-    pub fn facing(eye: Vec3d, target: Vec3d) -> Look {
-        let d = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
-        let flat = (d[0] * d[0] + d[2] * d[2]).sqrt();
-        Look {
-            yaw: (-d[0]).atan2(-d[2]),
-            pitch: d[1].atan2(flat).clamp(-MAX_PITCH, MAX_PITCH),
+impl Gyros {
+    /// Gyros holding the hull as it is.
+    pub fn holding(body: &Body) -> Gyros {
+        Gyros {
+            held: body.q,
+            footing: None,
         }
     }
 }
@@ -241,6 +280,7 @@ pub fn centre_for_eye(eye: Vec3d) -> Vec3d {
 pub fn drive(
     body: &mut Body,
     thrusters: &mut Thrusters,
+    gyros: &mut Gyros,
     input: &AvatarInput,
     vessel: &impl Vessel,
     dt: f64,
@@ -248,30 +288,16 @@ pub fn drive(
     thrusters.spool(input, dt);
     let net = thrusters.net();
     let power = thrusters.power.0;
-    let [right, up, back] = input.frame;
     let mut thrust = [0.0; 3];
-    add_scaled(&mut thrust, &right, net[0] * power);
-    add_scaled(&mut thrust, &up, net[1] * power);
-    add_scaled(&mut thrust, &back, net[2] * power);
+    add_scaled(&mut thrust, &body.rotate(&[1.0, 0.0, 0.0]), net[0] * power);
+    add_scaled(&mut thrust, &body.rotate(&[0.0, 1.0, 0.0]), net[1] * power);
+    add_scaled(&mut thrust, &body.rotate(&[0.0, 0.0, 1.0]), net[2] * power);
     match (body.solid, body.ground) {
         (true, Some(ground)) => walk(body, &thrust, power, &ground, vessel, dt),
         (true, None) => add_scaled(&mut body.v, &thrust, dt),
         (false, _) => fly(body, &thrust, power, vessel, dt),
     }
-    let air_spin = if vessel.air_velocity(body.p).is_some() {
-        vessel.angular_velocity()
-    } else {
-        [0.0; 3]
-    };
-    let roll = thrusters.roll() * ROLL_RATE;
-    let righting = cross(
-        &body.rotate(&[0.0, 1.0, 0.0]),
-        &vessel.down(body.p).map(|d| -d),
-    );
-    let k = (dt / GYRO_TAU).min(1.0);
-    for (((w, air), axis), lean) in body.w.iter_mut().zip(air_spin).zip(back).zip(righting) {
-        *w += (air + axis * roll + lean / RIGHTING_TAU - *w) * k;
-    }
+    hold(body, thrusters, gyros, vessel, dt);
 }
 
 /// Legs: push along the ground until the feet move over it at walking speed in the direction
@@ -320,6 +346,43 @@ fn fly(body: &mut Body, thrust: &Vec3d, power: f64, vessel: &impl Vessel, dt: f6
     ];
     let brake = limited(slip.map(|s| s / ASSIST_TAU), power);
     add_scaled(&mut body.v, &brake, dt);
+}
+
+/// Gyros: carry the held attitude along with the ground turning under the feet, or with the air
+/// when there is no ground, and as the turning thrusters ask; then turn the hull toward it, as
+/// hard as they may. Standing, the local vertical turns as the hull walks round the vessel, and
+/// the reference turns with it, so walking keeps the hull as upright as it stood.
+fn hold(body: &mut Body, thrusters: &Thrusters, gyros: &mut Gyros, vessel: &impl Vessel, dt: f64) {
+    let footing = match (body.solid, body.ground) {
+        (true, Some(ground)) => Some(ground.normal),
+        _ => None,
+    };
+    let mut rate = match (footing, gyros.footing) {
+        (Some(now), Some(last)) => rotation_vector(&quat_between(&last, &now)).map(|c| c / dt),
+        _ if vessel.air_velocity(body.p).is_some() => vessel.angular_velocity(),
+        _ => [0.0; 3],
+    };
+    gyros.footing = footing;
+    let held = gyros.held;
+    let right = quat_rotate(&held, &[1.0, 0.0, 0.0]);
+    let up = quat_rotate(&held, &[0.0, 1.0, 0.0]);
+    let back = quat_rotate(&held, &[0.0, 0.0, 1.0]);
+    add_scaled(&mut rate, &right, thrusters.pitch() * TURN_RATE);
+    add_scaled(&mut rate, &up, thrusters.yaw() * TURN_RATE);
+    add_scaled(&mut rate, &back, thrusters.roll() * TURN_RATE);
+    gyros.held = quat_integrate(&held, &rate, dt);
+    let lean = rotation_vector(&quat_mul(&gyros.held, &quat_conjugate(&body.q)));
+    let mut wanted = rate;
+    add_scaled(&mut wanted, &lean, 1.0 / HOLD_TAU);
+    let change = limited(
+        [
+            wanted[0] - body.w[0],
+            wanted[1] - body.w[1],
+            wanted[2] - body.w[2],
+        ],
+        GYRO_AUTHORITY * dt,
+    );
+    add_scaled(&mut body.w, &change, 1.0);
 }
 
 /// `v` without its component along the unit normal `n`.

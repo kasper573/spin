@@ -1,4 +1,10 @@
-// Types and grid helpers shared by every kernel of the fluid solver.
+// Types and grid helpers shared by every kernel of the fluid solver. Particles are binned into a
+// box of cells that wraps round on itself, so the grid has no bounds: a cell and another one a
+// whole box away share a slot, and any point anywhere lands in one. The box keeps neighbouring
+// cells next to each other in memory, which the neighbour searches live on. Each particle
+// carries a well-mixed key of its true cell, so a search over the 27 cells around a point takes
+// only the particles of those cells: a shared slot costs a few wasted reads and never a double
+// count.
 #define_import_path fluid_common
 
 struct Params {
@@ -26,10 +32,11 @@ struct Params {
     body_count: u32,
     sample_count: u32,
     pending: u32,
-    // xyz: grid origin, w: 1 / cell size
-    grid_min: vec4<f32>,
-    // xyz: cells per axis, w: total cells
-    grid_dims: vec4<i32>,
+    // 1 / cell size
+    inv_cell: f32,
+    // slots in the cell table, a power of two
+    cells: u32,
+    pad: vec2<u32>,
 }
 
 struct GpuBody {
@@ -73,18 +80,32 @@ const FIXED: f32 = 65536.0;
 @group(0) @binding(0) var<uniform> params: Params;
 
 fn coords_of(p: vec3<f32>) -> vec3<i32> {
-    let c = vec3<i32>(floor((p - params.grid_min.xyz) * params.grid_min.w));
-    return clamp(c, vec3(0), params.grid_dims.xyz - vec3(1));
+    return vec3<i32>(floor(p * params.inv_cell));
 }
 
-fn cell_at(c: vec3<i32>) -> i32 {
-    let d = params.grid_dims.xyz;
-    if (any(c < vec3(0)) || any(c >= d)) {
-        return -1;
-    }
-    return (c.x * d.y + c.y) * d.z + c.z;
+/// A well-mixed 32-bit key for a cell, which the cell's particles carry.
+fn cell_key(c: vec3<i32>) -> u32 {
+    var h = (bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u);
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
 }
 
-fn cell_of(p: vec3<f32>) -> i32 {
-    return cell_at(coords_of(p));
+// the box of slots: cells this far apart along an axis share a slot
+const TABLE_X: u32 = 64u;
+const TABLE_Y: u32 = 32u;
+const TABLE_Z: u32 = 64u;
+
+/// The slot of a cell in the box.
+fn cell_slot(c: vec3<i32>) -> u32 {
+    let w = vec3<u32>(bitcast<u32>(c.x) & (TABLE_X - 1u), bitcast<u32>(c.y) & (TABLE_Y - 1u), bitcast<u32>(c.z) & (TABLE_Z - 1u));
+    return (w.x * TABLE_Y + w.y) * TABLE_Z + w.z;
+}
+
+/// The cell at offset `n` of 27 around `c`.
+fn neighbour_cell(c: vec3<i32>, n: u32) -> vec3<i32> {
+    return c + vec3<i32>(i32(n / 9u), i32((n / 3u) % 3u), i32(n % 3u)) - vec3(1);
 }

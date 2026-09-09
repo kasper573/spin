@@ -6,7 +6,7 @@ mod contacts;
 pub use body::{Body, BodyShape, Collider, Ground, WaterCoupling};
 pub use contacts::{collide_pair, collide_vessel};
 
-use crate::core::units::{Hertz, Seconds};
+use crate::core::units::{Hertz, MetresPerSecond, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +17,9 @@ pub struct BodyParams {
     /// Rate at which a fully wetted body the water turns has its spin relax toward the vessel's
     /// rotation.
     pub wet_spin_rate: Hertz,
+    /// Safety clamps on speed and spin, well above anything the vessel's walls reach.
+    pub max_speed: MetresPerSecond,
+    pub max_spin: RadiansPerSecond,
 }
 
 impl Default for BodyParams {
@@ -25,12 +28,16 @@ impl Default for BodyParams {
             air: true,
             air_tau: Seconds(12.0),
             wet_spin_rate: Hertz(20.0),
+            max_speed: MetresPerSecond(40.0),
+            max_spin: RadiansPerSecond(25.0),
         }
     }
 }
 
 /// One substep: apply the water's impulses (if any arrived), air and wet damping, integrate, and
-/// resolve contacts with the vessel and between solid bodies.
+/// resolve contacts with the vessel and between solid bodies. The air pushes on the hull's
+/// centre of pressure and spins it toward its own rotation, so a ballasted hull that drifts
+/// through it turns ballast-first, and where there is no air nothing turns it at all.
 pub fn step(
     dt: f64,
     vessel: &impl Vessel,
@@ -60,10 +67,14 @@ pub fn step(
         if air_k > 0.0
             && let Some(a) = vessel.air_velocity(b.p)
         {
-            relax(&mut b.v, &a, air_k);
+            let at = b.to_world(&shapes[b.shape].collider.centre_of_pressure());
+            let hull = b.point_velocity(&at);
+            let push = [a[0] - hull[0], a[1] - hull[1], a[2] - hull[2]];
+            let impulse = push.map(|p| p * air_k / b.inv_m);
+            b.apply_impulse(&impulse, &at);
             relax(&mut b.w, &spin, air_k);
         }
-        b.integrate(dt);
+        b.integrate(dt, params.max_speed, params.max_spin);
     }
     for b in bodies.iter_mut() {
         b.ground = None;

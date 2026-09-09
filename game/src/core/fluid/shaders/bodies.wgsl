@@ -4,12 +4,13 @@
 // Everything a body receives is summed into fixed-point running totals the CPU reads back and
 // differences, so a late or doubled readback still applies each substep exactly once.
 #import vessel::vessel_air_velocity
-#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, cell_at, coords_of, FIXED}
+#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell, FIXED}
 
 @group(0) @binding(1) var<storage, read> position: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> velocity: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> velocity_next: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read> cell_start: array<u32>;
+@group(0) @binding(12) var<storage, read> key: array<u32>;
 
 @group(2) @binding(0) var<uniform> bodies: Bodies;
 @group(2) @binding(1) var<storage, read> samples: array<vec4<f32>>;
@@ -88,25 +89,26 @@ fn buoyancy(@builtin(global_invocation_id) id: vec3<u32>) {
     var rho = 0.0;
     var fv = vec3(0.0);
     let c = coords_of(x);
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dz = -1; dz <= 1; dz++) {
-                let ci = cell_at(c + vec3(dx, dy, dz));
-                if (ci < 0) {
-                    continue;
-                }
-                let end = cell_start[ci + 1];
-                for (var j = cell_start[ci]; j < end; j++) {
-                    let r = x - position[j].xyz;
-                    let r2 = dot(r, r);
-                    if (r2 >= params.h_sq) {
-                        continue;
-                    }
-                    let w = params.mass * poly(r2);
-                    rho += w;
-                    fv += w * velocity[j].xyz;
-                }
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let pj = position[j];
+            let vj = velocity[j];
+            if (kj != k) {
+                continue;
             }
+            let r = x - pj.xyz;
+            let r2 = dot(r, r);
+            if (r2 >= params.h_sq) {
+                continue;
+            }
+            let w = params.mass * poly(r2);
+            rho += w;
+            fv += w * vj.xyz;
         }
     }
     if (rho < 1.0) {
@@ -149,25 +151,27 @@ fn drag(@builtin(global_invocation_id) id: vec3<u32>) {
     var flow = vec3(0.0);
     var coupling = 0.0;
     let c = coords_of(x);
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dz = -1; dz <= 1; dz++) {
-                let ci = cell_at(c + vec3(dx, dy, dz));
-                if (ci < 0) {
-                    continue;
-                }
-                let end = cell_start[ci + 1];
-                for (var j = cell_start[ci]; j < end; j++) {
-                    let r = x - position[j].xyz;
-                    let r2 = dot(r, r);
-                    if (r2 >= params.h_sq) {
-                        continue;
-                    }
-                    let w = params.mass * params.body_drag * poly(r2) * (s.pos.w / params.rest_density) * velocity_next[j].w;
-                    flow += w * velocity[j].xyz;
-                    coupling += w;
-                }
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let pj = position[j];
+            let vj = velocity[j];
+            let scale = velocity_next[j].w;
+            if (kj != k) {
+                continue;
             }
+            let r = x - pj.xyz;
+            let r2 = dot(r, r);
+            if (r2 >= params.h_sq) {
+                continue;
+            }
+            let w = params.mass * params.body_drag * poly(r2) * (s.pos.w / params.rest_density) * scale;
+            flow += w * vj.xyz;
+            coupling += w;
         }
     }
     if (coupling <= 0.0) {

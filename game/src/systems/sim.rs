@@ -1,30 +1,35 @@
 //! The running simulation: the drum, the avatar and the rafts are stepped on the CPU and the
-//! water follows on the GPU with the same substeps. Real time takes one substep per frame, no
-//! longer than a sixtieth of a second, so a fast display gets smooth water and a slow frame is
-//! split into a few substeps; beyond that, time stretches rather than the frame. Requested time
-//! (the tests, the bench, scripts) always steps at exactly sixty hertz.
+//! water follows on the GPU. Real time takes one substep per frame, no longer than a sixtieth
+//! of a second, so a fast display gets smooth bodies and a slow frame is split into a few
+//! substeps; beyond that, time stretches rather than the frame. The water steps at exactly
+//! sixty hertz whatever the display does, so it costs the same at any frame rate: each of its
+//! steps is taken at the moment the bodies' substeps pass a sixtieth, with the drum and the
+//! bodies as they are then. Requested time (the tests, the bench, scripts) always steps at
+//! exactly sixty hertz, so the water steps with every substep.
 //!
 //! The initial state is a ring world: ground all the way round the drum, spinning exactly fast
 //! enough that the avatar standing on it weighs what it would on Earth, and nothing else.
 use bevy::prelude::*;
 
-use crate::core::avatar::{self, AvatarInput, Thrusters};
+use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_BODIES, MAX_SUBSTEPS_PER_FRAME,
-    PARTICLE_MASS, REST_DENSITY,
 };
 use crate::core::math::{basis_from_normal, norm, quat_from_basis};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
 use crate::core::units::{
-    EARTH_GRAVITY, Hertz, Litres, Metres, MetresPerSecondSquared, Radians, RadiansPerSecond,
-    Seconds,
+    EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
+    RadiansPerSecond, Seconds,
 };
 use crate::core::vessel::Vessel;
 use crate::systems::drum::{DEFAULT_RING, Drum, Ring};
 use crate::systems::rafts;
 
+/// The water's step rate, and the most the bodies are stepped by at once.
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 pub const MAX_RAFTS: usize = MAX_BODIES - 1;
+/// The speed clamps sit this far above the rim of the drum.
+const SPEED_HEADROOM: f32 = 40.0;
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -55,7 +60,7 @@ pub struct Footing {
     pub airborne: bool,
 }
 
-/// One substep the CPU took, for the GPU to take too.
+/// One step the water takes: the drum and the bodies as they were when it was due.
 #[derive(Clone)]
 pub struct SubstepRecord {
     pub dt: Seconds,
@@ -71,18 +76,22 @@ pub struct Simulation {
     pub avatar_input: AvatarInput,
     /// How hard each of the avatar's thrusters is firing.
     pub thrusters: Thrusters,
+    /// The attitude the avatar's gyros hold it to.
+    pub gyros: Gyros,
     pub params: FluidParams,
     pub body_params: BodyParams,
     /// Simulated time since the last reset.
     pub time: Seconds,
     /// Fraction of real time the simulation keeps up with (1 = full speed).
     pub rate: f32,
-    /// The substeps of the last frame.
+    /// The water's steps of the last frame.
     pub substeps: Vec<SubstepRecord>,
     /// The avatar first, then the rafts.
     bodies: Vec<Body>,
     shapes: [BodyShape; 2],
     accumulator: f32,
+    /// Simulated time since the water last stepped.
+    water_due: f64,
     queued: f32,
     window: (f32, f32),
 }
@@ -121,6 +130,7 @@ impl Simulation {
         let thrusters =
             Thrusters::with_power(avatar::equalized_thrust(standing_gravity(drum.spin, ring)));
         Simulation {
+            gyros: Gyros::holding(&avatar),
             drum,
             avatar_input: AvatarInput::default(),
             thrusters,
@@ -132,6 +142,7 @@ impl Simulation {
             bodies: vec![avatar],
             shapes,
             accumulator: 0.0,
+            water_due: 0.0,
             queued: 0.0,
             window: (0.0, 0.0),
         }
@@ -213,11 +224,14 @@ impl Simulation {
         } else {
             None
         };
+        self.clamp_speeds();
+        let water_step = max_dt as f64;
         for k in 0..steps {
             self.drum.advance(dt as f64);
             avatar::drive(
                 &mut self.bodies[0],
                 &mut self.thrusters,
+                &mut self.gyros,
                 &self.avatar_input,
                 &self.drum,
                 dt as f64,
@@ -231,13 +245,17 @@ impl Simulation {
                 water,
                 &self.body_params,
             );
-            self.substeps.push(SubstepRecord {
-                dt: Seconds(dt),
-                spin: self.drum.spin,
-                angle: self.drum.angle,
-                bodies: fluid.pack(&self.bodies, &self.shapes),
-            });
             self.time.0 += dt;
+            self.water_due += dt as f64;
+            if self.water_due >= water_step * (1.0 - 1e-6) {
+                self.water_due = (self.water_due - water_step).max(0.0);
+                self.substeps.push(SubstepRecord {
+                    dt: Seconds(max_dt),
+                    spin: self.drum.spin,
+                    angle: self.drum.angle,
+                    bodies: fluid.pack(&self.bodies, &self.shapes),
+                });
+            }
         }
         self.window.0 += real.0;
         self.window.1 += steps as f32 * dt;
@@ -245,6 +263,16 @@ impl Simulation {
             self.rate = (self.window.1 / self.window.0).min(1.0);
             self.window = (0.0, 0.0);
         }
+    }
+
+    /// Keep the safety clamps on speed and spin above what the spinning rim reaches, whatever
+    /// size and spin the ring is set to.
+    fn clamp_speeds(&mut self) {
+        let rim = self.drum.spin.0.abs().max(self.drum.target_spin.0.abs());
+        let speed = MetresPerSecond(rim * self.drum.ring.radius.0 * 2.0 + SPEED_HEADROOM);
+        self.params.max_speed = speed;
+        self.body_params.max_speed = speed;
+        self.body_params.max_spin = RadiansPerSecond(rim * 2.0 + 25.0);
     }
 
     /// Ask for exactly this much simulated time over the coming frames, real time aside.
@@ -265,6 +293,7 @@ impl Simulation {
         let raft_shape = self.shapes[RAFT_SHAPE].friction;
         let target = self.drum.target_spin;
         let power = self.thrusters.power;
+        let gyros = self.gyros;
         let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
         *self = Simulation::new(self.drum.ring);
         self.params = params;
@@ -272,15 +301,12 @@ impl Simulation {
         self.shapes[RAFT_SHAPE].friction = raft_shape;
         self.drum.target_spin = target;
         self.thrusters.power = power;
+        self.gyros = gyros;
         self.bodies[0] = avatar;
     }
 
     pub fn set_raft_friction(&mut self, friction: f64) {
         self.shapes[RAFT_SHAPE].friction = friction;
-    }
-
-    pub fn water(fluid: &Fluid) -> Litres {
-        Litres(fluid.len() as f32 * PARTICLE_MASS / REST_DENSITY * 1000.0)
     }
 
     pub fn shapes(&self) -> &[BodyShape] {

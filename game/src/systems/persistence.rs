@@ -4,18 +4,16 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::core::avatar::Look;
+use crate::core::avatar::Gyros;
 use crate::core::codec;
-use crate::core::fluid::{Fluid, FluidBuffers, PARTICLE_SPACING, Particle};
-use crate::core::rigid::Body;
+use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 use crate::core::web;
-use crate::systems::player::Player;
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
-const KEY: &str = "spin-gravity-wheel/v6";
+const KEY: &str = "spin-gravity-wheel/v7";
 const AUTOSAVE_INTERVAL: Seconds = Seconds(2.0);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -25,6 +23,8 @@ pub struct Snapshot {
     pub spin: RadiansPerSecond,
     pub angle: Radians,
     pub time: Seconds,
+    /// How much water each particle stands for.
+    pub water: Resolution,
     /// Seven floats per particle: position, velocity, foam.
     #[serde(with = "codec::f32s")]
     pub fluid: Vec<f32>,
@@ -41,7 +41,6 @@ pub struct AvatarPose {
     pub rotation: [f64; 4],
     pub velocity: [f64; 3],
     pub angular_velocity: [f64; 3],
-    pub look: Look,
 }
 
 /// Saves requested and completed so far.
@@ -65,7 +64,7 @@ impl Plugin for PersistencePlugin {
     }
 }
 
-pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid, player: &Player) -> Snapshot {
+pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
     let avatar = sim.avatar();
     Snapshot {
         settings: settings.clone(),
@@ -74,11 +73,11 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid, player: &P
             rotation: avatar.q,
             velocity: avatar.v,
             angular_velocity: avatar.w,
-            look: player.look,
         },
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
+        water: fluid.resolution(),
         fluid: fluid
             .particles()
             .flat_map(|p| {
@@ -107,21 +106,21 @@ pub fn apply(
     settings: &mut Settings,
     sim: &mut Simulation,
     fluid: &mut Fluid,
-    player: &mut Player,
 ) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
     sim.resize(settings.ring());
-    fluid.clear();
-    sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-10.0, 10.0));
+    fluid.restore(water_resolution(snapshot.water));
+    sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-999.0, 999.0));
     sim.drum.target_spin = settings.spin;
     sim.drum.angle = Radians(finite_f64(snapshot.angle.0));
     sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
+    let margin = fluid.resolution().margin();
     for chunk in snapshot.fluid.chunks_exact(7) {
         if chunk.iter().all(|v| v.is_finite()) {
             let mut position = [chunk[0], chunk[1], chunk[2]];
-            sim.drum.confine(&mut position, PARTICLE_SPACING * 0.5);
+            sim.drum.confine(&mut position, margin);
             fluid.add(Particle {
                 position,
                 velocity: [chunk[3], chunk[4], chunk[5]],
@@ -140,7 +139,7 @@ pub fn apply(
             }
         }
     }
-    pose_avatar(&snapshot.avatar, sim.avatar_mut(), player);
+    pose_avatar(&snapshot.avatar, sim);
     sim.avatar_mut().solid = settings.collisions;
 }
 
@@ -158,23 +157,32 @@ pub fn save_soon(world: &mut World) {
 #[derive(Resource)]
 struct Autosave(Timer);
 
-fn pose_avatar(pose: &AvatarPose, avatar: &mut Body, player: &mut Player) {
+/// A saved resolution, unless it is nonsense, in which case the water starts out fine.
+fn water_resolution(saved: Resolution) -> Resolution {
+    let finest = Resolution::FINEST.spacing.0;
+    if saved.spacing.0.is_finite() && saved.spacing.0 >= finest && saved.spacing.0 < finest * 64.0 {
+        saved
+    } else {
+        Resolution::FINEST
+    }
+}
+
+fn pose_avatar(pose: &AvatarPose, sim: &mut Simulation) {
     let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
     let q_len = pose.rotation.iter().map(|x| x * x).sum::<f64>().sqrt();
     if !(finite(&pose.position)
         && finite(&pose.rotation)
         && finite(&pose.velocity)
         && finite(&pose.angular_velocity)
-        && pose.look.yaw.is_finite()
-        && pose.look.pitch.is_finite()
         && q_len > 0.5)
     {
         return;
     }
+    let avatar = sim.avatar_mut();
     avatar.place(pose.position, pose.rotation.map(|x| x / q_len));
     avatar.v = pose.velocity;
     avatar.w = pose.angular_velocity;
-    player.look = pose.look;
+    sim.gyros = Gyros::holding(sim.avatar());
 }
 
 fn restore(world: &mut World) {
@@ -185,10 +193,8 @@ fn restore(world: &mut World) {
     };
     world.resource_scope(|world, mut settings: Mut<Settings>| {
         world.resource_scope(|world, mut sim: Mut<Simulation>| {
-            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource_scope(|_, mut player: Mut<Player>| {
-                    apply(&snapshot, &mut settings, &mut sim, &mut fluid, &mut player)
-                })
+            world.resource_scope(|_, mut fluid: Mut<Fluid>| {
+                apply(&snapshot, &mut settings, &mut sim, &mut fluid)
             })
         })
     });
@@ -217,7 +223,6 @@ fn flush(world: &mut World) {
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
         world.resource::<Fluid>(),
-        world.resource::<Player>(),
     );
     if let Ok(text) = serde_json::to_string(&snapshot) {
         web::storage_save(KEY, &text);

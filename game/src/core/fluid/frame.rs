@@ -5,8 +5,7 @@ use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::ShaderType;
 
 use super::{
-    EPS_LAMBDA, FluidParams, Grid, H, H2, MARGIN, MAX_BODIES, MAX_DELTA, MAX_SPEED, PARTICLE_MASS,
-    PARTICLE_SPACING, POLY6, REST_DENSITY, SCORR_K, SCORR_WQ, SPIKY, W0, WET_REF,
+    EPS_LAMBDA, FluidParams, MAX_BODIES, REST_DENSITY, Resolution, SCORR_K, TABLE_CELLS, WET_REF,
 };
 use crate::core::math::Vec3d;
 use crate::core::rigid::{Body, BodyShape, Collider, WaterCoupling};
@@ -14,14 +13,17 @@ use crate::core::rigid::{Body, BodyShape, Collider, WaterCoupling};
 /// Units per unit in the shaders' fixed-point accumulators.
 const FIXED: f64 = 65536.0;
 pub const ACCUMULATORS_PER_BODY: usize = 32;
-/// Two accumulator slots no body uses, stamped with how many substeps the frame ran and its
-/// ticket, so a readback tells which frame it reports and whether the water moved in it.
-pub const STAMP_SLOT: usize = ACCUMULATORS_PER_BODY - 2;
+/// An accumulator slot no body uses, stamped with the frame's ticket so a readback tells which
+/// frame it reports.
+pub const STAMP_SLOT: usize = ACCUMULATORS_PER_BODY - 1;
 
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct FluidFrame {
     /// Stamped into the accumulators so the readback tells which frame it reports.
     pub ticket: u32,
+    /// Parameters for thinning the water to every other particle before anything else: the
+    /// count to sort and, as `pending`, the count that remains.
+    pub thin: Option<Params>,
     pub substeps: Vec<Substep>,
     /// Parameters for appending `pending`: the count before the append and how many join.
     pub inject: Params,
@@ -67,44 +69,41 @@ pub struct Params {
     pub body_count: u32,
     pub sample_count: u32,
     pub pending: u32,
-    pub grid_min: Vec4,
-    pub grid_dims: IVec4,
+    pub inv_cell: f32,
+    pub cells: u32,
+    pub pad: UVec2,
 }
 
 impl Params {
-    pub fn new(dt: f32, p: &FluidParams, count: u32, bodies: &Bodies, grid: &Grid) -> Self {
+    pub fn new(dt: f32, p: &FluidParams, res: Resolution, count: u32, bodies: &Bodies) -> Self {
         Params {
             dt,
-            h: H,
-            h_sq: H2,
-            poly: POLY6,
-            spiky: SPIKY,
-            w_zero: W0,
-            mass: PARTICLE_MASS,
+            h: res.h(),
+            h_sq: res.h_sq(),
+            poly: res.poly6(),
+            spiky: res.spiky(),
+            w_zero: res.w_zero(),
+            mass: res.mass(),
             rest_density: REST_DENSITY,
             scorr_k: SCORR_K,
-            scorr_wq: SCORR_WQ,
+            scorr_wq: res.scorr_wq(),
             eps_lambda: EPS_LAMBDA,
-            max_delta: MAX_DELTA,
-            max_speed: MAX_SPEED,
-            margin: MARGIN,
+            max_delta: res.max_delta(),
+            max_speed: p.max_speed.0,
+            margin: res.margin(),
             air_k: if p.air { dt / p.air_tau.0 } else { 0.0 },
             wall_keep: 1.0 - p.wall_friction,
-            viscosity: p.viscosity * PARTICLE_MASS / REST_DENSITY,
+            viscosity: p.viscosity * res.mass() / REST_DENSITY,
             body_drag: p.body_drag,
             wet_ref: WET_REF,
-            spacing: PARTICLE_SPACING,
+            spacing: res.spacing.0,
             count,
             body_count: bodies.count,
             sample_count: bodies.sample_count,
             pending: 0,
-            grid_min: Vec4::new(grid.min[0], grid.min[1], grid.min[2], 1.0 / grid.cell),
-            grid_dims: IVec4::new(
-                grid.dims[0],
-                grid.dims[1],
-                grid.dims[2],
-                grid.cells() as i32,
-            ),
+            inv_cell: 1.0 / res.h(),
+            cells: TABLE_CELLS as u32,
+            pad: UVec2::ZERO,
         }
     }
 
@@ -148,6 +147,22 @@ pub struct Bodies {
     pub sample_count: u32,
 }
 
+/// A shape's boundary sample points and the water each displaces.
+#[derive(Clone, Debug)]
+pub struct ShapePoints {
+    pub points: Vec<[f32; 3]>,
+    pub volume_per_sample: f32,
+}
+
+impl ShapePoints {
+    pub fn of(shape: &BodyShape) -> Self {
+        ShapePoints {
+            points: shape.samples.clone(),
+            volume_per_sample: shape.volume_per_sample as f32,
+        }
+    }
+}
+
 /// Where a shape's samples sit in the shared sample table.
 #[derive(Clone, Copy, Debug)]
 pub struct ShapeSamples {
@@ -156,16 +171,20 @@ pub struct ShapeSamples {
     pub volume_per_sample: f32,
 }
 
-pub fn sample_table(shapes: &[BodyShape]) -> (Vec<ShapeSamples>, Vec<[f32; 4]>) {
+/// Every shape's samples weighted for this resolution, one after the other.
+pub fn sample_table(
+    shapes: &[ShapePoints],
+    resolution: Resolution,
+) -> (Vec<ShapeSamples>, Vec<[f32; 4]>) {
     let mut layout = Vec::new();
     let mut table = Vec::new();
     for shape in shapes {
         layout.push(ShapeSamples {
             first: table.len() as u32,
-            count: shape.samples.len() as u32,
-            volume_per_sample: shape.volume_per_sample as f32,
+            count: shape.points.len() as u32,
+            volume_per_sample: shape.volume_per_sample,
         });
-        table.extend_from_slice(&shape.samples);
+        table.extend(resolution.sample_weights(&shape.points));
     }
     (layout, table)
 }
@@ -175,7 +194,9 @@ pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> B
     let mut boundary = 0u32;
     for (item, body) in out.gpu.items.iter_mut().zip(bodies.iter().take(MAX_BODIES)) {
         let shape = &shapes[body.shape];
-        let samples = layout[body.shape];
+        let Some(samples) = layout.get(body.shape) else {
+            continue;
+        };
         let count = if body.solid { samples.count } else { 0 };
         let (shape_v, kind) = match shape.collider {
             Collider::Box { half } => (

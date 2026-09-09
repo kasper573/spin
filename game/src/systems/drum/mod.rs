@@ -20,10 +20,10 @@ pub const DEFAULT_RING: Ring = Ring {
     radius: Metres(10.5),
     half_width: Metres(6.0),
 };
-/// The largest ring the settings allow, which the water reserves room for.
+/// The largest ring the settings allow.
 pub const LARGEST_RING: Ring = Ring {
-    radius: Metres(20.0),
-    half_width: Metres(10.0),
+    radius: Metres(499.5),
+    half_width: Metres(499.5),
 };
 /// The ground that covers the glass all the way round in the initial state.
 pub const GROUND_DEPTH: Metres = Metres(0.5);
@@ -95,11 +95,13 @@ impl Drum {
         self.landscape.resize(ring);
     }
 
+    /// Spin up or down toward the target and turn; the angle is kept to one turn so that its
+    /// single-precision copies on the GPU stay exact however long the drum has been running.
     pub fn advance(&mut self, dt: f64) {
         let d = (self.target_spin.0 - self.spin.0) as f64;
         let max = SPIN_ACCEL * dt;
         self.spin.0 += d.clamp(-max, max) as f32;
-        self.angle.0 += self.spin.0 as f64 * dt;
+        self.angle.0 = (self.angle.0 + self.spin.0 as f64 * dt).rem_euclid(std::f64::consts::TAU);
     }
 
     /// Whether a point is in the air the drum encloses.
@@ -291,15 +293,6 @@ impl Vessel for Drum {
     fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3] {
         let w = self.spin.0 as f64;
         [w * p[2], 0.0, -w * p[0]]
-    }
-
-    fn down(&self, p: [f64; 3]) -> [f64; 3] {
-        let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
-        if r < 1e-9 {
-            [0.0; 3]
-        } else {
-            [p[0] / r, 0.0, p[2] / r]
-        }
     }
 
     fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]> {

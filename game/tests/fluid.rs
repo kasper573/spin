@@ -1,10 +1,10 @@
 use bevy::prelude::*;
-use game::core::fluid::{Fluid, PARTICLE_MASS, Particle, REST_DENSITY};
+use game::core::fluid::{Fluid, Particle, Resolution};
 use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::systems::drum::DEFAULT_RING;
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::Simulation;
+use game::systems::sim::{SUBSTEP_RATE, Simulation};
 use game::systems::testing;
 
 fn inject(app: &mut App, centre: [f32; 3], count: u32) -> u32 {
@@ -28,8 +28,9 @@ fn injection_counts_litres() {
     assert_eq!(added, 500);
     let fluid = app.world().resource::<Fluid>();
     assert_eq!(fluid.len(), 500);
-    let litres = Simulation::water(fluid).0;
-    assert!((litres - 500.0 * PARTICLE_MASS / REST_DENSITY * 1000.0).abs() < 1e-3);
+    let litres = fluid.litres().0;
+    let each = Resolution::FINEST.litres_per_particle().0;
+    assert!((litres - 500.0 * each).abs() < 1e-3);
 }
 
 #[test]
@@ -157,4 +158,46 @@ fn water_grows_a_surface() {
     app.world_mut().resource_mut::<Fluid>().clear();
     testing::run(&mut app, Seconds(0.1));
     assert_eq!(testing::surface_triangles(&mut app), 0);
+}
+
+/// Water at rest in the turning drum is drawn holding still in it: its surface is extracted in
+/// the drum's own frame, so between two steps a vertex moves only as far as the water does,
+/// not by the grid sliding under it.
+#[test]
+fn settled_water_holds_still_in_the_drums_frame() {
+    let mut app = testing::headless();
+    for k in 0..10 {
+        let a = k as f32 * 0.7;
+        inject(
+            &mut app,
+            [a.cos() * 8.0, (k % 3) as f32 * 2.0 - 2.0, a.sin() * 8.0],
+            1000,
+        );
+        testing::run(&mut app, Seconds(0.2));
+    }
+    testing::run(&mut app, Seconds(10.0));
+    let before = testing::surface_vertices(&mut app);
+    testing::run(&mut app, SUBSTEP_RATE.period());
+    let after = testing::surface_vertices(&mut app);
+    assert!(before.len() > 10_000, "{} vertices", before.len());
+    let mut moved: Vec<f32> = after
+        .iter()
+        .step_by(16)
+        .map(|p| {
+            before
+                .iter()
+                .map(|q| {
+                    let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+                    dx * dx + dy * dy + dz * dz
+                })
+                .fold(f32::MAX, f32::min)
+                .sqrt()
+        })
+        .collect();
+    moved.sort_by(|x, y| x.total_cmp(y));
+    let typical = moved[moved.len() * 9 / 10];
+    assert!(
+        typical < 0.005,
+        "the surface moved {typical} m in the drum's frame between two steps"
+    );
 }

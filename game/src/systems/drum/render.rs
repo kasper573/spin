@@ -1,7 +1,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
@@ -11,31 +11,33 @@ use bevy::shader::ShaderRef;
 
 use super::landscape::{ROWS, SEGMENTS};
 use super::{DrumFrame, DrumUniform, Landscape, Ring};
+use crate::systems::scene::SUN_DIRECTION;
+use crate::systems::sim::{SimSet, Simulation};
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f32 = 0.02;
 const STRUTS: usize = 24;
-/// The ground is tiled in patches of this many segments and rows, alternately tinted, so that
-/// walking over it reads as motion and distance.
-const PATCH: usize = 8;
+/// The ground is tiled in squares about this size, alternately tinted.
+const TILE: f32 = 2.0;
 /// The glass is made of square panes about this size, gridded together round the ring, with
 /// seams this wide between them.
 const PANE: f32 = 1.0;
 const SEAM: f32 = 0.03;
-use crate::systems::scene::SUN_DIRECTION;
-use crate::systems::sim::{SimSet, Simulation};
 
 pub struct DrumPlugin;
 
 impl Plugin for DrumPlugin {
     fn build(&self, app: &mut App) {
         super::gpu::install(app);
-        app.add_plugins(MaterialPlugin::<GlassMaterial>::default())
-            .add_systems(Startup, spawn)
-            .add_systems(
-                Update,
-                (rebuild_structure, turn, rebuild_terrain, feed_water).in_set(SimSet::Observe),
-            );
+        app.add_plugins((
+            MaterialPlugin::<GlassMaterial>::default(),
+            MaterialPlugin::<TerrainMaterial>::default(),
+        ))
+        .add_systems(Startup, spawn)
+        .add_systems(
+            Update,
+            (rebuild_structure, turn, rebuild_terrain, feed_water).in_set(SimSet::Observe),
+        );
     }
 }
 
@@ -70,6 +72,28 @@ impl Material for GlassMaterial {
     }
 }
 
+/// The ground's colouring on top of the standard material; see `terrain.wgsl`.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct TerrainExtension {
+    /// The drum's angle, the glass radius, and the tile size round the ring and along it.
+    #[uniform(100)]
+    tiling: Vec4,
+    #[uniform(100)]
+    dirt: LinearRgba,
+    #[uniform(100)]
+    grass: LinearRgba,
+    #[uniform(100)]
+    grass_dark: LinearRgba,
+}
+
+impl MaterialExtension for TerrainExtension {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://game/systems/shaders/terrain.wgsl".into()
+    }
+}
+
+type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
+
 /// Everything fixed to the glass, so it turns with the drum.
 #[derive(Component)]
 struct WheelFrame;
@@ -83,19 +107,22 @@ struct Terrain {
     version: Option<u64>,
 }
 
-/// The materials the structure is rebuilt with.
+/// The materials the structure is rebuilt with, and the ground's.
 #[derive(Resource)]
 struct StructureMaterials {
     glass: Handle<GlassMaterial>,
     metal: Handle<StandardMaterial>,
+    terrain: Handle<TerrainMaterial>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     mut commands: Commands,
     sim: Res<Simulation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glass: ResMut<Assets<GlassMaterial>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
+    mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
     let ring = sim.drum.ring;
     let materials = StructureMaterials {
@@ -110,13 +137,22 @@ fn spawn(
             perceptual_roughness: 0.45,
             ..default()
         }),
+        terrain: terrain.add(ExtendedMaterial {
+            base: StandardMaterial {
+                perceptual_roughness: 0.95,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            },
+            extension: TerrainExtension {
+                tiling: tile_layout(ring, 0.0),
+                dirt: Color::srgb(0.45, 0.32, 0.2).into(),
+                grass: Color::srgb(0.36, 0.62, 0.24).into(),
+                grass_dark: Color::srgb(0.3, 0.54, 0.2).into(),
+            },
+        }),
     };
-    let terrain_material = standard.add(StandardMaterial {
-        perceptual_roughness: 0.95,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    });
+    let terrain_material = materials.terrain.clone();
     let frame = commands
         .spawn((WheelFrame, Transform::default(), Visibility::default()))
         .with_children(|frame| {
@@ -190,6 +226,14 @@ fn pane_layout(ring: Ring, angle: f32) -> Vec4 {
     Vec4::new(angle, round, PANE, SEAM)
 }
 
+/// The ground's tiles for a ring of this size at this angle: a whole number of tiles round the
+/// ring so the checker closes on itself, and square ones along its axis.
+fn tile_layout(ring: Ring, angle: f32) -> Vec4 {
+    let circumference = std::f32::consts::TAU * ring.radius.0;
+    let round = circumference / (circumference / TILE).round().max(1.0);
+    Vec4::new(angle, ring.radius.0, round, TILE)
+}
+
 /// Tear down and rebuild the glass and its frame when the ring changes size.
 fn rebuild_structure(
     mut commands: Commands,
@@ -215,6 +259,7 @@ fn turn(
     sim: Res<Simulation>,
     materials: Res<StructureMaterials>,
     mut glass: ResMut<Assets<GlassMaterial>>,
+    mut terrain: ResMut<Assets<TerrainMaterial>>,
     mut frames: Query<&mut Transform, With<WheelFrame>>,
 ) {
     let angle = sim.drum.angle.0 as f32;
@@ -223,6 +268,9 @@ fn turn(
     }
     if let Some(mut material) = glass.get_mut(&materials.glass) {
         material.panes = pane_layout(sim.drum.ring, angle);
+    }
+    if let Some(mut material) = terrain.get_mut(&materials.terrain) {
+        material.extension.tiling = tile_layout(sim.drum.ring, angle);
     }
 }
 
@@ -269,22 +317,19 @@ fn terrain_mesh(landscape: &Landscape) -> Mesh {
     let dy = landscape.row_spacing() as f32;
     let rows = ROWS + 2;
     let mut positions = Vec::with_capacity(SEGMENTS * rows);
-    let mut colours = Vec::with_capacity(SEGMENTS * rows);
     for i in 0..SEGMENTS {
         let phi = i as f32 * dphi;
         let (s, c) = phi.sin_cos();
-        let mut push = |height: f32, y: f32, j: usize| {
+        let mut push = |height: f32, y: f32| {
             let r = radius - height.max(GLASS_INSET);
             let y = y.clamp(-half_width + GLASS_INSET, half_width - GLASS_INSET);
             positions.push([r * c, y, r * s]);
-            let light = (i / PATCH + j / PATCH).is_multiple_of(2);
-            colours.push(ground_colour(height, light));
         };
-        push(0.0, -half_width, 0);
+        push(0.0, -half_width);
         for j in 0..ROWS {
-            push(landscape.height_at(i, j), -half_width + j as f32 * dy, j);
+            push(landscape.height_at(i, j), -half_width + j as f32 * dy);
         }
-        push(0.0, half_width, ROWS - 1);
+        push(0.0, half_width);
     }
     let raised = |i: usize, j: usize| {
         let row = j.clamp(1, ROWS) - 1;
@@ -309,30 +354,9 @@ fn terrain_mesh(landscape: &Landscape) -> Mesh {
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
     mesh
-}
-
-/// Bare dirt where the ground has been dug toward the glass, grass at the initial depth and
-/// above, in two tints for the patches.
-fn ground_colour(height: f32, light: bool) -> [f32; 4] {
-    let dirt = LinearRgba::from(Color::srgb(0.45, 0.32, 0.2));
-    let grass = LinearRgba::from(if light {
-        Color::srgb(0.36, 0.62, 0.24)
-    } else {
-        Color::srgb(0.3, 0.54, 0.2)
-    });
-    let t = ((height - 0.15) / 0.3).clamp(0.0, 1.0);
-    let t = t * t * (3.0 - 2.0 * t);
-    let mix = |a: f32, b: f32| a + (b - a) * t;
-    [
-        mix(dirt.red, grass.red),
-        mix(dirt.green, grass.green),
-        mix(dirt.blue, grass.blue),
-        1.0,
-    ]
 }
 
 /// Hand the water the drum's state for every substep taken this frame and the landscape when it

@@ -1,6 +1,5 @@
-use crate::core::fluid::{H2, MAX_SPEED_BODY, POLY6, REST_DENSITY};
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve};
-use crate::core::units::Newtons;
+use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve, quat_integrate};
+use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
 
 /// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
 /// and the flow around the hull weighted by how strongly each wetted sample coupled to it, as a
@@ -111,10 +110,21 @@ pub struct Ground {
 pub enum Collider {
     /// A box centred on the centre of mass.
     Box { half: Vec3d },
-    /// A sphere whose centre may sit away from the centre of mass, so it rights itself when
-    /// resting on a surface. Friction acts through the centre of mass rather than at the hull, so
-    /// the sphere slides instead of rolling.
+    /// A sphere whose centre may sit away from the centre of mass, so that whatever pushes on
+    /// the hull, the ground, the water or the air, turns it until the ballast hangs below.
+    /// Friction acts through the centre of mass rather than at the hull, so the sphere slides
+    /// instead of rolling.
     Sphere { radius: f64, centre: Vec3d },
+}
+
+impl Collider {
+    /// Where the air pushes on the hull: its geometric centre.
+    pub fn centre_of_pressure(self) -> Vec3d {
+        match self {
+            Collider::Box { .. } => [0.0; 3],
+            Collider::Sphere { centre, .. } => centre,
+        }
+    }
 }
 
 /// Mass properties, material, fluid boundary samples and contact points shared by every body of
@@ -126,8 +136,8 @@ pub struct BodyShape {
     /// Coulomb friction and bounciness against walls and other bodies.
     pub friction: f64,
     pub restitution: f64,
-    /// Boundary sample points [x, y, z, Ψ] for fluid coupling.
-    pub samples: Vec<[f32; 4]>,
+    /// Boundary sample points for fluid coupling.
+    pub samples: Vec<[f32; 3]>,
     pub volume_per_sample: f64,
     /// Contact sample points on the surface (boxes only; spheres contact analytically).
     pub points: Vec<Vec3d>,
@@ -143,7 +153,7 @@ impl BodyShape {
             12.0 / (mass * (a * a + c * c)),
             12.0 / (mass * (a * a + b * b)),
         ];
-        let samples = weighted(mid_plane_samples(a, c, sample_spacing));
+        let samples = mid_plane_samples(a, c, sample_spacing);
         let volume_per_sample = a * b * c / samples.len() as f64;
         let half = [a / 2.0, b / 2.0, c / 2.0];
         BodyShape {
@@ -168,7 +178,7 @@ impl BodyShape {
             1.0 / about_axis,
             1.0 / (about_axis + mass * drop * drop),
         ];
-        let samples = weighted(sphere_samples(radius, centre, sample_count));
+        let samples = sphere_samples(radius, centre, sample_count);
         let volume = 4.0 / 3.0 * std::f64::consts::PI * radius * radius * radius;
         BodyShape {
             collider: Collider::Sphere { radius, centre },
@@ -355,37 +365,25 @@ impl Body {
         self.inv_i_max
     }
 
-    pub fn integrate(&mut self, dt: f64) {
+    /// Move by a substep, with the speed and spin held under the safety clamps.
+    pub fn integrate(&mut self, dt: f64, max_speed: MetresPerSecond, max_spin: RadiansPerSecond) {
         let sp = (self.v[0] * self.v[0] + self.v[1] * self.v[1] + self.v[2] * self.v[2]).sqrt();
-        if sp > MAX_SPEED_BODY {
-            let s = MAX_SPEED_BODY / sp;
+        if sp > max_speed.0 as f64 {
+            let s = max_speed.0 as f64 / sp;
             for k in 0..3 {
                 self.v[k] *= s;
             }
         }
         let ws = (self.w[0] * self.w[0] + self.w[1] * self.w[1] + self.w[2] * self.w[2]).sqrt();
-        if ws > 25.0 {
-            let s = 25.0 / ws;
+        if ws > max_spin.0 as f64 {
+            let s = max_spin.0 as f64 / ws;
             for k in 0..3 {
                 self.w[k] *= s;
             }
         }
         let v = self.v;
         add_scaled(&mut self.p, &v, dt);
-        let [qx, qy, qz, qw] = self.q;
-        let w = self.w;
-        self.q[0] += 0.5 * (w[0] * qw + w[1] * qz - w[2] * qy) * dt;
-        self.q[1] += 0.5 * (w[1] * qw + w[2] * qx - w[0] * qz) * dt;
-        self.q[2] += 0.5 * (w[2] * qw + w[0] * qy - w[1] * qx) * dt;
-        self.q[3] += 0.5 * (-w[0] * qx - w[1] * qy - w[2] * qz) * dt;
-        let l = (self.q[0] * self.q[0]
-            + self.q[1] * self.q[1]
-            + self.q[2] * self.q[2]
-            + self.q[3] * self.q[3])
-            .sqrt();
-        for k in 0..4 {
-            self.q[k] /= l;
-        }
+        self.q = quat_integrate(&self.q, &self.w, dt);
         self.update_rotation();
     }
 
@@ -443,25 +441,6 @@ fn sphere_samples(radius: f64, centre: Vec3d, count: usize) -> Vec<[f32; 3]> {
                 (centre[1] + radius * y) as f32,
                 (centre[2] + radius * r * a.sin()) as f32,
             ]
-        })
-        .collect()
-}
-
-/// Akinci volume weights Ψ: each sample stands in for the rest density its neighbours don't cover.
-fn weighted(points: Vec<[f32; 3]>) -> Vec<[f32; 4]> {
-    points
-        .iter()
-        .map(|p| {
-            let mut s = 0.0f32;
-            for q in &points {
-                let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
-                let r2 = dx * dx + dy * dy + dz * dz;
-                if r2 < H2 {
-                    let t = H2 - r2;
-                    s += POLY6 * t * t * t;
-                }
-            }
-            [p[0], p[1], p[2], REST_DENSITY / s]
         })
         .collect()
 }

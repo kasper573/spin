@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 use game::core::audio::{self, Placement, Voice};
-use game::core::avatar::{self, EYE_HEIGHT, SPOOL_TIME, Thruster, WALK_SPEED, equalized_thrust};
+use game::core::avatar::{
+    self, EYE_HEIGHT, Gyros, SPOOL_TIME, Thruster, WALK_SPEED, equalized_thrust,
+};
 use game::core::fluid::Fluid;
-use game::core::math::norm;
+use game::core::math::{add_scaled, cross, dot, norm, quat_from_basis};
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
 use game::systems::drum::DEFAULT_RING;
@@ -47,11 +49,35 @@ fn hold(app: &mut App, pilot: PilotInput, seconds: f32) {
         {
             let player = *app.world().resource::<Player>();
             let mut sim = state_mut(app);
-            sim.avatar_input = player.input(sim.avatar(), pilot);
+            sim.avatar_input = player.input(pilot);
         }
         testing::run(app, Seconds(0.1));
     }
     state_mut(app).avatar_input = default();
+}
+
+/// Stand the hull upright on the local vertical where it is, facing the way it faces and
+/// keeping its motion, with the gyros holding that: off the ground they hold the attitude the
+/// drum's air carried it off with, so a hop or a spell adrift in water moving against the drum
+/// leaves it leaning.
+fn level(app: &mut App) {
+    let mut sim = state_mut(app);
+    let body = sim.avatar();
+    let (p, v, w) = (body.p, body.v, body.w);
+    let r = radius(p);
+    let up = [-p[0] / r, 0.0, -p[2] / r];
+    let ahead = body.rotate(&[0.0, 0.0, -1.0]);
+    let mut forward = ahead;
+    add_scaled(&mut forward, &up, -dot(&ahead, &up));
+    let len = norm(&forward);
+    let forward = forward.map(|c| c / len);
+    let right = cross(&forward, &up);
+    let back = forward.map(|c| -c);
+    sim.avatar_mut()
+        .place(p, quat_from_basis(&right, &up, &back));
+    sim.avatar_mut().v = v;
+    sim.avatar_mut().w = w;
+    sim.gyros = Gyros::holding(sim.avatar());
 }
 
 fn ghost(app: &mut App) {
@@ -114,12 +140,14 @@ fn thrusters_spool_up_and_down() {
     );
     hold(&mut app, PilotInput::firing(&[Thruster::Forward]), spool);
     let levels = state(&app).thrusters.levels();
-    assert_eq!(levels, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut forward_only = [0.0; 12];
+    forward_only[Thruster::Forward as usize] = 1.0;
+    assert_eq!(levels, forward_only);
     testing::run(&mut app, Seconds(spool / 2.0));
     let level = state(&app).thrusters.level(Thruster::Forward);
     assert!((level - 0.5).abs() < 0.05, "half way down: {level}");
     testing::run(&mut app, Seconds(spool));
-    assert_eq!(state(&app).thrusters.levels(), [0.0; 8]);
+    assert_eq!(state(&app).thrusters.levels(), [0.0; 12]);
 }
 
 #[test]
@@ -128,9 +156,11 @@ fn every_thruster_at_once_reads_full_and_cancels_out() {
     testing::run(&mut app, Seconds(1.0));
     hold(&mut app, PilotInput::firing(&Thruster::ALL), 2.0);
     let sim = state(&app);
-    assert_eq!(sim.thrusters.levels(), [1.0; 8]);
+    assert_eq!(sim.thrusters.levels(), [1.0; 12]);
     assert_eq!(sim.thrusters.net(), [0.0; 3]);
     assert_eq!(sim.thrusters.roll(), 0.0);
+    assert_eq!(sim.thrusters.pitch(), 0.0);
+    assert_eq!(sim.thrusters.yaw(), 0.0);
     assert!(sim.avatar().ground.is_some(), "left the ground");
     let g = weight_in_g(sim);
     assert!((g - 1.0).abs() < 0.05, "weight {g} g");
@@ -191,9 +221,9 @@ fn flight_assist_brakes_a_ghost_to_a_stop_in_vacuum() {
     let mut app = testing::headless();
     ghost(&mut app);
     {
-        let mut player = Player::default();
+        let mut player = Player;
         let mut sim = state_mut(&mut app);
-        player.teleport(sim.avatar_mut(), [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
+        player.teleport(&mut sim, [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
     }
     hold(&mut app, PilotInput::firing(&[Thruster::Right]), 1.0);
     assert!(
@@ -242,9 +272,9 @@ fn a_ghost_in_the_drum_is_carried_round_and_flung_out() {
 fn a_solid_avatar_outside_stays_outside() {
     let mut app = testing::headless();
     {
-        let mut player = Player::default();
+        let mut player = Player;
         let mut sim = state_mut(&mut app);
-        player.teleport(sim.avatar_mut(), [0.0, 12.0, 0.0], [0.0, 0.0, 0.0]);
+        player.teleport(&mut sim, [0.0, 12.0, 0.0], [0.0, 0.0, 0.0]);
     }
     testing::run(&mut app, Seconds(3.0));
     let sim = state(&app);
@@ -344,7 +374,8 @@ fn the_thrusters_push_through_water_and_out_of_it() {
         "standing dry: wet {}",
         sim.avatar().wet
     );
-    let start = radius(sim.avatar().p);
+    level(&mut app);
+    let start = radius(state(&app).avatar().p);
     // a hop is a chord through the ring, so the rise is measured at its highest
     let mut risen: f64 = 0.0;
     for _ in 0..12 {
@@ -390,15 +421,17 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
     );
     assert!(expected > 1.3, "the bigger ring pulls {expected} g");
     assert!(ground_slip(sim) < 0.1, "slip {}", ground_slip(sim));
-    let eye = avatar::eye(sim.avatar());
-    let height = sim.drum.ring.floor_radius().0 as f64 - radius(eye);
+    // the fall to the new floor lands at another point round the ring, and the gyros keep the
+    // attitude it left with, so the hull rests on the ground however it landed
+    let height = sim.drum.ring.floor_radius().0 as f64 - radius(sim.avatar().p);
     assert!(
-        (height - EYE_HEIGHT.0 as f64).abs() < 0.05,
-        "eye {height} m above the new ground"
+        sim.avatar().ground.is_some() && height > 0.0 && height < 2.0 * avatar::RADIUS,
+        "centre {height} m above the new ground"
     );
     let same_power = sim.thrusters.power;
     assert_eq!(same_power, settings.thrust);
     let hop = |app: &mut App| {
+        level(app);
         let start = radius(state(app).avatar().p);
         hold(app, PilotInput::firing(&[Thruster::Up]), 1.0);
         let risen = start - radius(state(app).avatar().p);

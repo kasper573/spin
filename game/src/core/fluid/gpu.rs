@@ -1,7 +1,7 @@
 //! The render-world half of the fluid: its buffers, one compute pipeline per kernel with only the
 //! bindings that kernel touches (WebGPU allows eight storage buffers per stage), and the frame's
-//! dispatch order: append, then per substep sort, predict, constrain, derive velocities and
-//! couple to the bodies, and finally re-sort and extract the surface.
+//! dispatch order: thin if due, append, then per substep sort, predict, constrain, derive
+//! velocities and couple to the bodies, and finally re-sort and extract the surface.
 use bevy::core_pipeline::schedule::camera_driver;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
@@ -19,11 +19,13 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
 use super::frame::{ACCUMULATORS_PER_BODY, FluidFrame, GpuBodies, Params, STAMP_SLOT};
-use super::surface::{self, SurfaceBuffers, SurfaceParams};
-use super::{FluidReady, Grid, ITERATIONS, MAX_BODIES, MAX_PARTICLES, MAX_SAMPLES};
+use super::surface::{self, SurfaceBuffers, SurfaceParams, TABLE_SLOTS};
+use super::{FluidReady, ITERATIONS, MAX_BODIES, MAX_PARTICLES, MAX_SAMPLES, TABLE_CELLS};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
+/// Threads per workgroup of the particle kernels, and of the scan's.
 const WORKGROUP: u32 = 64;
+const SCAN_THREADS: usize = 256;
 const ACCUMULATORS: usize = ACCUMULATORS_PER_BODY * MAX_BODIES;
 
 #[derive(Resource, Clone, ExtractResource)]
@@ -39,6 +41,10 @@ pub struct FluidBuffers {
     pub cell_start: Handle<ShaderBuffer>,
     pub slot: Handle<ShaderBuffer>,
     pub pending: Handle<ShaderBuffer>,
+    /// The cell key of every particle, in sorted order.
+    pub key: Handle<ShaderBuffer>,
+    /// The scan's per-run totals.
+    pub run_total: Handle<ShaderBuffer>,
     pub samples: Handle<ShaderBuffer>,
     pub boundary: Handle<ShaderBuffer>,
     pub sample_state: Handle<ShaderBuffer>,
@@ -46,14 +52,11 @@ pub struct FluidBuffers {
     pub surface: SurfaceBuffers,
 }
 
-pub fn create_buffers(
-    assets: &mut Assets<ShaderBuffer>,
-    grid: &Grid,
-    surface_grid: &Grid,
-) -> FluidBuffers {
+pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
     let mut make = |bytes: usize| {
         let mut buffer = ShaderBuffer::with_size(bytes, default());
-        buffer.buffer_description.usage |= BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+        buffer.buffer_description.usage |=
+            BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::INDIRECT;
         assets.add(buffer)
     };
     let vec4s = |n: usize| n * 16;
@@ -65,15 +68,17 @@ pub fn create_buffers(
         pred_a: make(vec4s(MAX_PARTICLES)),
         pred_b: make(vec4s(MAX_PARTICLES)),
         contact: make(vec4s(2 * MAX_PARTICLES)),
-        cell_count: make(grid.cells() * 4),
-        cell_start: make((grid.cells() + 1) * 4),
-        slot: make(MAX_PARTICLES * 4),
+        cell_count: make(TABLE_CELLS * 4),
+        cell_start: make((TABLE_CELLS + 1) * 4),
+        slot: make(vec4s(MAX_PARTICLES)),
         pending: make(vec4s(2 * MAX_PARTICLES)),
+        key: make(MAX_PARTICLES * 4),
+        run_total: make(TABLE_CELLS.div_ceil(SCAN_THREADS) * 4),
         samples: make(vec4s(MAX_SAMPLES)),
         boundary: make(vec4s(2 * MAX_SAMPLES)),
         sample_state: make(vec4s(2 * MAX_SAMPLES)),
         accum: make(ACCUMULATORS * 4),
-        surface: surface::create_buffers(&mut make, surface_grid),
+        surface: surface::create_buffers(&mut make),
     }
 }
 
@@ -88,8 +93,11 @@ pub fn install(render_app: &mut SubApp) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kernel {
     Count,
-    Scan,
+    ScanRuns,
+    ScanTotals,
+    AddOffsets,
     Scatter,
+    Thin,
     Predict,
     Inject,
     Lambda,
@@ -99,6 +107,9 @@ enum Kernel {
     Place,
     Buoyancy,
     Drag,
+    Mark,
+    List,
+    PrepareDispatch,
     Density,
     PlaceVertices,
     PlaceQuads,
@@ -121,14 +132,16 @@ struct Spec {
     surface: &'static [u32],
     /// (group, binding) pairs the kernel only reads, which the layout must say too.
     read_only: &'static [(usize, u32)],
+    /// Threads per workgroup, as the kernel declares.
+    workgroup: u32,
 }
 
 const NONE: &[(usize, u32)] = &[];
 const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (2, 2), (2, 3)];
-const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (2, 1)];
-const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 9)];
+const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12), (2, 1)];
+const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 15] = [
+const SPECS: [Spec; 21] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -138,26 +151,62 @@ const SPECS: [Spec; 15] = [
         bodies: &[],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::Scan,
+        kernel: Kernel::ScanRuns,
         shader: SORT,
-        entry: "scan",
-        particles: &[0, 8, 9],
+        entry: "scan_runs",
+        particles: &[0, 8, 9, 13],
         vessel: false,
         bodies: &[],
         surface: &[],
         read_only: NONE,
+        workgroup: SCAN_THREADS as u32,
+    },
+    Spec {
+        kernel: Kernel::ScanTotals,
+        shader: SORT,
+        entry: "scan_totals",
+        particles: &[0, 9, 13],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        read_only: NONE,
+        workgroup: SCAN_THREADS as u32,
+    },
+    Spec {
+        kernel: Kernel::AddOffsets,
+        shader: SORT,
+        entry: "add_offsets",
+        particles: &[0, 9, 13],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        read_only: NONE,
+        workgroup: SCAN_THREADS as u32,
     },
     Spec {
         kernel: Kernel::Scatter,
         shader: PARTICLES,
         entry: "scatter",
-        particles: &[0, 1, 2, 3, 4, 9, 10],
+        particles: &[0, 1, 2, 3, 4, 9, 10, 12],
         vessel: true,
         bodies: &[],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Thin,
+        shader: PARTICLES,
+        entry: "thin",
+        particles: &[0, 1, 2, 3, 4],
+        vessel: true,
+        bodies: &[],
+        surface: &[],
+        read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Predict,
@@ -168,6 +217,7 @@ const SPECS: [Spec; 15] = [
         bodies: &[],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Inject,
@@ -178,26 +228,29 @@ const SPECS: [Spec; 15] = [
         bodies: &[],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Lambda,
         shader: PARTICLES,
         entry: "lambda",
-        particles: &[0, 5, 9],
+        particles: &[0, 5, 9, 12],
         vessel: true,
         bodies: &[0, 2],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Delta,
         shader: PARTICLES,
         entry: "delta",
-        particles: &[0, 5, 6, 7, 9],
+        particles: &[0, 5, 6, 7, 9, 12],
         vessel: true,
         bodies: &[0, 2],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::UpdateVelocities,
@@ -208,16 +261,18 @@ const SPECS: [Spec; 15] = [
         bodies: &[],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Viscosity,
         shader: PARTICLES,
         entry: "viscosity",
-        particles: &[0, 1, 2, 4, 7, 9],
+        particles: &[0, 1, 2, 4, 7, 9, 12],
         vessel: true,
         bodies: &[0, 2, 3],
         surface: &[],
         read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Place,
@@ -228,36 +283,73 @@ const SPECS: [Spec; 15] = [
         bodies: &[0, 1, 2],
         surface: &[],
         read_only: BODY_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Buoyancy,
         shader: BODIES,
         entry: "buoyancy",
-        particles: &[0, 1, 2, 9],
+        particles: &[0, 1, 2, 9, 12],
         vessel: true,
         bodies: &[0, 2, 3, 4],
         surface: &[],
         read_only: BODY_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Drag,
         shader: BODIES,
         entry: "drag",
-        particles: &[0, 1, 2, 4, 9],
+        particles: &[0, 1, 2, 4, 9, 12],
         vessel: false,
         bodies: &[0, 2, 4],
         surface: &[],
         read_only: BODY_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Mark,
+        shader: SURFACE,
+        entry: "mark",
+        particles: &[0, 1],
+        vessel: true,
+        bodies: &[],
+        surface: &[0, 6],
+        read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::List,
+        shader: SURFACE,
+        entry: "list",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[0, 5, 6, 7, 8],
+        read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::PrepareDispatch,
+        shader: SURFACE,
+        entry: "prepare_dispatch",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[0, 5, 9],
+        read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Density,
         shader: SURFACE,
         entry: "density",
-        particles: &[0, 1, 9],
-        vessel: false,
+        particles: &[0, 1, 9, 12],
+        vessel: true,
         bodies: &[],
-        surface: &[0, 1],
+        surface: &[0, 1, 8],
         read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::PlaceVertices,
@@ -266,8 +358,9 @@ const SPECS: [Spec; 15] = [
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 1, 2, 3, 5],
+        surface: &[0, 1, 2, 3, 5, 8],
         read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::PlaceQuads,
@@ -276,8 +369,9 @@ const SPECS: [Spec; 15] = [
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 1, 2, 4, 5],
+        surface: &[0, 1, 2, 4, 5, 6, 7, 8],
         read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
     },
 ];
 
@@ -313,6 +407,7 @@ struct KernelGroups {
 struct BindGroups {
     kernels: Vec<[KernelGroups; 2]>,
     empty: BindGroup,
+    thin_offset: Option<u32>,
     inject_offset: u32,
     surface_offset: u32,
     params_offsets: Vec<u32>,
@@ -327,6 +422,8 @@ struct RawBuffers {
     velocity_next: Buffer,
     cell_count: Buffer,
     counters: Buffer,
+    table: Buffer,
+    dispatch: Buffer,
 }
 
 fn init_pipelines(
@@ -441,6 +538,8 @@ fn prepare(
             &buffers.cell_start,
             &buffers.slot,
             &buffers.pending,
+            &buffers.key,
+            &buffers.run_total,
         ]),
         all(&[
             &buffers.samples,
@@ -458,15 +557,15 @@ fn prepare(
     if !frame.pending.is_empty() {
         queue.write_buffer(&particles[10], 0, bytemuck::cast_slice(&frame.pending));
     }
-    let stamp = [frame.substeps.len() as u32, frame.ticket];
     queue.write_buffer(
         &bodies[3],
         (STAMP_SLOT * 4) as u64,
-        bytemuck::cast_slice(&stamp),
+        bytemuck::cast_slice(&[frame.ticket]),
     );
 
     uniforms.params.clear();
     uniforms.bodies.clear();
+    let thin_offset = frame.thin.as_ref().map(|thin| uniforms.params.push(thin));
     let inject_offset = uniforms.params.push(&frame.inject);
     let surface_offset = uniforms.params.push(&frame.surface);
     let params_offsets: Vec<u32> = frame
@@ -541,6 +640,7 @@ fn prepare(
     commands.insert_resource(BindGroups {
         kernels,
         empty,
+        thin_offset,
         inject_offset,
         surface_offset,
         params_offsets,
@@ -553,7 +653,17 @@ fn prepare(
         velocity_next: particles[3].clone(),
         cell_count: particles[7].clone(),
         counters: surface[4].clone(),
+        table: surface[5].clone(),
+        dispatch: surface[8].clone(),
     });
+}
+
+/// How many threads a kernel runs: a count of them, or one workgroup per block the surface
+/// kernels' own dispatch buffer names.
+#[derive(Clone, Copy)]
+enum Threads<'a> {
+    Count(u32),
+    PerBlock(&'a Buffer),
 }
 
 struct Dispatch<'a> {
@@ -580,7 +690,7 @@ impl Dispatch<'_> {
         params_offset: u32,
         bodies_offset: u32,
         vessel_offset: u32,
-        threads: u32,
+        threads: Threads,
     ) {
         let index = SPECS.iter().position(|s| s.kernel == kernel).unwrap_or(0);
         let (spec, pipeline) = (&SPECS[index], &self.pipelines.items[index]);
@@ -611,7 +721,10 @@ impl Dispatch<'_> {
         if pipeline.groups > 3 {
             pass.set_bind_group(3, &groups.surface, &[]);
         }
-        pass.dispatch_workgroups(threads.div_ceil(WORKGROUP).max(1), 1, 1);
+        match threads {
+            Threads::Count(n) => pass.dispatch_workgroups(n.div_ceil(spec.workgroup).max(1), 1, 1),
+            Threads::PerBlock(buffer) => pass.dispatch_workgroups_indirect(buffer, 0),
+        }
     }
 }
 
@@ -624,7 +737,6 @@ fn dispatch(
     raw: Option<Res<RawBuffers>>,
     vessel: Option<Res<VesselBinding>>,
     frame: Res<FluidFrame>,
-    surface_params: Res<SurfaceParams>,
     ready: Res<FluidReady>,
 ) {
     let (Some(groups), Some(raw), Some(vessel)) = (groups, raw, vessel) else {
@@ -643,7 +755,28 @@ fn dispatch(
     let vessel_now = *vessel.offsets.last().unwrap_or(&0);
     let encoder = render_context.command_encoder();
     let bytes = |n: u32| n as u64 * 16;
+    let bin = |encoder: &mut CommandEncoder, po: u32, vo: u32, count: u32| {
+        encoder.clear_buffer(&raw.cell_count, 0, None);
+        let threads = Threads::Count(count);
+        d.run(encoder, Kernel::Count, 0, po, 0, vo, threads);
+        let cells = Threads::Count(TABLE_CELLS as u32);
+        d.run(encoder, Kernel::ScanRuns, 0, po, 0, vo, cells);
+        d.run(encoder, Kernel::ScanTotals, 0, po, 0, vo, Threads::Count(1));
+        d.run(encoder, Kernel::AddOffsets, 0, po, 0, vo, cells);
+        d.run(encoder, Kernel::Scatter, 0, po, 0, vo, threads);
+    };
+    let sort = |encoder: &mut CommandEncoder, po: u32, vo: u32, count: u32| {
+        bin(encoder, po, vo, count);
+        encoder.copy_buffer_to_buffer(&raw.position_sorted, 0, &raw.position, 0, bytes(count));
+        encoder.copy_buffer_to_buffer(&raw.velocity_next, 0, &raw.velocity, 0, bytes(count));
+    };
+    if let (Some(thin), Some(to)) = (&frame.thin, groups.thin_offset) {
+        bin(encoder, to, vessel_now, thin.count);
+        let remaining = Threads::Count(thin.pending);
+        d.run(encoder, Kernel::Thin, 0, to, 0, vessel_now, remaining);
+    }
     if frame.inject.pending > 0 {
+        let joining = Threads::Count(frame.inject.pending);
         d.run(
             encoder,
             Kernel::Inject,
@@ -651,42 +784,18 @@ fn dispatch(
             groups.inject_offset,
             0,
             vessel_now,
-            frame.inject.pending,
+            joining,
         );
     }
-    let sort =
-        |encoder: &mut CommandEncoder, params_offset: u32, vessel_offset: u32, count: u32| {
-            encoder.clear_buffer(&raw.cell_count, 0, None);
-            d.run(
-                encoder,
-                Kernel::Count,
-                0,
-                params_offset,
-                0,
-                vessel_offset,
-                count,
-            );
-            d.run(encoder, Kernel::Scan, 0, params_offset, 0, vessel_offset, 1);
-            d.run(
-                encoder,
-                Kernel::Scatter,
-                0,
-                params_offset,
-                0,
-                vessel_offset,
-                count,
-            );
-            encoder.copy_buffer_to_buffer(&raw.position_sorted, 0, &raw.position, 0, bytes(count));
-            encoder.copy_buffer_to_buffer(&raw.velocity_next, 0, &raw.velocity, 0, bytes(count));
-        };
     for (k, substep) in frame.substeps.iter().enumerate() {
         let (po, bo) = (groups.params_offsets[k], groups.bodies_offsets[k]);
         let vo = vessel.offsets.get(k).copied().unwrap_or(vessel_now);
-        let count = substep.params.count;
-        let samples = substep.params.sample_count;
-        sort(encoder, po, vo, count);
+        let count = Threads::Count(substep.params.count);
+        let samples = Threads::Count(substep.params.sample_count);
+        let coupled = substep.params.sample_count > 0;
+        sort(encoder, po, vo, substep.params.count);
         d.run(encoder, Kernel::Predict, 0, po, bo, vo, count);
-        if samples > 0 {
+        if coupled {
             d.run(encoder, Kernel::Place, 0, po, bo, vo, samples);
         }
         let mut variant = 0;
@@ -704,45 +813,35 @@ fn dispatch(
             vo,
             count,
         );
-        if samples > 0 {
+        if coupled {
             d.run(encoder, Kernel::Buoyancy, 0, po, bo, vo, samples);
         }
         d.run(encoder, Kernel::Viscosity, 0, po, bo, vo, count);
-        if samples > 0 {
+        if coupled {
             d.run(encoder, Kernel::Drag, 0, po, bo, vo, samples);
         }
-        encoder.copy_buffer_to_buffer(&raw.velocity_next, 0, &raw.velocity, 0, bytes(count));
+        encoder.copy_buffer_to_buffer(
+            &raw.velocity_next,
+            0,
+            &raw.velocity,
+            0,
+            bytes(substep.params.count),
+        );
     }
     if frame.changed {
         let so = groups.surface_offset;
+        let count = Threads::Count(frame.surface.count);
+        let blocks = Threads::PerBlock(&raw.dispatch);
         sort(encoder, so, vessel_now, frame.surface.count);
         encoder.clear_buffer(&raw.counters, 0, None);
-        d.run(
-            encoder,
-            Kernel::Density,
-            0,
-            so,
-            0,
-            vessel_now,
-            surface_params.corners(),
-        );
-        d.run(
-            encoder,
-            Kernel::PlaceVertices,
-            0,
-            so,
-            0,
-            vessel_now,
-            surface_params.cells(),
-        );
-        d.run(
-            encoder,
-            Kernel::PlaceQuads,
-            0,
-            so,
-            0,
-            vessel_now,
-            surface_params.cells(),
-        );
+        encoder.clear_buffer(&raw.table, 0, None);
+        d.run(encoder, Kernel::Mark, 0, so, 0, vessel_now, count);
+        let slots = Threads::Count(TABLE_SLOTS as u32);
+        d.run(encoder, Kernel::List, 0, so, 0, vessel_now, slots);
+        let one = Threads::Count(1);
+        d.run(encoder, Kernel::PrepareDispatch, 0, so, 0, vessel_now, one);
+        d.run(encoder, Kernel::Density, 0, so, 0, vessel_now, blocks);
+        d.run(encoder, Kernel::PlaceVertices, 0, so, 0, vessel_now, blocks);
+        d.run(encoder, Kernel::PlaceQuads, 0, so, 0, vessel_now, blocks);
     }
 }

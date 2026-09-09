@@ -1,8 +1,12 @@
 //! Position-based fluid (Macklin & Müller 2013) solved on the GPU with Akinci-style coupling to
 //! rigid bodies, confined by a vessel the shaders describe. The CPU only keeps the particle count,
 //! feeds in new particles and body poses each frame, and reads back what the water did to the
-//! bodies. SI units throughout; the particle spacing fixes the kernel and the rest mass.
-use std::f32::consts::PI;
+//! bodies. SI units throughout.
+//!
+//! The particles are binned by a hash of their grid cell and the surface is meshed only where
+//! the water is, so neither the vessel's size nor the water's extent costs anything: the work is
+//! the number of particles, which is capped. Water past the cap is made coarser instead, every
+//! particle standing for twice as much of it, so any amount of water fits the same budget.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,14 +20,17 @@ use bevy::shader::Shader;
 
 use crate::core::math::Rng;
 use crate::core::rigid::{Body, BodyShape, WaterCoupling};
-use crate::core::units::Seconds;
+use crate::core::units::{Litres, MetresPerSecond, Seconds};
 
 mod frame;
 mod gpu;
+mod resolution;
 mod surface;
 
 pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
 pub use gpu::FluidBuffers;
+pub use resolution::{REST_DENSITY, Resolution};
+pub use surface::{MAX_INDICES, SurfaceBuffers, SurfaceParams};
 
 /// Set by the render world once every kernel has compiled and the vessel is bound; until then
 /// nothing is handed to the GPU, so nothing is lost.
@@ -39,37 +46,20 @@ impl FluidReady {
         self.0.store(true, Ordering::Relaxed);
     }
 }
-pub use surface::{MAX_INDICES, SurfaceBuffers, SurfaceParams};
 
-/// Rest spacing between particles (m); every kernel constant derives from it.
-pub const PARTICLE_SPACING: f32 = 0.32;
-pub const H: f32 = 2.0 * PARTICLE_SPACING;
-pub const H2: f32 = H * H;
-pub const REST_DENSITY: f32 = 1000.0;
-pub const PARTICLE_MASS: f32 =
-    REST_DENSITY * PARTICLE_SPACING * PARTICLE_SPACING * PARTICLE_SPACING;
 pub const MAX_PARTICLES: usize = 65536;
+/// Slots of the cell table the particles are sorted into: the box in `common.wgsl`.
+pub const TABLE_CELLS: usize = 64 * 32 * 64;
 /// Bodies the shaders reserve room for.
 pub const MAX_BODIES: usize = 16;
 /// Boundary samples over all solid bodies.
 pub const MAX_SAMPLES: usize = 2048;
 /// Substeps a single frame may run; beyond that the simulation falls behind real time.
 pub const MAX_SUBSTEPS_PER_FRAME: usize = 4;
-pub const POLY6: f32 = 315.0 / (64.0 * PI * H * H * H * H * H * H * H * H * H);
-/// Safety clamps well above anything the drum's rim reaches.
-pub const MAX_SPEED: f32 = 40.0;
-pub const MAX_SPEED_BODY: f64 = 40.0;
-const SPIKY: f32 = -45.0 / (PI * H * H * H * H * H * H);
-const W0: f32 = POLY6 * H2 * H2 * H2;
 const EPS_LAMBDA: f32 = 0.02;
 const ITERATIONS: usize = 3;
 const SCORR_K: f32 = 0.001;
-const SCORR_DQ: f32 = 0.3 * H;
-const SCORR_WQ: f32 =
-    POLY6 * (H2 - SCORR_DQ * SCORR_DQ) * (H2 - SCORR_DQ * SCORR_DQ) * (H2 - SCORR_DQ * SCORR_DQ);
-const MAX_DELTA: f32 = 0.5 * PARTICLE_SPACING;
 const WET_REF: f32 = 300.0;
-const MARGIN: f32 = PARTICLE_SPACING * 0.5;
 const SHADERS: [&str; 5] = [
     "embedded://game/core/fluid/shaders/common.wgsl",
     "embedded://game/core/fluid/shaders/particles.wgsl",
@@ -86,6 +76,8 @@ pub struct FluidParams {
     pub air: bool,
     /// Time constant for the vessel's air to drag free water along with its walls.
     pub air_tau: Seconds,
+    /// A safety clamp on the particles' speed, well above anything the vessel's walls reach.
+    pub max_speed: MetresPerSecond,
 }
 
 impl Default for FluidParams {
@@ -96,6 +88,7 @@ impl Default for FluidParams {
             body_drag: 0.5,
             air: true,
             air_tau: Seconds(12.0),
+            max_speed: MetresPerSecond(40.0),
         }
     }
 }
@@ -109,46 +102,19 @@ pub struct Particle {
     pub foam: f32,
 }
 
-/// The axis-aligned cells the particles are sorted into.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Grid {
-    pub min: [f32; 3],
-    pub dims: [i32; 3],
-    pub cell: f32,
-}
-
-impl Grid {
-    pub fn new(min: [f32; 3], max: [f32; 3], cell: f32) -> Self {
-        Grid {
-            min,
-            dims: [0, 1, 2].map(|a| ((max[a] - min[a]) / cell).ceil() as i32 + 1),
-            cell,
-        }
-    }
-
-    /// The grid over the box reaching `extent` from the origin each way.
-    pub fn around(extent: [f32; 3], cell: f32) -> Self {
-        Grid::new(extent.map(|e| -e), extent, cell)
-    }
-
-    pub fn cells(&self) -> usize {
-        (self.dims[0] * self.dims[1] * self.dims[2]) as usize
-    }
-}
-
-/// The fluid as the CPU sees it: how many particles live on the GPU, what is about to join
-/// them, the most recent copy read back, and what the water did to the bodies last frame.
+/// The fluid as the CPU sees it: how many particles live on the GPU and how much water each
+/// stands for, what is about to join them, the most recent copy read back, and what the water
+/// did to the bodies last frame.
 #[derive(Resource)]
 pub struct Fluid {
-    /// The box the buffers were sized for, and the part of it in use.
-    capacity: [f32; 3],
-    extent: [f32; 3],
-    grid: Grid,
-    surface: SurfaceParams,
+    resolution: Resolution,
     count: u32,
+    /// The particle count before a thinning this frame, if one is due.
+    thin: Option<u32>,
     pending: Vec<Particle>,
     changed: bool,
-    shapes: Vec<frame::ShapeSamples>,
+    shapes: Vec<frame::ShapePoints>,
+    layout: Vec<frame::ShapeSamples>,
     samples: Option<Vec<[f32; 4]>>,
     snapshot: Snapshot,
     coupling: Option<Vec<WaterCoupling>>,
@@ -173,6 +139,28 @@ struct Snapshot {
     parts: u8,
 }
 
+impl Default for Fluid {
+    fn default() -> Self {
+        Fluid {
+            resolution: Resolution::FINEST,
+            count: 0,
+            thin: None,
+            pending: Vec::new(),
+            changed: true,
+            shapes: Vec::new(),
+            layout: Vec::new(),
+            samples: None,
+            snapshot: Snapshot::default(),
+            coupling: None,
+            totals: Vec::new(),
+            issued: 0,
+            reported: 0,
+            timeline: Vec::new(),
+            rng: Rng::new(0x9E3779B97F4A7C15),
+        }
+    }
+}
+
 impl Fluid {
     pub fn len(&self) -> usize {
         self.count as usize
@@ -182,35 +170,28 @@ impl Fluid {
         self.count == 0
     }
 
-    pub fn is_full(&self) -> bool {
-        self.count as usize >= MAX_PARTICLES
+    pub fn resolution(&self) -> Resolution {
+        self.resolution
     }
 
-    pub fn grid(&self) -> Grid {
-        self.grid
+    /// How much water there is.
+    pub fn litres(&self) -> Litres {
+        Litres(self.count as f32 * self.resolution.litres_per_particle().0)
     }
 
-    /// The surface extraction's grid over the part of the box in use.
-    pub fn surface(&self) -> &SurfaceParams {
-        &self.surface
+    /// The surface extraction's parameters for the water as it is.
+    pub fn surface(&self) -> SurfaceParams {
+        SurfaceParams::new(self.resolution)
     }
 
-    /// Sort and extract over the box reaching `extent` from the origin each way, within what
-    /// the buffers were sized for; the particles themselves are untouched.
-    pub fn fit(&mut self, extent: [f32; 3]) {
-        let extent = [0, 1, 2].map(|a| extent[a].clamp(0.0, self.capacity[a]));
-        if extent == self.extent {
-            return;
-        }
-        self.extent = extent;
-        self.grid = Grid::around(extent, H);
-        self.surface = SurfaceParams::new(&surface::grid(extent));
-        self.changed = true;
-    }
-
+    /// Add a particle of the current resolution. When the budget is full the water is made
+    /// coarser first, which frees half of it; only a second fill within one frame is refused.
     pub fn add(&mut self, p: Particle) -> bool {
-        if self.is_full() {
-            return false;
+        if self.count as usize >= MAX_PARTICLES {
+            if self.thin.is_some() {
+                return false;
+            }
+            self.coarsen();
         }
         self.count += 1;
         self.pending.push(p);
@@ -227,7 +208,7 @@ impl Fluid {
         count: u32,
         mut place: impl FnMut([f32; 3]) -> [f32; 3],
     ) -> u32 {
-        let spread = 2.5 * PARTICLE_SPACING;
+        let spread = 2.5 * self.resolution.spacing.0;
         let jitter = 0.3;
         let mut added = 0;
         for _ in 0..count {
@@ -254,26 +235,34 @@ impl Fluid {
         added
     }
 
+    /// Remove all water; what comes next starts out as fine as water gets.
     pub fn clear(&mut self) {
+        self.restore(Resolution::FINEST);
+    }
+
+    /// Remove all water and take this resolution for what is added next, as when saved water
+    /// is loaded back.
+    pub fn restore(&mut self, resolution: Resolution) {
         self.count = 0;
+        self.thin = None;
         self.pending.clear();
-        self.changed = true;
+        self.set_resolution(resolution);
     }
 
     /// The bodies' shapes, whose boundary samples the water couples to. Bodies name them by
     /// index when a frame is packed.
     pub fn set_shapes(&mut self, shapes: &[BodyShape]) {
-        let (layout, samples) = frame::sample_table(shapes);
-        self.shapes = layout;
-        self.samples = Some(samples);
+        self.shapes = shapes.iter().map(frame::ShapePoints::of).collect();
+        self.reweight();
     }
 
     /// Body state for one substep, as the shaders read it.
     pub fn pack(&self, bodies: &[Body], shapes: &[BodyShape]) -> Bodies {
-        frame::pack(bodies, shapes, &self.shapes)
+        frame::pack(bodies, shapes, &self.layout)
     }
 
-    /// What the GPU should run this frame: append what joined, then step the substeps.
+    /// What the GPU should run this frame: thin the water if it is due, append what joined,
+    /// then step the substeps.
     pub fn frame(&mut self, params: &FluidParams, substeps: &[(Seconds, Bodies)]) -> FluidFrame {
         let count_before = self.count - self.pending.len() as u32;
         let pending = self
@@ -292,18 +281,23 @@ impl Fluid {
             substeps.iter().map(|(dt, _)| dt.0 as f64).sum(),
             substeps.len() as f64,
         ));
+        let res = self.resolution;
+        let still = Bodies::default();
         let frame = FluidFrame {
             ticket: self.issued,
+            thin: self.thin.take().map(|before| {
+                Params::new(0.0, params, res, before, &still).with_pending(count_before)
+            }),
             substeps: substeps
                 .iter()
                 .map(|(dt, bodies)| Substep {
-                    params: Params::new(dt.0, params, self.count, bodies, &self.grid),
+                    params: Params::new(dt.0, params, res, self.count, bodies),
                     bodies: bodies.clone(),
                 })
                 .collect(),
-            inject: Params::new(0.0, params, count_before, &Bodies::default(), &self.grid)
+            inject: Params::new(0.0, params, res, count_before, &still)
                 .with_pending(pending.len() as u32 / 2),
-            surface: Params::new(0.0, params, self.count, &Bodies::default(), &self.grid),
+            surface: Params::new(0.0, params, res, self.count, &still),
             pending,
             samples: self.samples.take(),
             changed: self.changed || !substeps.is_empty(),
@@ -361,6 +355,29 @@ impl Fluid {
         self.coupling.take()
     }
 
+    /// Every particle stands for twice the water from now on: the GPU keeps every other one of
+    /// those it has, and whatever is waiting to join them joins the rest.
+    fn coarsen(&mut self) {
+        let waiting = self.pending.len() as u32;
+        let on_gpu = self.count - waiting;
+        self.thin = Some(on_gpu);
+        self.count = on_gpu.div_ceil(2) + waiting;
+        self.set_resolution(self.resolution.coarser());
+    }
+
+    fn set_resolution(&mut self, resolution: Resolution) {
+        self.resolution = resolution;
+        self.reweight();
+        self.changed = true;
+    }
+
+    /// Boundary sample weights follow the kernel, so they are redone with the resolution.
+    fn reweight(&mut self) {
+        let (layout, samples) = frame::sample_table(&self.shapes, self.resolution);
+        self.layout = layout;
+        self.samples = Some(samples);
+    }
+
     /// The simulated time and substeps of every frame up to this ticket, whose coupling has
     /// now come back.
     fn settle(&mut self, ticket: u32) -> (f64, f64) {
@@ -384,12 +401,9 @@ impl Fluid {
     }
 }
 
-/// The GPU fluid, with room for the box reaching `extent` from the origin each way; the vessel
-/// plugin must supply the shaders' `vessel` module and the render world's
-/// [`VesselLayout`](crate::core::vessel::VesselLayout).
-pub struct FluidPlugin {
-    pub extent: [f32; 3],
-}
+/// The GPU fluid; the vessel plugin must supply the shaders' `vessel` module and the render
+/// world's [`VesselLayout`](crate::core::vessel::VesselLayout).
+pub struct FluidPlugin;
 
 impl Plugin for FluidPlugin {
     fn build(&self, app: &mut App) {
@@ -401,41 +415,19 @@ impl Plugin for FluidPlugin {
         let shaders = FluidShaders(
             SHADERS.map(|path| app.world().resource::<AssetServer>().load::<Shader>(path)),
         );
-        let grid = Grid::around(self.extent, H);
-        let surface_grid = surface::grid(self.extent);
-        let buffers = gpu::create_buffers(
-            &mut app.world_mut().resource_mut::<Assets<ShaderBuffer>>(),
-            &grid,
-            &surface_grid,
-        );
+        let buffers =
+            gpu::create_buffers(&mut app.world_mut().resource_mut::<Assets<ShaderBuffer>>());
         let ready = FluidReady::default();
         app.insert_resource(ready.clone())
-            .insert_resource(Fluid {
-                capacity: self.extent,
-                extent: self.extent,
-                grid,
-                surface: surface::SurfaceParams::new(&surface_grid),
-                count: 0,
-                pending: Vec::new(),
-                changed: true,
-                shapes: Vec::new(),
-                samples: None,
-                snapshot: Snapshot::default(),
-                coupling: None,
-                totals: Vec::new(),
-                issued: 0,
-                reported: 0,
-                timeline: Vec::new(),
-                rng: Rng::new(0x9E3779B97F4A7C15),
-            })
+            .init_resource::<Fluid>()
             .insert_resource(buffers)
             .insert_resource(shaders)
-            .insert_resource(surface::SurfaceParams::new(&surface_grid))
+            .insert_resource(SurfaceParams::new(Resolution::FINEST))
             .init_resource::<FluidFrame>()
             .add_plugins((
                 ExtractResourcePlugin::<FluidBuffers>::default(),
                 ExtractResourcePlugin::<FluidFrame>::default(),
-                ExtractResourcePlugin::<surface::SurfaceParams>::default(),
+                ExtractResourcePlugin::<SurfaceParams>::default(),
             ))
             .add_systems(Startup, watch_impulses)
             .add_systems(PostUpdate, sync_surface);
@@ -448,10 +440,11 @@ impl Plugin for FluidPlugin {
 #[derive(Resource)]
 struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 5]);
 
-/// Hand the render world the surface grid in use once it changes.
+/// Hand the render world the surface parameters once they change.
 fn sync_surface(fluid: Res<Fluid>, mut surface: ResMut<SurfaceParams>) {
-    if *surface != *fluid.surface() {
-        *surface = fluid.surface().clone();
+    let wanted = fluid.surface();
+    if *surface != wanted {
+        *surface = wanted;
     }
 }
 
@@ -463,13 +456,12 @@ fn watch_impulses(mut commands: Commands, buffers: Res<FluidBuffers>) {
 
 fn receive_coupling(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
     let raw: Vec<i32> = event.to_shader_type();
-    let (substeps, ticket) = match raw.get(frame::STAMP_SLOT..frame::STAMP_SLOT + 2) {
-        Some([substeps, ticket]) => (*substeps as u32, *ticket as u32),
-        _ => (0, fluid.reported),
-    };
+    let ticket = raw
+        .get(frame::STAMP_SLOT)
+        .map_or(fluid.reported, |t| *t as u32);
     fluid.reported = ticket;
     let (seconds, taken) = fluid.settle(ticket);
-    if substeps == 0 {
+    if taken == 0.0 {
         return;
     }
     if fluid.totals.len() != raw.len() {

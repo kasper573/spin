@@ -59,6 +59,78 @@ pub fn norm(v: &Vec3d) -> f64 {
     dot(v, v).sqrt()
 }
 
+/// Hamilton product of two quaternions (x, y, z, w): the rotation `b` then `a`.
+pub fn quat_mul(a: &Quatd, b: &Quatd) -> Quatd {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+pub fn quat_conjugate(q: &Quatd) -> Quatd {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// A vector turned by a unit quaternion.
+pub fn quat_rotate(q: &Quatd, v: &Vec3d) -> Vec3d {
+    let u = [q[0], q[1], q[2]];
+    let uv = cross(&u, v);
+    let uuv = cross(&u, &uv);
+    let mut out = *v;
+    add_scaled(&mut out, &uv, 2.0 * q[3]);
+    add_scaled(&mut out, &uuv, 2.0);
+    out
+}
+
+/// A unit quaternion turned by an angular velocity (world frame) for `dt`, renormalised.
+pub fn quat_integrate(q: &Quatd, w: &Vec3d, dt: f64) -> Quatd {
+    let [qx, qy, qz, qw] = *q;
+    let mut out = [
+        qx + 0.5 * (w[0] * qw + w[1] * qz - w[2] * qy) * dt,
+        qy + 0.5 * (w[1] * qw + w[2] * qx - w[0] * qz) * dt,
+        qz + 0.5 * (w[2] * qw + w[0] * qy - w[1] * qx) * dt,
+        qw + 0.5 * (-w[0] * qx - w[1] * qy - w[2] * qz) * dt,
+    ];
+    let l = out.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-12);
+    for x in &mut out {
+        *x /= l;
+    }
+    out
+}
+
+/// The shortest rotation taking the unit vector `a` onto the unit vector `b`.
+pub fn quat_between(a: &Vec3d, b: &Vec3d) -> Quatd {
+    let c = cross(a, b);
+    let w = 1.0 + dot(a, b);
+    if w < 1e-9 {
+        let helper = if a[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let axis = cross(a, &helper);
+        let l = norm(&axis).max(1e-12);
+        return [axis[0] / l, axis[1] / l, axis[2] / l, 0.0];
+    }
+    let l = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2] + w * w).sqrt();
+    [c[0] / l, c[1] / l, c[2] / l, w / l]
+}
+
+/// The rotation a unit quaternion stands for as an axis scaled by its angle, the shorter way
+/// round.
+pub fn rotation_vector(q: &Quatd) -> Vec3d {
+    let sign = if q[3] < 0.0 { -1.0 } else { 1.0 };
+    let (x, y, z, w) = (q[0] * sign, q[1] * sign, q[2] * sign, q[3] * sign);
+    let sin_half = (x * x + y * y + z * z).sqrt();
+    if sin_half < 1e-12 {
+        return [0.0; 3];
+    }
+    let angle = 2.0 * sin_half.atan2(w.min(1.0));
+    [x, y, z].map(|c| c / sin_half * angle)
+}
+
 /// Quaternion (x, y, z, w) whose rotation maps local axes onto the given orthonormal basis.
 pub fn quat_from_basis(ex: &Vec3d, ey: &Vec3d, ez: &Vec3d) -> Quatd {
     let (m0, m1, m2) = (ex[0], ey[0], ez[0]);
