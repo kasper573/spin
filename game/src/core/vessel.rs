@@ -105,11 +105,11 @@ impl Penetrations {
 pub trait Vessel {
     /// Where the bodies' frame sits in the water's.
     fn water_frame(&self) -> WaterFrame;
-    /// The frame's own angular velocity.
+    /// The frame's own angular velocity at the end of the substep being taken, how fast it
+    /// changed over that substep, and the point of the frame it turns about.
     fn angular_velocity(&self) -> Vec3d;
-    /// The acceleration the frame's motion gives a body at rest at `p`: what it feels as
-    /// gravity there.
-    fn rest_acceleration(&self, p: Vec3d) -> Vec3d;
+    fn angular_acceleration(&self) -> Vec3d;
+    fn pivot(&self) -> Vec3d;
     /// Whether the vessel's air, which rests in its frame, is at `p`.
     fn has_air(&self, p: Vec3d) -> bool;
     /// The velocity, in the frame, of something at rest among the stars at `p`.

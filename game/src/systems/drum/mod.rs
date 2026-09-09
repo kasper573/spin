@@ -163,9 +163,11 @@ impl Drum {
         let d = (self.target_spin.0 - self.spin.0) as f64;
         let max = SPIN_ACCEL * dt;
         let change = d.clamp(-max, max);
+        let before = self.spin.0 as f64;
         self.spin.0 += change as f32;
         self.spin_rate = RadiansPerSecondSquared(if dt > 0.0 { (change / dt) as f32 } else { 0.0 });
-        self.angle.0 = (self.angle.0 + self.spin.0 as f64 * dt).rem_euclid(std::f64::consts::TAU);
+        let turned = (before + self.spin.0 as f64) / 2.0 * dt;
+        self.angle.0 = (self.angle.0 + turned).rem_euclid(std::f64::consts::TAU);
     }
 
     /// Move the site to the wall below a point of the frame, and say how the frame moved: the
@@ -392,15 +394,12 @@ impl Vessel for Drum {
         [0.0, self.spin.0 as f64, 0.0]
     }
 
-    fn rest_acceleration(&self, p: Vec3d) -> Vec3d {
-        let w = self.spin.0 as f64;
-        let a = self.spin_rate.0 as f64;
-        let radial = [self.ring.radius.0 as f64 + p[0], 0.0, p[2]];
-        [
-            w * w * radial[0] - a * radial[2],
-            0.0,
-            w * w * radial[2] + a * radial[0],
-        ]
+    fn angular_acceleration(&self) -> Vec3d {
+        [0.0, self.spin_rate.0 as f64, 0.0]
+    }
+
+    fn pivot(&self) -> Vec3d {
+        [-(self.ring.radius.0 as f64), -self.site.y, 0.0]
     }
 
     fn has_air(&self, p: Vec3d) -> bool {

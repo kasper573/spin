@@ -303,25 +303,48 @@ impl Body {
         }
     }
 
-    /// Move by a substep, with the speed and spin held under the safety clamps.
-    pub fn integrate(&mut self, dt: f64, max_speed: MetresPerSecond, max_spin: RadiansPerSecond) {
-        let sp = (self.v[0] * self.v[0] + self.v[1] * self.v[1] + self.v[2] * self.v[2]).sqrt();
+    /// Hold the speed and spin among the stars under the safety clamps: `rest` is the velocity
+    /// in the frame of something at rest among the stars here, and `spin` the frame's own
+    /// turning.
+    pub fn clamp(
+        &mut self,
+        max_speed: MetresPerSecond,
+        max_spin: RadiansPerSecond,
+        rest: &Vec3d,
+        spin: &Vec3d,
+    ) {
+        let among_stars = [
+            self.v[0] - rest[0],
+            self.v[1] - rest[1],
+            self.v[2] - rest[2],
+        ];
+        let sp = norm(&among_stars);
         if sp > max_speed.0 as f64 {
             let s = max_speed.0 as f64 / sp;
             for k in 0..3 {
-                self.v[k] *= s;
+                self.v[k] = rest[k] + among_stars[k] * s;
             }
         }
-        let ws = (self.w[0] * self.w[0] + self.w[1] * self.w[1] + self.w[2] * self.w[2]).sqrt();
+        let turning = [
+            self.w[0] + spin[0],
+            self.w[1] + spin[1],
+            self.w[2] + spin[2],
+        ];
+        let ws = norm(&turning);
         if ws > max_spin.0 as f64 {
             let s = max_spin.0 as f64 / ws;
             for k in 0..3 {
-                self.w[k] *= s;
+                self.w[k] = turning[k] * s - spin[k];
             }
         }
-        let v = self.v;
-        add_scaled(&mut self.p, &v, dt);
-        self.q = quat_integrate(&self.q, &self.w, dt);
+    }
+
+    /// Turn by a substep of the spin, which fell by `spin_up` times the substep over it as
+    /// the frame spun up: the turn is by the spin's average over the substep.
+    pub fn turn(&mut self, dt: f64, spin_up: &Vec3d) {
+        let mut average = self.w;
+        add_scaled(&mut average, spin_up, 0.5 * dt);
+        self.q = quat_integrate(&self.q, &average, dt);
         self.update_rotation();
     }
 

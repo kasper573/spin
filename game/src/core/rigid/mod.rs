@@ -6,7 +6,7 @@ mod contacts;
 pub use body::{Body, BodyShape, Ground, Hull, HullSphere, WaterCoupling};
 pub use contacts::collide_vessel;
 
-use crate::core::math::{add_scaled, quat_from_rotation_vector, quat_rotate};
+use crate::core::math::{add_scaled, cross, quat_from_rotation_vector, quat_rotate};
 use crate::core::units::{MetresPerSecond, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 
@@ -31,13 +31,20 @@ impl Default for BodyParams {
     }
 }
 
-/// One substep: apply the water's impulses (if any arrived), the vessel's frame and the air's
-/// drag, integrate, and resolve contacts with the vessel. The frame's turning is felt as the
-/// Coriolis turn of the velocity, exactly, and then as its rest acceleration; in that order,
-/// so that what the walls take back of the rest acceleration was never turned, and a body at
-/// rest on them stays at rest. The air, at rest in the frame, pushes on the hull's centre of
-/// pressure and stills its spin, so a ballasted hull that drifts through it turns
-/// ballast-first, and where there is no air nothing turns it at all.
+/// One substep: apply the water's impulses (if any arrived), carry every body through the
+/// frame's turning, apply the air's drag, integrate, and resolve contacts with the vessel.
+///
+/// The frame's turning is felt exactly: a body's motion among the stars over the substep is
+/// straight and even, and it is put back into the frame where the frame has turned to by the
+/// end of the substep, so a body flying freely keeps its motion among the stars to rounding
+/// error whatever the frame does, and what a body at rest on a wall gains is only the wall's
+/// own acceleration, which the contact takes back. A body's spin, measured in the frame,
+/// turns with the frame and falls as the frame spins up, likewise exactly. The air, at rest in
+/// the frame, pushes on the hull's centre of pressure and stills its spin, so a ballasted hull
+/// that drifts through it turns ballast-first, and where there is no air nothing turns it at
+/// all. The safety clamps on speed and spin are on the body's motion among the stars, never on
+/// its motion in the frame, so nothing the frame does can bring them down on a body that is
+/// only at rest.
 pub fn step(
     dt: f64,
     vessel: &impl Vessel,
@@ -53,7 +60,14 @@ pub fn step(
     };
     let spin = vessel.angular_velocity();
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
-    let coriolis = quat_from_rotation_vector(&spin.map(|s| -2.0 * s * dt));
+    let spin_up = vessel.angular_acceleration();
+    let pivot = vessel.pivot();
+    // the frame's spin at the start of the substep, and its turn over it
+    let mut spin_before = spin;
+    add_scaled(&mut spin_before, &spin_up, -dt);
+    let mut turn = spin.map(|s| s * dt);
+    add_scaled(&mut turn, &spin_up, -0.5 * dt * dt);
+    let carried = quat_from_rotation_vector(&turn.map(|t| -t));
     for (i, b) in bodies.iter_mut().enumerate() {
         if let Some(impulse) = water.and_then(|w| w.get(i)) {
             // water may push a body with a few times the vessel's artificial gravity, no more
@@ -61,8 +75,19 @@ pub fn step(
             let max_accel = 20.0 + 4.0 * spin_mag * spin_mag * shape.reach();
             b.couple(impulse, max_accel);
         }
-        b.v = quat_rotate(&coriolis, &b.v);
-        add_scaled(&mut b.v, &vessel.rest_acceleration(b.p), dt);
+        // straight flight among the stars, put back into the frame where it has turned to
+        let mut from_pivot = b.p;
+        add_scaled(&mut from_pivot, &pivot, -1.0);
+        let mut among_stars = cross(&spin_before, &from_pivot);
+        add_scaled(&mut among_stars, &b.v, 1.0);
+        add_scaled(&mut from_pivot, &among_stars, dt);
+        let landed = quat_rotate(&carried, &from_pivot);
+        b.p = pivot;
+        add_scaled(&mut b.p, &landed, 1.0);
+        b.v = quat_rotate(&carried, &among_stars);
+        add_scaled(&mut b.v, &cross(&spin, &landed), -1.0);
+        b.w = quat_rotate(&carried, &b.w);
+        add_scaled(&mut b.w, &spin_up, -dt);
         if air_k > 0.0 && vessel.has_air(b.p) {
             let at = b.to_world(&shapes[b.shape].hull.centre_of_pressure());
             let hull = b.point_velocity(&at);
@@ -70,7 +95,9 @@ pub fn step(
             b.apply_impulse(&impulse, &at);
             relax(&mut b.w, &[0.0; 3], air_k);
         }
-        b.integrate(dt, params.max_speed, params.max_spin);
+        let rest = vessel.star_velocity(b.p);
+        b.clamp(params.max_speed, params.max_spin, &rest, &spin);
+        b.turn(dt, &spin_up);
     }
     for b in bodies.iter_mut() {
         b.ground = None;

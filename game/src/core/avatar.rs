@@ -355,22 +355,41 @@ fn hold(body: &mut Body, thrusters: &Thrusters, gyros: &mut Gyros, vessel: &impl
         (true, Some(ground)) => Some(ground.normal),
         _ => None,
     };
-    let mut rate = match (footing, gyros.footing) {
-        (Some(now), Some(last)) => rotation_vector(&quat_between(&last, &now)).map(|c| c / dt),
-        _ if vessel.has_air(body.p) => [0.0; 3],
-        _ => vessel.angular_velocity().map(|w| -w),
+    // what the held attitude turns by, and the spin the hull should have in the frame: the
+    // same, except in vacuum, where the frame's spin-up over the substep is the step's to
+    // apply, so the hull is asked only for the frame's spin as it stands
+    let (mut carried, mut wanted) = match (footing, gyros.footing) {
+        (Some(now), Some(last)) => {
+            let turn = rotation_vector(&quat_between(&last, &now)).map(|c| c / dt);
+            (turn, turn)
+        }
+        _ if vessel.has_air(body.p) => ([0.0; 3], [0.0; 3]),
+        _ => {
+            let spin = vessel.angular_velocity();
+            let spin_up = vessel.angular_acceleration();
+            (
+                [0, 1, 2].map(|k| -(spin[k] + 0.5 * spin_up[k] * dt)),
+                spin.map(|w| -w),
+            )
+        }
     };
     gyros.footing = footing;
     let held = gyros.held;
     let right = quat_rotate(&held, &[1.0, 0.0, 0.0]);
     let up = quat_rotate(&held, &[0.0, 1.0, 0.0]);
     let back = quat_rotate(&held, &[0.0, 0.0, 1.0]);
-    add_scaled(&mut rate, &right, thrusters.pitch() * TURN_RATE);
-    add_scaled(&mut rate, &up, thrusters.yaw() * TURN_RATE);
-    add_scaled(&mut rate, &back, thrusters.roll() * TURN_RATE);
-    gyros.held = quat_integrate(&held, &rate, dt);
-    let lean = rotation_vector(&quat_mul(&gyros.held, &quat_conjugate(&body.q)));
-    let mut wanted = rate;
+    let asked = [
+        (right, thrusters.pitch()),
+        (up, thrusters.yaw()),
+        (back, thrusters.roll()),
+    ];
+    for (axis, level) in asked {
+        add_scaled(&mut carried, &axis, level * TURN_RATE);
+        add_scaled(&mut wanted, &axis, level * TURN_RATE);
+    }
+    // how far the hull is from the held attitude now, before both move on by the substep
+    let lean = rotation_vector(&quat_mul(&held, &quat_conjugate(&body.q)));
+    gyros.held = quat_integrate(&held, &carried, dt);
     add_scaled(&mut wanted, &lean, 1.0 / HOLD_TAU);
     let change = limited(
         [

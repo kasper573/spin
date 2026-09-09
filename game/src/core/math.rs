@@ -75,15 +75,11 @@ pub fn quat_rotate(q: &Quatd, v: &Vec3d) -> Vec3d {
     out
 }
 
-/// A unit quaternion turned by an angular velocity (world frame) for `dt`, renormalised.
+/// The attitude after turning at `w` for `dt`: exact for a steady turn, so a body that spins
+/// evenly keeps time with a frame that turns evenly, however fast either does.
 pub fn quat_integrate(q: &Quatd, w: &Vec3d, dt: f64) -> Quatd {
-    let [qx, qy, qz, qw] = *q;
-    let mut out = [
-        qx + 0.5 * (w[0] * qw + w[1] * qz - w[2] * qy) * dt,
-        qy + 0.5 * (w[1] * qw + w[2] * qx - w[0] * qz) * dt,
-        qz + 0.5 * (w[2] * qw + w[0] * qy - w[1] * qx) * dt,
-        qw + 0.5 * (-w[0] * qx - w[1] * qy - w[2] * qz) * dt,
-    ];
+    let turn = quat_from_rotation_vector(&w.map(|w| w * dt));
+    let mut out = quat_mul(&turn, q);
     let l = out.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-12);
     for x in &mut out {
         *x /= l;

@@ -30,6 +30,12 @@ struct Confined {
     second: vec4<f32>,
 }
 
+/// Where free flight lands, and at what velocity in the frame.
+struct Flight {
+    p: vec3<f32>,
+    v: vec3<f32>,
+}
+
 struct Penetration {
     depth: f32,
     normal: vec3<f32>,
@@ -131,13 +137,30 @@ fn vessel_gravity(p: vec3<f32>) -> vec3<f32> {
     return vec3(w * w * p.x - a * p.z, 0.0, w * w * p.z + a * p.x);
 }
 
-/// A velocity after `dt` of the Coriolis turn: about the axis, twice as fast as the drum, the
-/// other way. Exact, so free-flying water keeps its speed.
-fn vessel_coriolis(v: vec3<f32>, dt: f32) -> vec3<f32> {
-    let phi = -2.0 * drum.spin * dt;
+/// A point turned about the axis by `phi`.
+fn turned(p: vec3<f32>, phi: f32) -> vec3<f32> {
     let c = cos(phi);
     let s = sin(phi);
-    return vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
+    return vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+}
+
+/// Free flight through the drum's frame over `dt`, which ends at the spin the frame is at:
+/// straight and even among the stars, put back into the frame where it has turned to by the
+/// end, so that free-flying water keeps its motion among the stars exactly.
+fn vessel_flight(p: vec3<f32>, v: vec3<f32>, dt: f32) -> Flight {
+    let before = drum.spin - drum.spin_rate * dt;
+    let turn = drum.spin * dt - 0.5 * drum.spin_rate * dt * dt;
+    let among_stars = v + vec3(before * p.z, 0.0, -before * p.x);
+    let landed = turned(p + among_stars * dt, -turn);
+    var out: Flight;
+    out.p = landed;
+    out.v = turned(among_stars, -turn) - vec3(drum.spin * landed.z, 0.0, -drum.spin * landed.x);
+    return out;
+}
+
+/// The velocity, in the frame, of something at rest among the stars at `p`.
+fn vessel_star_velocity(p: vec3<f32>) -> vec3<f32> {
+    return vec3(-drum.spin * p.z, 0.0, drum.spin * p.x);
 }
 
 fn vessel_has_air(p: vec3<f32>) -> bool {

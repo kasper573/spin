@@ -231,7 +231,6 @@ impl Simulation {
         self.clamp_speeds();
         let water_step = fluid.step().0 as f64;
         for k in 0..steps {
-            self.drum.advance(dt as f64);
             avatar::drive(
                 &mut self.bodies[0],
                 &mut self.thrusters,
@@ -240,6 +239,7 @@ impl Simulation {
                 &self.drum,
                 dt as f64,
             );
+            self.drum.advance(dt as f64);
             let water = if k == 0 { coupling.as_deref() } else { None };
             rigid::step(
                 dt as f64,

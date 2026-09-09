@@ -5,7 +5,8 @@ use game::core::avatar::{
 };
 use game::core::fluid::Fluid;
 use game::core::math::{
-    Quatd, Vec3d, add_scaled, cross, dot, norm, quat_conjugate, quat_from_basis, quat_mul,
+    Quatd, Vec3d, add_scaled, cross, dot, norm, quat_about_y, quat_conjugate, quat_from_basis,
+    quat_mul, quat_rotate,
 };
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
@@ -280,6 +281,67 @@ fn a_ghost_in_the_drum_is_carried_round_and_flung_out() {
     // flung out to the glass, where the air ends and the assist holds it among the stars
     let sim = state(&app);
     assert!(altitude(sim) < 0.1, "still inside at {:?}", sim.avatar().p);
+}
+
+/// Where the avatar is and which way it faces among the stars: its place and attitude about
+/// the axis turned back by how far the drum has turned.
+fn among_the_stars(sim: &Simulation) -> (Vec3d, Quatd, Vec3d) {
+    let (p, q) = about_the_axis(sim);
+    let back = quat_about_y(sim.drum.angle.0);
+    let spin = sim.drum.angular_velocity();
+    let body = sim.avatar();
+    let w = quat_rotate(
+        &back,
+        &[
+            body.w[0] + spin[0],
+            body.w[1] + spin[1],
+            body.w[2] + spin[2],
+        ],
+    );
+    (quat_rotate(&back, &p), quat_mul(&back, &q), w)
+}
+
+/// A ghost at rest in space outside the ring is untouched by anything the ring does: spun up
+/// hard, spun down and resized under it, it neither moves, turns nor starts turning among the
+/// stars.
+#[test]
+fn a_ghost_outside_is_untouched_by_the_ring_however_it_spins() {
+    let mut app = testing::headless();
+    ghost(&mut app);
+    {
+        let mut sim = state_mut(&mut app);
+        let outside = sim.drum.from_water([40.0, 3.0, 0.0]);
+        let axis = sim.drum.from_water([0.0, 3.0, 0.0]);
+        Player.teleport(&mut sim, outside, axis);
+    }
+    testing::run(&mut app, Seconds(6.0));
+    let start = among_the_stars(state(&app));
+    let check = |app: &mut App, what: &str| {
+        let now = among_the_stars(state(app));
+        let moved = norm(&[
+            now.0[0] - start.0[0],
+            now.0[1] - start.0[1],
+            now.0[2] - start.0[2],
+        ]);
+        let turned = angle_between(&start.1, &now.1);
+        let turning = norm(&now.2);
+        assert!(
+            moved < 0.5 && turned < 0.01 && turning < 0.01,
+            "{what}: the ghost moved {moved} m, turned {turned} rad and turns at {turning} rad/s among the stars"
+        );
+    };
+    for spin in [2.0, 4.0, 8.0, 12.0, 0.0] {
+        app.world_mut().resource_mut::<Settings>().spin = RadiansPerSecond(spin);
+        testing::run(&mut app, Seconds(6.0));
+        check(&mut app, &format!("at {spin} rad/s"));
+    }
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, 60.0);
+        Dial::Width.set(&mut settings, 30.0);
+    }
+    testing::run(&mut app, Seconds(3.0));
+    check(&mut app, "resized");
 }
 
 #[test]

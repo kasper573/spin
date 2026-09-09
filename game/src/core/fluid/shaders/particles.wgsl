@@ -3,13 +3,14 @@
 // Boundary samples of solid bodies (Akinci et al. 2012) contribute to density and its gradient
 // like heavy particles.
 //
-// The water lives in its vessel's frame, whose walls stand still, and feels the frame's motion
-// as the accelerations the `vessel` module reports. That module must define:
+// The water lives in its vessel's frame, whose walls stand still, and flies through it exactly
+// as the `vessel` module says. That module must define:
 //   vessel_confine(p, margin) -> Confined     a point put back inside, and the walls it met
-//   vessel_gravity(p) -> vec3<f32>            the frame's acceleration of a point at rest
-//   vessel_coriolis(v, dt) -> vec3<f32>       a velocity after dt of the frame's turning
+//   vessel_flight(p, v, dt) -> Flight         where free flight over dt lands, and at what velocity
+//   vessel_star_velocity(p) -> vec3<f32>      the velocity here of something at rest among the stars
 //   vessel_has_air(p) -> bool                 whether the vessel's air, at rest in it, is here
-#import vessel::{Confined, vessel_confine, vessel_gravity, vessel_coriolis, vessel_has_air}
+// and, for the bodies' buoyancy, vessel_gravity(p), the frame's acceleration of a point at rest.
+#import vessel::{Confined, Flight, vessel_confine, vessel_flight, vessel_star_velocity, vessel_has_air}
 #import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell}
 
 @group(0) @binding(1) var<storage, read_write> position: array<vec4<f32>>;
@@ -42,24 +43,27 @@ struct Predicted {
     second: vec4<f32>,
 }
 
-fn clamp_speed(v: vec3<f32>) -> vec3<f32> {
-    let s2 = dot(v, v);
+/// The safety clamp on speed, on the speed among the stars: nothing the frame does can bring
+/// it down on water that is only at rest.
+fn clamp_speed(p: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let rest = vessel_star_velocity(p);
+    let among_stars = v - rest;
+    let s2 = dot(among_stars, among_stars);
     if (s2 > params.max_speed * params.max_speed) {
-        return v * (params.max_speed / sqrt(s2));
+        return rest + among_stars * (params.max_speed / sqrt(s2));
     }
     return v;
 }
 
 fn predict_particle(i: u32) -> Predicted {
     let p = position[i].xyz;
-    var v = velocity[i].xyz;
-    v += vessel_gravity(p) * params.dt;
-    v = vessel_coriolis(v, params.dt);
+    let flight = vessel_flight(p, velocity[i].xyz, params.dt);
+    var v = flight.v;
     if (params.air_k > 0.0 && vessel_has_air(p)) {
         v -= v * params.air_k;
     }
-    v = clamp_speed(v);
-    let c = vessel_confine(p + v * params.dt, params.margin);
+    v = clamp_speed(flight.p, v);
+    let c = vessel_confine(p + (flight.p - p) + (v - flight.v) * params.dt, params.margin);
     var out: Predicted;
     out.q = c.p;
     out.v = v;
@@ -402,7 +406,7 @@ fn update_velocities(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         v *= params.wall_keep;
     }
-    velocity[i] = vec4(clamp_speed(v), 0.0);
+    velocity[i] = vec4(clamp_speed(q, v), 0.0);
 }
 
 /// XSPH viscosity, no-slip drag toward bodies (their share is accumulated per sample in the
