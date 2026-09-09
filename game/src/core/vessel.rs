@@ -76,6 +76,9 @@ pub trait Vessel {
     fn sphere_penetrations(&self, centre: [f64; 3], radius: f64) -> Penetrations;
     /// Velocity of the wall material at a point.
     fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3];
+    /// Which way things fall at a point: the unit direction of the vessel's artificial gravity
+    /// there, or nothing where there is none.
+    fn down(&self, p: [f64; 3]) -> [f64; 3];
     /// Velocity of the air at a point, or none where there is no air.
     fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]>;
     /// Angular velocity of the vessel as a whole.

@@ -20,13 +20,11 @@ use crate::core::units::{
     Seconds,
 };
 use crate::core::vessel::Vessel;
-use crate::systems::drum::{Drum, FLOOR_RADIUS};
+use crate::systems::drum::{DEFAULT_RING, Drum, Ring};
 use crate::systems::rafts;
 
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 pub const MAX_RAFTS: usize = MAX_BODIES - 1;
-/// Distance from the axis to the avatar's centre of mass when it stands on the initial ground.
-pub const STANDING_RADIUS: Metres = Metres(FLOOR_RADIUS - (avatar::RADIUS - 0.2) as f32);
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -91,15 +89,41 @@ pub struct Simulation {
 
 impl Default for Simulation {
     fn default() -> Self {
+        Simulation::new(DEFAULT_RING)
+    }
+}
+
+/// Distance from the axis to the avatar's centre of mass when it stands on the initial ground.
+pub fn standing_radius(ring: Ring) -> Metres {
+    Metres(ring.floor_radius().0 - avatar::standing_height() as f32)
+}
+
+/// The spin at which the standing avatar's centre of mass is carried round at exactly one g.
+pub fn standing_spin(ring: Ring) -> RadiansPerSecond {
+    RadiansPerSecond((EARTH_GRAVITY.0 / standing_radius(ring).0 as f64).sqrt() as f32)
+}
+
+/// The artificial gravity felt at the standing avatar's centre of mass under `spin`.
+pub fn standing_gravity(spin: RadiansPerSecond, ring: Ring) -> MetresPerSecondSquared {
+    let w = spin.0 as f64;
+    MetresPerSecondSquared(w * w * standing_radius(ring).0 as f64)
+}
+
+impl Simulation {
+    /// The initial ring world at this size: ground all the way round, spinning at one g, the
+    /// avatar standing on it with its thrusters equalized to that.
+    pub fn new(ring: Ring) -> Simulation {
         let shapes = [avatar::shape(), rafts::shape()];
-        let mut drum = Drum::default();
-        drum.spin = standing_spin();
+        let mut drum = Drum::new(ring);
+        drum.spin = standing_spin(ring);
         drum.target_spin = drum.spin;
         let avatar = standing_avatar(&shapes[AVATAR_SHAPE], &drum);
+        let thrusters =
+            Thrusters::with_power(avatar::equalized_thrust(standing_gravity(drum.spin, ring)));
         Simulation {
             drum,
             avatar_input: AvatarInput::default(),
-            thrusters: Thrusters::default(),
+            thrusters,
             params: FluidParams::default(),
             body_params: BodyParams::default(),
             time: Seconds(0.0),
@@ -112,23 +136,25 @@ impl Default for Simulation {
             window: (0.0, 0.0),
         }
     }
-}
 
-/// The spin at which the standing avatar's centre of mass is carried round at exactly one g.
-pub fn standing_spin() -> RadiansPerSecond {
-    RadiansPerSecond((EARTH_GRAVITY.0 / STANDING_RADIUS.0 as f64).sqrt() as f32)
-}
-
-/// The artificial gravity felt at the standing avatar's centre of mass under `spin`.
-pub fn standing_gravity(spin: RadiansPerSecond) -> MetresPerSecondSquared {
-    let w = spin.0 as f64;
-    MetresPerSecondSquared(w * w * STANDING_RADIUS.0 as f64)
+    /// Make the ring another size. The water and the landscape stretch to fit on their own;
+    /// whatever body the new walls would cut through is pulled inside them.
+    pub fn resize(&mut self, ring: Ring) {
+        if ring == self.drum.ring {
+            return;
+        }
+        self.drum.resize(ring);
+        for body in &mut self.bodies {
+            let reach = self.shapes[body.shape].reach();
+            body.p = self.drum.place_sphere_inside(body.p, reach);
+        }
+    }
 }
 
 /// The avatar upright on the ground at wheel angle zero, facing spinward and moving with the
 /// ground, so that it starts out standing rather than falling.
 fn standing_avatar(shape: &BodyShape, drum: &Drum) -> Body {
-    let r = FLOOR_RADIUS as f64 - avatar::standing_height();
+    let r = standing_radius(drum.ring).0 as f64;
     let p = [r, 0.0, 0.0];
     let up = [-1.0, 0.0, 0.0];
     let ground_velocity = drum.wall_velocity(p);
@@ -231,19 +257,21 @@ impl Simulation {
         Seconds(self.queued)
     }
 
-    /// Back to the initial ring world, but the settings, the target spin and the avatar stay as
-    /// they are.
+    /// Back to the initial ring world of the same size, but the settings, the target spin, the
+    /// thrusters' power and the avatar stay as they are.
     pub fn reset(&mut self) {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
         let raft_shape = self.shapes[RAFT_SHAPE].friction;
         let target = self.drum.target_spin;
+        let power = self.thrusters.power;
         let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
-        *self = Simulation::default();
+        *self = Simulation::new(self.drum.ring);
         self.params = params;
         self.body_params = body_params;
         self.shapes[RAFT_SHAPE].friction = raft_shape;
         self.drum.target_spin = target;
+        self.thrusters.power = power;
         self.bodies[0] = avatar;
     }
 

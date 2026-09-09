@@ -3,6 +3,7 @@
 // the hydrostatic buoyancy, and the no-slip drag the particles felt is returned to the bodies.
 // Everything a body receives is summed into fixed-point running totals the CPU reads back and
 // differences, so a late or doubled readback still applies each substep exactly once.
+#import vessel::vessel_air_velocity
 #import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, cell_at, coords_of, FIXED}
 
 @group(0) @binding(1) var<storage, read> position: array<vec4<f32>>;
@@ -73,7 +74,9 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /// Hydrostatic buoyancy on bodies. PBF pressure is a per-step correction, not a depth-integrated
 /// pressure, so Archimedes is added explicitly: local water density at each sample gives wetness,
-/// local water swirl gives the pressure gradient (rho * v_t^2 / r, pointing inward).
+/// and the water at rest in the vessel, turning with it, gives the pressure gradient
+/// (rho * v_t^2 / r, pointing inward). The water right at the hull is not asked, since a moving
+/// hull drags it along and would read its own motion back as pressure.
 @compute @workgroup_size(64)
 fn buoyancy(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = id.x;
@@ -115,7 +118,7 @@ fn buoyancy(@builtin(global_invocation_id) id: vec3<u32>) {
     let wet = min(rho / params.wet_ref, 1.0);
     let rr = max(length(x.xz), 1e-6);
     let tangent = vec2(x.z, -x.x) / rr;
-    let vt = dot(fv.xz, tangent) / rho;
+    let vt = dot(vessel_air_velocity(x).xz, tangent);
     let ac = vt * vt / rr;
     let fmag = params.rest_density * body.extra.x * wet * ac;
     let force = vec3(-fmag * x.x / rr, 0.0, -fmag * x.z / rr);

@@ -2,14 +2,14 @@ use bevy::prelude::*;
 use game::core::fluid::Fluid;
 use game::core::units::{Radians, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{Drum, Landscape, RADIUS, wheel_angle};
+use game::systems::drum::{DEFAULT_RING, Drum, Landscape, wheel_angle};
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing;
 
 #[test]
 fn sculpting_raises_ground_under_the_brush_only() {
-    let mut land = Landscape::new();
+    let mut land = Landscape::new(DEFAULT_RING);
     assert!(land.is_empty());
     for _ in 0..10 {
         land.sculpt(1.0, 0.0, 0.5, 0.05);
@@ -25,11 +25,11 @@ fn sculpting_raises_ground_under_the_brush_only() {
 
 #[test]
 fn heights_are_clamped_on_load() {
-    let mut land = Landscape::new();
+    let mut land = Landscape::new(DEFAULT_RING);
     land.load(&[f32::NAN, -1.0, 100.0]);
     assert_eq!(land.height_at(0, 0), 0.0);
     assert_eq!(land.height_at(0, 1), 0.0);
-    assert!(land.height_at(0, 2) <= RADIUS - 1.0);
+    assert!(land.height_at(0, 2) <= DEFAULT_RING.max_height().0);
 }
 
 #[test]
@@ -79,6 +79,7 @@ fn water_settles_on_top_of_raised_ground() {
     let particles = testing::particles(&mut app);
     let sim = app.world().resource::<Simulation>();
     let angle = sim.drum.angle.0;
+    let radius = sim.drum.ring.radius.0 as f64;
     let height = sim.drum.landscape.max_height() as f64;
     assert!(height > 1.5, "landscape height {height}");
     for p in &particles {
@@ -86,9 +87,9 @@ fn water_settles_on_top_of_raised_ground() {
         let r = (x * x + z * z).sqrt();
         let (h, _, _) = sim.drum.landscape.sample(wheel_angle(x, z, angle), y);
         assert!(
-            r <= RADIUS as f64 - h + 0.06,
+            r <= radius - h + 0.06,
             "particle inside terrain: r {r}, ground at {}",
-            RADIUS as f64 - h
+            radius - h
         );
     }
 }

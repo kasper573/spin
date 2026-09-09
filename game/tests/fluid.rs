@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 use game::core::fluid::{Fluid, PARTICLE_MASS, Particle, REST_DENSITY};
+use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
-use game::systems::drum::{FLOOR_RADIUS, HALF_WIDTH, RADIUS};
-use game::systems::settings::Settings;
+use game::systems::drum::DEFAULT_RING;
+use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
 use game::systems::testing;
 
@@ -47,8 +48,44 @@ fn water_stays_inside_the_drum() {
         let [x, y, z] = p.position;
         assert!(x.is_finite() && y.is_finite() && z.is_finite(), "{p:?}");
         let r = (x * x + z * z).sqrt();
-        assert!(r <= RADIUS + 1e-3, "particle at radius {r}");
-        assert!(y.abs() <= HALF_WIDTH + 1e-3, "particle at y {y}");
+        assert!(r <= DEFAULT_RING.radius.0 + 1e-3, "particle at radius {r}");
+        assert!(
+            y.abs() <= DEFAULT_RING.half_width.0 + 1e-3,
+            "particle at y {y}"
+        );
+    }
+}
+
+#[test]
+fn water_follows_the_ring_when_it_is_made_smaller() {
+    let mut app = testing::headless();
+    set_spin(&mut app, 1.0);
+    for k in 0..6 {
+        let a = k as f32;
+        inject(
+            &mut app,
+            [a.cos() * 9.0, (k % 3) as f32 * 4.0 - 4.0, a.sin() * 9.0],
+            300,
+        );
+        testing::run(&mut app, Seconds(0.3));
+    }
+    testing::run(&mut app, Seconds(2.0));
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, 14.0);
+        Dial::Width.set(&mut settings, 6.0);
+    }
+    testing::run(&mut app, Seconds(4.0));
+    let sim = app.world().resource::<Simulation>();
+    assert_eq!(sim.drum.ring.radius, Metres(7.0));
+    assert_eq!(sim.drum.ring.half_width, Metres(3.0));
+    let particles = testing::particles(&mut app);
+    assert_eq!(particles.len(), 1800);
+    for p in &particles {
+        let [x, y, z] = p.position;
+        let r = (x * x + z * z).sqrt();
+        assert!(r <= 7.0 + 1e-3, "particle at radius {r}");
+        assert!(y.abs() <= 3.0 + 1e-3, "particle at y {y}");
     }
 }
 
@@ -61,7 +98,10 @@ fn spinning_drum_throws_water_onto_the_glass() {
     let particles = testing::particles(&mut app);
     let near_glass = particles
         .iter()
-        .filter(|p| (p.position[0].powi(2) + p.position[2].powi(2)).sqrt() > FLOOR_RADIUS - 1.5)
+        .filter(|p| {
+            (p.position[0].powi(2) + p.position[2].powi(2)).sqrt()
+                > DEFAULT_RING.floor_radius().0 - 1.5
+        })
         .count();
     assert!(
         near_glass as f32 > particles.len() as f32 * 0.8,

@@ -6,7 +6,7 @@ use bevy::winit::WinitPlugin;
 
 use crate::core::fluid::FluidPlugin;
 use crate::core::web;
-use crate::systems::drum::{HALF_WIDTH, RADIUS};
+use crate::systems::drum::LARGEST_RING;
 use crate::systems::{
     aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
     persistence::PersistencePlugin, player::PlayerPlugin, rafts::RaftsPlugin, scene::ScenePlugin,
@@ -51,8 +51,7 @@ fn simulation(app: &mut App) {
         SettingsPlugin,
         DrumPlugin,
         FluidPlugin {
-            min: [-RADIUS, -HALF_WIDTH, -RADIUS],
-            max: [RADIUS, HALF_WIDTH, RADIUS],
+            extent: LARGEST_RING.extent(),
         },
         WaterPlugin,
         RaftsPlugin,

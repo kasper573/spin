@@ -2,11 +2,11 @@ use crate::core::fluid::{H2, MAX_SPEED_BODY, POLY6, REST_DENSITY};
 use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve};
 use crate::core::units::Newtons;
 
-/// What the water did to a body over a frame: the buoyancy impulse and torque, and the flow
-/// around the hull weighted by how strongly each wetted sample coupled to it, as a fraction of
-/// the body's mass. The flow sums let the body be relaxed toward the water it is actually in
-/// rather than by a difference against a stale copy of its own velocity, so the coupling stays
-/// stable whenever the readback lands.
+/// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
+/// and the flow around the hull weighted by how strongly each wetted sample coupled to it, as a
+/// fraction of the body's mass, summed over every substep. The flow sums let the body be relaxed
+/// toward the water it is actually in rather than by a difference against a stale copy of its
+/// own velocity, so the coupling stays stable whenever the readback lands.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WaterCoupling {
     pub buoyancy: Vec3d,
@@ -19,9 +19,13 @@ pub struct WaterCoupling {
     pub hull: Vec3d,
     /// Σ k·(xx, yy, zz, xy, yz, zx) over the wetted samples.
     pub hull_tensor: [f64; 6],
-    /// Σ k: the coupling mass over the body's mass.
+    /// Σ k: the coupled water's mass over the body's mass, summed over the substeps.
     pub coupling: f64,
+    /// The wetted fraction of the hull, summed over the substeps.
     pub wet: f64,
+    /// Simulated time the sums cover, and how many substeps it was taken in.
+    pub seconds: f64,
+    pub substeps: f64,
 }
 
 impl WaterCoupling {
@@ -38,6 +42,13 @@ impl WaterCoupling {
         }
         self.coupling += other.coupling;
         self.wet += other.wet;
+        self.seconds += other.seconds;
+        self.substeps += other.substeps;
+    }
+
+    /// The length of the substeps the sums were taken in.
+    fn substep(&self) -> f64 {
+        self.seconds / self.substeps
     }
 
     /// The velocity of the water around the hull.
@@ -80,6 +91,10 @@ impl WaterCoupling {
 
 const DEFAULT_FRICTION: f64 = 0.45;
 const DEFAULT_RESTITUTION: f64 = 0.2;
+/// The water's drag: a body relaxes toward the flow around it on this time scale divided by the
+/// coupled water's mass over its own, so a hull gripped by its own mass of water is carried
+/// along in a couple of seconds and a light board rides the water almost at once.
+const DRAG_TAU: f64 = 2.5;
 
 /// The wall a body stood on during the last substep: where it touched, which way is up there,
 /// and how hard the wall pushed back.
@@ -165,6 +180,19 @@ impl BodyShape {
             samples,
             points: Vec::new(),
         }
+    }
+
+    /// The same shape displacing this much water (m³) instead of its whole hull.
+    pub fn displacing(mut self, volume: f64) -> BodyShape {
+        self.volume_per_sample = volume / self.samples.len() as f64;
+        self
+    }
+
+    /// Whether the water turns the body: it grips a board's faces and turns it with the flow,
+    /// while a sphere slides through it the way it slides over the ground, leaving its spin to
+    /// whatever else steers it.
+    pub fn turns_in_water(&self) -> bool {
+        matches!(self.collider, Collider::Box { .. })
     }
 
     /// Distance from the centre of mass to the farthest point of the hull.
@@ -282,26 +310,32 @@ impl Body {
         add_scaled(&mut self.w, &mat3mul(&self.iw, l), 1.0);
     }
 
-    /// Take what the water did: the drag relaxes the body toward the flow by at most once over,
-    /// the buoyancy is limited to `max_dv` of velocity change. `spin` is the rotation of the
-    /// water at rest in the vessel.
-    pub fn couple(&mut self, water: &WaterCoupling, max_dv: f64, spin: &Vec3d) {
-        self.wet = water.wet.clamp(0.0, 1.0);
+    /// Take what the water did over the time its coupling covers: the drag relaxes the body
+    /// toward the flow at the rate its coupling sets, the buoyancy is limited to `max_accel` of
+    /// acceleration. `spin` is the rotation of the water at rest in the vessel; only a body
+    /// that `turns` is spun by the water around its hull, the rest slide through it.
+    pub fn couple(&mut self, water: &WaterCoupling, max_accel: f64, spin: &Vec3d, turns: bool) {
+        if water.substeps <= 0.0 || water.seconds <= 0.0 {
+            return;
+        }
+        self.wet = (water.wet / water.substeps).clamp(0.0, 1.0);
         if water.coupling > 0.0 {
+            let dt = water.substep();
             let flow = water.flow_velocity();
-            let s_lin = water.coupling.min(1.0);
+            let s_lin = 1.0 - (-water.coupling * dt / DRAG_TAU).exp();
             for (v, f) in self.v.iter_mut().zip(flow) {
                 *v += (f - *v) * s_lin;
             }
-            if let Some(wanted) = water.flow_spin(&self.v, spin) {
-                let s_ang = (water.coupling_moment() / self.inv_m * self.inv_i_max).min(1.0);
+            if turns && let Some(wanted) = water.flow_spin(&self.v, spin) {
+                let moment = water.coupling_moment() / self.inv_m * self.inv_i_max;
+                let s_ang = 1.0 - (-moment * dt / DRAG_TAU).exp();
                 for (w, f) in self.w.iter_mut().zip(wanted) {
                     *w += (f - *w) * s_ang;
                 }
             }
         }
 
-        let cap = max_dv / self.inv_m;
+        let cap = max_accel * water.seconds / self.inv_m;
         let mut j = water.buoyancy;
         let mut l = water.buoyancy_torque;
         let jm = (j[0] * j[0] + j[1] * j[1] + j[2] * j[2]).sqrt();

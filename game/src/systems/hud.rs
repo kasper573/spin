@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::core::fluid::Fluid;
 use crate::systems::controls::{ClearAction, Controls};
-use crate::systems::settings::{Dial, Settings, Toggle};
+use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
 pub struct HudPlugin;
@@ -103,6 +103,9 @@ pub fn hud_text(
             toggle.label(),
             if toggle.get(settings) { "on" } else { "off" }
         ));
+    }
+    for action in Action::ALL {
+        out.push_str(&format!("{:<8} {}\n", action.key_label(), action.label()));
     }
     out.push('\n');
     for action in ClearAction::ALL {

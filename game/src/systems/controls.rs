@@ -5,18 +5,21 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::core::fluid::Fluid;
-use crate::core::units::Metres;
+use crate::core::units::{Metres, MetresPerSecond};
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotInput, Player};
 use crate::systems::rafts::PLACEMENT_OFFSET;
-use crate::systems::settings::{Dial, Settings, Toggle};
+use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
 /// Water appears this far in front of the surface the crosshair rests on.
 const INJECT_DEPTH: Metres = Metres(1.0);
 const MARKER_RADIUS: Metres = Metres(0.3);
+/// The sculpting brush: how wide it is and how fast it raises the ground.
+const BRUSH_SIZE: Metres = Metres(2.0);
+const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
 
 /// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +192,11 @@ fn keys(
             toggle.flip(&mut settings);
         }
     }
+    for action in Action::ALL {
+        if keys.just_pressed(action.key()) {
+            action.apply(&mut settings);
+        }
+    }
     if keys.pressed(ClearAction::CHORD) {
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
@@ -237,14 +245,14 @@ fn mouse(
     if mouse.pressed(MouseButton::Middle) {
         controls.sculpting = true;
         let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-        let amount = settings.brush_rate.0 * dt * if lower { -1.0 } else { 1.0 };
+        let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
         let phi = sim
             .drum
             .wheel_angle(target.point.x as f64, target.point.z as f64);
         sim.drum.landscape.sculpt(
             phi,
             target.point.y as f64,
-            settings.brush_size.0 as f64,
+            BRUSH_SIZE.0 as f64,
             amount as f64,
         );
     }
@@ -255,12 +263,12 @@ fn litres_per_particle() -> f32 {
     PARTICLE_MASS / REST_DENSITY * 1000.0
 }
 
-fn marker(controls: Res<Controls>, aim: Res<Aim>, settings: Res<Settings>, mut gizmos: Gizmos) {
+fn marker(controls: Res<Controls>, aim: Res<Aim>, mut gizmos: Gizmos) {
     let Some(target) = aim.0 else {
         return;
     };
     let radius = if controls.sculpting {
-        settings.brush_size.0
+        BRUSH_SIZE.0
     } else {
         MARKER_RADIUS.0
     };

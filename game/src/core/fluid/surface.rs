@@ -14,14 +14,14 @@ const ISO: f32 = 0.9;
 pub const MAX_VERTICES: usize = 200_000;
 pub const MAX_INDICES: usize = 600_000;
 
-/// The grid of `CELL`-sized cubes the surface is extracted on, padded so splats near the walls
-/// stay inside it.
-pub fn grid(min: [f32; 3], max: [f32; 3]) -> Grid {
+/// The grid of `CELL`-sized cubes the surface is extracted on over the box reaching `extent`
+/// from the origin each way, padded so splats near the walls stay inside it.
+pub fn grid(extent: [f32; 3]) -> Grid {
     let pad = SPLAT_RADIUS + CELL;
-    Grid::new(min.map(|v| v - pad), max.map(|v| v + pad), CELL)
+    Grid::around(extent.map(|v| v + pad), CELL)
 }
 
-#[derive(Resource, Clone, Default, ExtractResource, ShaderType)]
+#[derive(Resource, Clone, Default, PartialEq, ExtractResource, ShaderType)]
 pub struct SurfaceParams {
     pub origin: Vec4,
     pub dims: IVec4,

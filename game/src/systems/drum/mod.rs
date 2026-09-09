@@ -1,6 +1,7 @@
 //! The glass drum: a solid cylinder spinning about its axis (world y), with a sculptable landscape
 //! on the inside of its floor that starts as a layer of ground around the whole ring. Implements
-//! the vessel the fluid and the bodies live in.
+//! the vessel the fluid and the bodies live in. Its size is a setting: the ring can be made
+//! wider or narrower and its landscape stretches to fit.
 mod gpu;
 mod landscape;
 mod render;
@@ -9,21 +10,60 @@ pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{Landscape, wheel_angle};
 pub use render::DrumPlugin;
 
+use serde::{Deserialize, Serialize};
+
 use crate::core::units::{Metres, Radians, RadiansPerSecond};
 use crate::core::vessel::{Contact, Penetration, Penetrations, Vessel};
 
-pub const RADIUS: f32 = 10.5;
-pub const HALF_WIDTH: f32 = 6.0;
+/// The ring as it starts out.
+pub const DEFAULT_RING: Ring = Ring {
+    radius: Metres(10.5),
+    half_width: Metres(6.0),
+};
+/// The largest ring the settings allow, which the water reserves room for.
+pub const LARGEST_RING: Ring = Ring {
+    radius: Metres(20.0),
+    half_width: Metres(10.0),
+};
 /// The ground that covers the glass all the way round in the initial state.
 pub const GROUND_DEPTH: Metres = Metres(0.5);
-/// Distance from the axis to the top of the initial ground.
-pub const FLOOR_RADIUS: f32 = RADIUS - GROUND_DEPTH.0;
 /// The glass shell's thickness, felt only from outside.
 pub const GLASS_THICKNESS: f64 = 0.1;
 /// Maximum spin-up acceleration of the drum (rad/s²).
 const SPIN_ACCEL: f64 = 0.6;
 
+/// The drum's size: how far the glass is from the axis and how far each cap is from the middle.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Ring {
+    pub radius: Metres,
+    pub half_width: Metres,
+}
+
+impl Ring {
+    /// Distance from the axis to the top of the initial ground.
+    pub fn floor_radius(self) -> Metres {
+        Metres(self.radius.0 - GROUND_DEPTH.0)
+    }
+
+    /// The landscape may never be raised closer to the axis than this.
+    pub fn max_height(self) -> Metres {
+        Metres(self.radius.0 - 1.0)
+    }
+
+    /// Half the size of the box the drum fits in: radius across, half width along the axis.
+    pub fn extent(self) -> [f32; 3] {
+        [self.radius.0, self.half_width.0, self.radius.0]
+    }
+
+    /// Whether a point is in the air the drum encloses.
+    pub fn encloses(self, p: [f64; 3]) -> bool {
+        let r = self.radius.0 as f64;
+        p[0] * p[0] + p[2] * p[2] < r * r && p[1].abs() < self.half_width.0 as f64
+    }
+}
+
 pub struct Drum {
+    pub ring: Ring,
     pub spin: RadiansPerSecond,
     pub target_spin: RadiansPerSecond,
     /// Accumulated rotation; the glass at wheel angle φ sits at world angle φ − angle.
@@ -33,16 +73,28 @@ pub struct Drum {
 
 impl Default for Drum {
     fn default() -> Self {
-        Drum {
-            spin: RadiansPerSecond(0.0),
-            target_spin: RadiansPerSecond(0.0),
-            angle: Radians(0.0),
-            landscape: Landscape::flat(GROUND_DEPTH),
-        }
+        Drum::new(DEFAULT_RING)
     }
 }
 
 impl Drum {
+    /// A still drum of this size with the initial ground all the way round.
+    pub fn new(ring: Ring) -> Drum {
+        Drum {
+            ring,
+            spin: RadiansPerSecond(0.0),
+            target_spin: RadiansPerSecond(0.0),
+            angle: Radians(0.0),
+            landscape: Landscape::flat(ring, GROUND_DEPTH),
+        }
+    }
+
+    /// Make the drum another size; the landscape stretches with it.
+    pub fn resize(&mut self, ring: Ring) {
+        self.ring = ring;
+        self.landscape.resize(ring);
+    }
+
     pub fn advance(&mut self, dt: f64) {
         let d = (self.target_spin.0 - self.spin.0) as f64;
         let max = SPIN_ACCEL * dt;
@@ -52,8 +104,7 @@ impl Drum {
 
     /// Whether a point is in the air the drum encloses.
     pub fn encloses(&self, p: [f64; 3]) -> bool {
-        p[0] * p[0] + p[2] * p[2] < (RADIUS as f64) * (RADIUS as f64)
-            && p[1].abs() < HALF_WIDTH as f64
+        self.ring.encloses(p)
     }
 
     /// Angle of a world point in the drum's own frame.
@@ -64,16 +115,31 @@ impl Drum {
     /// Pull a point inside the drum, clear of the caps and above the landscape.
     pub fn place_inside(&self, p: [f32; 3]) -> [f32; 3] {
         let margin = 0.3;
-        let y = p[1].clamp(-HALF_WIDTH + margin, HALF_WIDTH - margin);
+        let half_width = self.ring.half_width.0;
+        let y = p[1].clamp(-half_width + margin, half_width - margin);
         let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
         let (h, _, _) = self
             .landscape
             .sample(self.wheel_angle(p[0] as f64, p[2] as f64), y as f64);
-        let limit = RADIUS - margin - h as f32;
+        let limit = self.ring.radius.0 - margin - h as f32;
         if r > limit {
             [p[0] * limit / r, y, p[2] * limit / r]
         } else {
             [p[0], y, p[2]]
+        }
+    }
+
+    /// Pull a sphere's centre inside the drum, clear of the caps and no deeper than the initial
+    /// ground, keeping its bearing from the axis.
+    pub fn place_sphere_inside(&self, c: [f64; 3], radius: f64) -> [f64; 3] {
+        let half_width = self.ring.half_width.0 as f64 - radius;
+        let y = c[1].clamp(-half_width, half_width);
+        let r = (c[0] * c[0] + c[2] * c[2]).sqrt();
+        let limit = self.ring.floor_radius().0 as f64 - radius;
+        if r > limit && r > 1e-9 {
+            [c[0] * limit / r, y, c[2] * limit / r]
+        } else {
+            [c[0], y, c[2]]
         }
     }
 }
@@ -84,7 +150,10 @@ impl Drum {
         let mut out = Penetrations::default();
         let (depth, normal) = if self.landscape.is_empty() {
             let r = (c[0] * c[0] + c[2] * c[2]).sqrt().max(1e-9);
-            (r + radius - RADIUS as f64, [-c[0] / r, 0.0, -c[2] / r])
+            (
+                r + radius - self.ring.radius.0 as f64,
+                [-c[0] / r, 0.0, -c[2] / r],
+            )
         } else {
             self.landscape
                 .penetration(c[0], c[1], c[2], self.angle.0, radius)
@@ -92,7 +161,7 @@ impl Drum {
         if depth > 0.0 {
             out.push(Penetration { depth, normal });
         }
-        let cap = HALF_WIDTH as f64 - radius;
+        let cap = self.ring.half_width.0 as f64 - radius;
         if c[1] > cap {
             out.push(Penetration {
                 depth: c[1] - cap,
@@ -110,8 +179,8 @@ impl Drum {
     /// A sphere outside the drum against the outer surface of the glass shell.
     fn outer_sphere_penetrations(&self, c: [f64; 3], radius: f64) -> Penetrations {
         let mut out = Penetrations::default();
-        let outer_radius = RADIUS as f64 + GLASS_THICKNESS;
-        let outer_half = HALF_WIDTH as f64 + GLASS_THICKNESS;
+        let outer_radius = self.ring.radius.0 as f64 + GLASS_THICKNESS;
+        let outer_half = self.ring.half_width.0 as f64 + GLASS_THICKNESS;
         let r = (c[0] * c[0] + c[2] * c[2]).sqrt().max(1e-9);
         let radial = [c[0] / r, 0.0, c[2] / r];
         let axial = [0.0, c[1].signum(), 0.0];
@@ -145,7 +214,7 @@ impl Vessel for Drum {
     fn confine(&self, p: &mut [f32; 3], margin: f32) -> Contact {
         let mut contact = Contact::default();
         if self.landscape.is_empty() {
-            let limit = RADIUS - margin;
+            let limit = self.ring.radius.0 - margin;
             let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
             if r > limit {
                 let s = limit / r;
@@ -173,7 +242,7 @@ impl Vessel for Drum {
                 }
             }
         }
-        let cap = HALF_WIDTH - margin;
+        let cap = self.ring.half_width.0 - margin;
         if p[1] > cap {
             p[1] = cap;
             contact.push([0.0, -1.0, 0.0]);
@@ -188,7 +257,7 @@ impl Vessel for Drum {
         let mut out = Penetrations::default();
         let (depth, normal) = if self.landscape.is_empty() {
             let r = (p[0] * p[0] + p[2] * p[2]).sqrt().max(1e-9);
-            (r - RADIUS as f64, [-p[0] / r, 0.0, -p[2] / r])
+            (r - self.ring.radius.0 as f64, [-p[0] / r, 0.0, -p[2] / r])
         } else {
             self.landscape
                 .penetration(p[0], p[1], p[2], self.angle.0, 0.0)
@@ -196,7 +265,7 @@ impl Vessel for Drum {
         if depth > 0.0 {
             out.push(Penetration { depth, normal });
         }
-        let hw = HALF_WIDTH as f64;
+        let hw = self.ring.half_width.0 as f64;
         if p[1] > hw {
             out.push(Penetration {
                 depth: p[1] - hw,
@@ -222,6 +291,15 @@ impl Vessel for Drum {
     fn wall_velocity(&self, p: [f64; 3]) -> [f64; 3] {
         let w = self.spin.0 as f64;
         [w * p[2], 0.0, -w * p[0]]
+    }
+
+    fn down(&self, p: [f64; 3]) -> [f64; 3] {
+        let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
+        if r < 1e-9 {
+            [0.0; 3]
+        } else {
+            [p[0] / r, 0.0, p[2] / r]
+        }
     }
 
     fn air_velocity(&self, p: [f64; 3]) -> Option<[f64; 3]> {

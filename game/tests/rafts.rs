@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
 use game::core::units::{RadiansPerSecond, Seconds};
-use game::systems::drum::{FLOOR_RADIUS, HALF_WIDTH};
+use game::systems::drum::DEFAULT_RING;
 use game::systems::settings::Settings;
 use game::systems::sim::{MAX_RAFTS, Simulation};
 use game::systems::testing;
@@ -53,8 +53,15 @@ fn rafts_float_and_ride_with_the_glass() {
     let sim = app.world().resource::<Simulation>();
     for body in sim.rafts() {
         let r = (body.p[0] * body.p[0] + body.p[2] * body.p[2]).sqrt();
-        assert!(r < FLOOR_RADIUS as f64 && r > 7.5, "raft radius {r}");
-        assert!(body.p[1].abs() <= HALF_WIDTH as f64, "raft y {}", body.p[1]);
+        assert!(
+            r < DEFAULT_RING.floor_radius().0 as f64 && r > 7.5,
+            "raft radius {r}"
+        );
+        assert!(
+            body.p[1].abs() <= DEFAULT_RING.half_width.0 as f64,
+            "raft y {}",
+            body.p[1]
+        );
         let tangential = (body.v[0] * body.p[2] - body.v[2] * body.p[0]) / r;
         let glass = sim.drum.spin.0 as f64 * r;
         assert!(

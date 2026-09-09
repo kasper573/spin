@@ -2,7 +2,7 @@
 //! cap of the drum where the ray leaves the glass interior.
 use bevy::prelude::*;
 
-use crate::systems::drum::{Drum, HALF_WIDTH, RADIUS};
+use crate::systems::drum::Drum;
 use crate::systems::sim::{SimSet, Simulation};
 
 const EPS: f32 = 1e-6;
@@ -29,12 +29,13 @@ impl Plugin for AimPlugin {
 }
 
 pub fn cast(origin: Vec3, dir: Vec3, drum: &Drum) -> Option<AimPoint> {
+    let (radius, half_width) = (drum.ring.radius.0, drum.ring.half_width.0);
     let mut t_in = f32::NEG_INFINITY;
     let mut t_out = f32::INFINITY;
 
     let a = dir.x * dir.x + dir.z * dir.z;
     let b = 2.0 * (origin.x * dir.x + origin.z * dir.z);
-    let c = origin.x * origin.x + origin.z * origin.z - RADIUS * RADIUS;
+    let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
     if a > EPS {
         let disc = b * b - 4.0 * a * c;
         if disc < 0.0 {
@@ -48,11 +49,11 @@ pub fn cast(origin: Vec3, dir: Vec3, drum: &Drum) -> Option<AimPoint> {
     }
 
     if dir.y.abs() > EPS {
-        let t0 = (-HALF_WIDTH - origin.y) / dir.y;
-        let t1 = (HALF_WIDTH - origin.y) / dir.y;
+        let t0 = (-half_width - origin.y) / dir.y;
+        let t1 = (half_width - origin.y) / dir.y;
         t_in = t_in.max(t0.min(t1));
         t_out = t_out.min(t0.max(t1));
-    } else if origin.y.abs() > HALF_WIDTH {
+    } else if origin.y.abs() > half_width {
         return None;
     }
 
@@ -68,7 +69,7 @@ pub fn cast(origin: Vec3, dir: Vec3, drum: &Drum) -> Option<AimPoint> {
     }
 
     let point = origin + dir * t_out;
-    let normal = if (point.y.abs() - HALF_WIDTH).abs() < 1e-4 * HALF_WIDTH {
+    let normal = if (point.y.abs() - half_width).abs() < 1e-4 * half_width {
         Vec3::new(0.0, if point.y > 0.0 { -1.0 } else { 1.0 }, 0.0)
     } else {
         let r = point.xz().length().max(EPS);

@@ -1,7 +1,7 @@
 //! The viewer's body: a ballasted sphere the height of a person with eight thrusters, one along
 //! each axis of the head's level frame and one at each shoulder for roll, legs that walk it over
-//! whatever ground it stands on, gyros that keep it upright, and a head that looks around
-//! independently of the hull.
+//! whatever ground it stands on, gyros that keep it upright against whatever is pulling it
+//! down, and a head that looks around independently of the hull.
 //!
 //! The thrusters spool up and down rather than switch, so their levels are state the hull carries.
 //! Standing on the ground, the horizontal thrust is the legs' orders: they push along the ground,
@@ -12,15 +12,18 @@
 //! body touched last, so a ring's floor works as well as a flat one.
 use serde::{Deserialize, Serialize};
 
-use crate::core::math::{Vec3d, add_scaled, dot, norm};
+use crate::core::math::{Vec3d, add_scaled, cross, dot, norm};
 use crate::core::rigid::{Body, BodyShape, Ground};
-use crate::core::units::{Metres, MetresPerSecond, MetresPerSecondSquared, Seconds};
+use crate::core::units::{EARTH_GRAVITY, Metres, MetresPerSecond, MetresPerSecondSquared, Seconds};
 use crate::core::vessel::Vessel;
 
 pub const RADIUS: f64 = 0.5;
 pub const MASS: f64 = 80.0;
 /// How far the centre of mass sits below the hull's centre; the lever that rights the body.
 const BALLAST: f64 = 0.2;
+/// Water the hull displaces (m³): little more than the person inside it, so it floats, but only
+/// just, and the thrusters can push it under.
+const DISPLACEMENT: f64 = 0.1;
 const BOUNDARY_SAMPLES: usize = 300;
 /// Where the eye sits above the ground when standing.
 pub const EYE_HEIGHT: Metres = Metres(1.7);
@@ -31,16 +34,18 @@ const LEG_TAU: f64 = 0.25;
 /// Coulomb friction between the feet and the ground, the most the legs can push per unit of the
 /// ground's support.
 const LEG_GRIP: f64 = 0.8;
-/// Peak acceleration of each thruster: 1.78 times the standing gravity, so thrusting straight up
-/// from the floor nets 0.78 g upward.
-pub const THRUST: MetresPerSecondSquared = MetresPerSecondSquared(17.5);
+/// A thruster equalized to a gravity pulls this many times it, so thrusting straight up from
+/// the floor nets the rest upward.
+pub const THRUST_OVER_GRAVITY: f64 = 1.78;
 /// A thruster takes this long to go from idle to full, and as long to die down.
 pub const SPOOL_TIME: Seconds = Seconds(0.3);
 /// The flight assist brakes a ghost's motion relative to the air on this time scale, which also
-/// caps its cruising speed at `THRUST` times it.
+/// caps its cruising speed at the thrusters' power times it.
 const ASSIST_TAU: f64 = 0.35;
-/// The gyros settle the hull's spin onto the requested one on this time scale.
+/// The gyros settle the hull's spin onto the requested one on this time scale, and turn a
+/// leaning hull back upright on this one.
 const GYRO_TAU: f64 = 0.3;
+const RIGHTING_TAU: f64 = 0.6;
 const LOOK_RATE: f64 = 0.0022;
 /// Roll rate (rad/s) the roll thrusters ask of the gyros at full level.
 pub const ROLL_RATE: f64 = 1.6;
@@ -97,13 +102,37 @@ impl Thruster {
     }
 }
 
-/// How hard each thruster is firing, 0 to 1, in the order of `Thruster::ALL`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+/// The peak acceleration of a thruster equalized to this gravity.
+pub fn equalized_thrust(gravity: MetresPerSecondSquared) -> MetresPerSecondSquared {
+    MetresPerSecondSquared(gravity.0 * THRUST_OVER_GRAVITY)
+}
+
+/// How hard each thruster is firing, 0 to 1, in the order of `Thruster::ALL`, and how hard one
+/// pushes at full.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Thrusters {
     levels: [f64; 8],
+    pub power: MetresPerSecondSquared,
+}
+
+impl Default for Thrusters {
+    fn default() -> Self {
+        Thrusters {
+            levels: [0.0; 8],
+            power: equalized_thrust(EARTH_GRAVITY),
+        }
+    }
 }
 
 impl Thrusters {
+    /// Idle thrusters of this power.
+    pub fn with_power(power: MetresPerSecondSquared) -> Thrusters {
+        Thrusters {
+            levels: [0.0; 8],
+            power,
+        }
+    }
+
     pub fn level(&self, thruster: Thruster) -> f64 {
         self.levels[thruster as usize]
     }
@@ -180,7 +209,8 @@ impl Look {
 }
 
 pub fn shape() -> BodyShape {
-    let mut shape = BodyShape::weighted_sphere(RADIUS, MASS, BALLAST, BOUNDARY_SAMPLES);
+    let mut shape = BodyShape::weighted_sphere(RADIUS, MASS, BALLAST, BOUNDARY_SAMPLES)
+        .displacing(DISPLACEMENT);
     shape.friction = 0.0;
     shape.restitution = 0.0;
     shape
@@ -217,15 +247,16 @@ pub fn drive(
 ) {
     thrusters.spool(input, dt);
     let net = thrusters.net();
+    let power = thrusters.power.0;
     let [right, up, back] = input.frame;
     let mut thrust = [0.0; 3];
-    add_scaled(&mut thrust, &right, net[0] * THRUST.0);
-    add_scaled(&mut thrust, &up, net[1] * THRUST.0);
-    add_scaled(&mut thrust, &back, net[2] * THRUST.0);
+    add_scaled(&mut thrust, &right, net[0] * power);
+    add_scaled(&mut thrust, &up, net[1] * power);
+    add_scaled(&mut thrust, &back, net[2] * power);
     match (body.solid, body.ground) {
-        (true, Some(ground)) => walk(body, &thrust, &ground, vessel, dt),
+        (true, Some(ground)) => walk(body, &thrust, power, &ground, vessel, dt),
         (true, None) => add_scaled(&mut body.v, &thrust, dt),
-        (false, _) => fly(body, &thrust, vessel, dt),
+        (false, _) => fly(body, &thrust, power, vessel, dt),
     }
     let air_spin = if vessel.air_velocity(body.p).is_some() {
         vessel.angular_velocity()
@@ -233,18 +264,29 @@ pub fn drive(
         [0.0; 3]
     };
     let roll = thrusters.roll() * ROLL_RATE;
+    let righting = cross(
+        &body.rotate(&[0.0, 1.0, 0.0]),
+        &vessel.down(body.p).map(|d| -d),
+    );
     let k = (dt / GYRO_TAU).min(1.0);
-    for ((w, air), axis) in body.w.iter_mut().zip(air_spin).zip(back) {
-        *w += (air + axis * roll - *w) * k;
+    for (((w, air), axis), lean) in body.w.iter_mut().zip(air_spin).zip(back).zip(righting) {
+        *w += (air + axis * roll + lean / RIGHTING_TAU - *w) * k;
     }
 }
 
 /// Legs: push along the ground until the feet move over it at walking speed in the direction
 /// thrust, within what friction allows; thrust along the ground's normal acts as it is.
-fn walk(body: &mut Body, thrust: &Vec3d, ground: &Ground, vessel: &impl Vessel, dt: f64) {
+fn walk(
+    body: &mut Body,
+    thrust: &Vec3d,
+    power: f64,
+    ground: &Ground,
+    vessel: &impl Vessel,
+    dt: f64,
+) {
     let n = ground.normal;
     let ground_velocity = vessel.wall_velocity(ground.point);
-    let along = limited(flatten(thrust, &n).map(|t| t / THRUST.0), 1.0);
+    let along = limited(flatten(thrust, &n).map(|t| t / power.max(1e-9)), 1.0);
     let speed = WALK_SPEED.0 as f64;
     let wanted = [
         ground_velocity[0] + along[0] * speed,
@@ -268,7 +310,7 @@ fn walk(body: &mut Body, thrust: &Vec3d, ground: &Ground, vessel: &impl Vessel, 
 
 /// Thrusters and the flight assist, which brakes toward the surrounding air, or toward the stars
 /// where there is none.
-fn fly(body: &mut Body, thrust: &Vec3d, vessel: &impl Vessel, dt: f64) {
+fn fly(body: &mut Body, thrust: &Vec3d, power: f64, vessel: &impl Vessel, dt: f64) {
     let rest = vessel.air_velocity(body.p).unwrap_or([0.0; 3]);
     add_scaled(&mut body.v, thrust, dt);
     let slip = [
@@ -276,7 +318,7 @@ fn fly(body: &mut Body, thrust: &Vec3d, vessel: &impl Vessel, dt: f64) {
         rest[1] - body.v[1],
         rest[2] - body.v[2],
     ];
-    let brake = limited(slip.map(|s| s / ASSIST_TAU), THRUST.0);
+    let brake = limited(slip.map(|s| s / ASSIST_TAU), power);
     add_scaled(&mut body.v, &brake, dt);
 }
 

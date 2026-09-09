@@ -16,11 +16,11 @@ offers a GPU adapter with `chrome://flags/#enable-vulkan` turned on.
 
 | | |
 | --- | --- |
-| glass radius | 10.5 m |
-| width | 12 m |
+| glass radius | 10.5 m to start (diameter 6–40 m by F6) |
+| width | 12 m to start (2–20 m by F7) |
 | ground | 0.5 m deep all round, so the floor is 10 m from the axis |
 | spin | 1.0055 rad/s, one turn every 6.25 s, so that your centre of mass rides at 9.80665 m/s² |
-| you | 80 kg, eye 1.7 m above the ground, walk 1.5 m/s, thrusters 17.5 m/s² each (1.78 g) |
+| you | 80 kg, eye 1.7 m above the ground, walk 1.5 m/s, thrusters 1.78 times the standing gravity each (17.5 m/s² at one g) |
 
 The spin is derived, not tuned: ω = √(g / r) for the radius your centre of mass stands at. The
 HUD shows your measured weight from the ground's push, which reads 1.00 g standing still, more
@@ -33,7 +33,7 @@ walking spinward and less walking against the spin, exactly as a ring this small
 | `just lint`  | `cargo fmt --check`, the layering lint, clippy (native + wasm) |
 | `just test`  | the contract tests in `game/tests/`                            |
 | `just bench` | a fixed fluid workload, timed per frame on the GPU             |
-| `just record`| an mp4 of each thruster firing, then walking, hopping and flying, into `target/record/` |
+| `just record`| an mp4 of each thruster firing, then walking, hopping, flying, wading and the ring made bigger, into `target/record/` |
 | `just wasm`  | the browser client through `wasm-bindgen` into `target/wasm/`  |
 | `just dist`  | the page plus the wasm bundle in `dist/`                       |
 | `just serve` | build `dist/` and serve it on http://localhost:8000            |
@@ -76,16 +76,18 @@ thrusters and legs that push against whatever ground it stands on. Click the vie
 mouse; the mouse turns your head and Escape releases it. W/S, A/D, Space/Shift and Q/E each fire
 a thruster: forward and back, left and right, up and down, roll left and roll right. Thrusters
 spool up and down over a third of a second, and the cross in the bottom-left corner shows each
-one filling as it fires, the bent arms at its shoulders being the roll pair. Every thruster is
-the same jet, heard from where it sits on you (the one pushing you forward roars from behind,
-the one pushing you left from your right side) at a quarter loudness as soon as it fires and at
-full when it is at full. Opposed thrusters cancel each other out; the widget still shows both
-firing.
+one where it sits on you, filling as it fires: pushing forward lights the arm at the back, the
+bent arms at the shoulders being the roll pair. Every thruster is the same jet, heard from where
+it sits (the one pushing you forward roars from behind, the one pushing you left is louder in
+your right ear) at a quarter loudness as soon as it fires and at full when it is at full.
+Opposed thrusters cancel each other out; the widget still shows both firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in
-that direction. Each thruster pulls 1.78 g, so holding Space lifts you off the floor at 0.78 g,
+that direction. Thruster power is a setting (F8), and starts out equalized to the standing
+gravity: each thruster pulls 1.78 times it, so holding Space lifts you off the floor at 0.78 g,
 and in the air every thruster acts on you directly: fly in bursts, and the ground you left keeps
-moving under you until you meet it again.
+moving under you until you meet it again. In water you float, only just, and the water drags on
+you: the thrusters still push you through it and out of it, at a few metres a second.
 
 Enter toggles between solid and ghost. Solid, you are carried round with the ground, weigh what
 the spin gives you and cannot leave the drum. As a ghost a flight assist brakes you against the
@@ -95,9 +97,13 @@ The crosshair aims at the drum's inner surface: the left button injects water th
 button places a raft lying flat on it, and the middle button raises the landscape (hold Control to
 lower it). New water and rafts start out moving with the ground.
 
-Every setting is a key, listed on screen with its current value. Hold F1–F7 (spin, flow,
-viscosity, wall friction, raft friction, brush size, brush rate) and turn the mouse wheel to change
-it; G toggles air drag and Enter solid or ghost. Backspace chorded with 0 resets everything to the
+Every setting is a key, listed on screen with its current value. Hold F1–F8 (spin, flow,
+viscosity, wall friction, raft friction, ring diameter, ring width, thruster power) and turn the
+mouse wheel to change it; G toggles air drag and Enter solid or ghost. Changing the ring's size
+keeps everything else: the water and the landscape stretch to fit, and whatever the new walls
+would cut through is pulled inside them. The spin stays, so a bigger ring pulls harder; T
+equalizes the thruster power to the standing gravity again, the way the initial state is set up,
+so the game plays as it did at the start. Backspace chorded with 0 resets everything to the
 initial state; with 1, 2 or 3 it removes all water, removes all rafts, or flattens the landscape
 back to the initial ground.
 

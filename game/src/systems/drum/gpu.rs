@@ -16,8 +16,8 @@ use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderSystems};
 use bevy::shader::Shader;
 
+use super::Drum;
 use super::landscape::{ROWS, SEGMENTS};
-use super::{Drum, HALF_WIDTH, RADIUS};
 use crate::core::units::{Radians, RadiansPerSecond};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
@@ -44,14 +44,14 @@ impl DrumUniform {
         DrumUniform {
             spin: spin.0,
             angle: angle.0 as f32,
-            radius: RADIUS,
-            half_width: HALF_WIDTH,
+            radius: drum.ring.radius.0,
+            half_width: drum.ring.half_width.0,
             landscape: u32::from(!drum.landscape.is_empty()),
             segments: SEGMENTS as u32,
             rows: ROWS as u32,
             pad: 0,
             dphi: std::f32::consts::TAU / SEGMENTS as f32,
-            dy: 2.0 * HALF_WIDTH / (ROWS as f32 - 1.0),
+            dy: drum.landscape.row_spacing() as f32,
             pad_b: 0.0,
             pad_c: 0.0,
         }

@@ -10,7 +10,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 
 use super::landscape::{ROWS, SEGMENTS};
-use super::{DrumFrame, DrumUniform, HALF_WIDTH, RADIUS};
+use super::{DrumFrame, DrumUniform, Landscape, Ring};
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f32 = 0.02;
@@ -18,6 +18,10 @@ const STRUTS: usize = 24;
 /// The ground is tiled in patches of this many segments and rows, alternately tinted, so that
 /// walking over it reads as motion and distance.
 const PATCH: usize = 8;
+/// The glass is made of square panes about this size, gridded together round the ring, with
+/// seams this wide between them.
+const PANE: f32 = 1.0;
+const SEAM: f32 = 0.03;
 use crate::systems::scene::SUN_DIRECTION;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -30,7 +34,7 @@ impl Plugin for DrumPlugin {
             .add_systems(Startup, spawn)
             .add_systems(
                 Update,
-                (turn, rebuild_terrain, feed_water).in_set(SimSet::Observe),
+                (rebuild_structure, turn, rebuild_terrain, feed_water).in_set(SimSet::Observe),
             );
     }
 }
@@ -41,6 +45,9 @@ struct GlassMaterial {
     tint: LinearRgba,
     #[uniform(0)]
     sun: Vec4,
+    /// The drum's angle, the pane size round and along, and the seam width.
+    #[uniform(0)]
+    panes: Vec4,
 }
 
 impl Material for GlassMaterial {
@@ -67,68 +74,52 @@ impl Material for GlassMaterial {
 #[derive(Component)]
 struct WheelFrame;
 
+/// The glass, its rim rings and struts: built for a ring of one size, rebuilt for another.
+#[derive(Component)]
+struct Structure(Ring);
+
 #[derive(Component)]
 struct Terrain {
     version: Option<u64>,
 }
 
+/// The materials the structure is rebuilt with.
+#[derive(Resource)]
+struct StructureMaterials {
+    glass: Handle<GlassMaterial>,
+    metal: Handle<StandardMaterial>,
+}
+
 fn spawn(
     mut commands: Commands,
+    sim: Res<Simulation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glass: ResMut<Assets<GlassMaterial>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        Mesh3d(
-            meshes.add(
-                Cylinder::new(RADIUS, 2.0 * HALF_WIDTH)
-                    .mesh()
-                    .resolution(256),
-            ),
-        ),
-        MeshMaterial3d(glass.add(GlassMaterial {
+    let ring = sim.drum.ring;
+    let materials = StructureMaterials {
+        glass: glass.add(GlassMaterial {
             tint: LinearRgba::new(0.55, 0.75, 0.95, 0.09),
             sun: SUN_DIRECTION.extend(0.0),
-        })),
-    ));
-
-    let metal = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.16, 0.17, 0.2),
-        metallic: 0.8,
-        perceptual_roughness: 0.45,
-        ..default()
-    });
-    let ring = meshes.add(
-        Torus::new(RADIUS + 0.05, RADIUS + 0.35)
-            .mesh()
-            .major_resolution(256),
-    );
-    let strut = meshes.add(Cuboid::new(0.25, 2.0 * HALF_WIDTH + 0.6, 0.25));
+            panes: pane_layout(ring, 0.0),
+        }),
+        metal: standard.add(StandardMaterial {
+            base_color: Color::srgb(0.16, 0.17, 0.2),
+            metallic: 0.8,
+            perceptual_roughness: 0.45,
+            ..default()
+        }),
+    };
     let terrain_material = standard.add(StandardMaterial {
         perceptual_roughness: 0.95,
         double_sided: true,
         cull_mode: None,
         ..default()
     });
-    commands
+    let frame = commands
         .spawn((WheelFrame, Transform::default(), Visibility::default()))
         .with_children(|frame| {
-            for side in [-1.0, 1.0] {
-                frame.spawn((
-                    Mesh3d(ring.clone()),
-                    MeshMaterial3d(metal.clone()),
-                    Transform::from_xyz(0.0, side * (HALF_WIDTH + 0.15), 0.0),
-                ));
-            }
-            for k in 0..STRUTS {
-                let a = k as f32 / STRUTS as f32 * std::f32::consts::TAU;
-                let r = RADIUS + 0.2;
-                frame.spawn((
-                    Mesh3d(strut.clone()),
-                    MeshMaterial3d(metal.clone()),
-                    Transform::from_xyz(r * a.cos(), 0.0, r * a.sin()),
-                ));
-            }
             frame.spawn((
                 Terrain { version: None },
                 MeshMaterial3d(terrain_material),
@@ -136,12 +127,102 @@ fn spawn(
                 Transform::default(),
                 Visibility::Hidden,
             ));
-        });
+        })
+        .id();
+    build_structure(&mut commands, &mut meshes, frame, ring, &materials);
+    commands.insert_resource(materials);
 }
 
-fn turn(sim: Res<Simulation>, mut frames: Query<&mut Transform, With<WheelFrame>>) {
+/// The glass cylinder and, fixed to the wheel, the rim rings and struts, all sized to `ring`.
+fn build_structure(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    frame: Entity,
+    ring: Ring,
+    materials: &StructureMaterials,
+) {
+    let (radius, half_width) = (ring.radius.0, ring.half_width.0);
+    let metal = &materials.metal;
+    commands.spawn((
+        Structure(ring),
+        Mesh3d(
+            meshes.add(
+                Cylinder::new(radius, 2.0 * half_width)
+                    .mesh()
+                    .resolution(256),
+            ),
+        ),
+        MeshMaterial3d(materials.glass.clone()),
+    ));
+    let rim = meshes.add(
+        Torus::new(radius + 0.05, radius + 0.35)
+            .mesh()
+            .major_resolution(256),
+    );
+    let strut = meshes.add(Cuboid::new(0.25, 2.0 * half_width + 0.6, 0.25));
+    commands.entity(frame).with_children(|frame| {
+        for side in [-1.0, 1.0] {
+            frame.spawn((
+                Structure(ring),
+                Mesh3d(rim.clone()),
+                MeshMaterial3d(metal.clone()),
+                Transform::from_xyz(0.0, side * (half_width + 0.15), 0.0),
+            ));
+        }
+        for k in 0..STRUTS {
+            let a = k as f32 / STRUTS as f32 * std::f32::consts::TAU;
+            let r = radius + 0.2;
+            frame.spawn((
+                Structure(ring),
+                Mesh3d(strut.clone()),
+                MeshMaterial3d(metal.clone()),
+                Transform::from_xyz(r * a.cos(), 0.0, r * a.sin()),
+            ));
+        }
+    });
+}
+
+/// The pane grid for a ring of this size at this angle: a whole number of panes round the glass,
+/// so the grid closes on itself.
+fn pane_layout(ring: Ring, angle: f32) -> Vec4 {
+    let circumference = std::f32::consts::TAU * ring.radius.0;
+    let round = circumference / (circumference / PANE).round().max(1.0);
+    Vec4::new(angle, round, PANE, SEAM)
+}
+
+/// Tear down and rebuild the glass and its frame when the ring changes size.
+fn rebuild_structure(
+    mut commands: Commands,
+    sim: Res<Simulation>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<StructureMaterials>,
+    structures: Query<(Entity, &Structure)>,
+    frames: Query<Entity, With<WheelFrame>>,
+) {
+    let ring = sim.drum.ring;
+    if structures.iter().all(|(_, built)| built.0 == ring) {
+        return;
+    }
+    for (entity, _) in &structures {
+        commands.entity(entity).despawn();
+    }
+    for frame in &frames {
+        build_structure(&mut commands, &mut meshes, frame, ring, &materials);
+    }
+}
+
+fn turn(
+    sim: Res<Simulation>,
+    materials: Res<StructureMaterials>,
+    mut glass: ResMut<Assets<GlassMaterial>>,
+    mut frames: Query<&mut Transform, With<WheelFrame>>,
+) {
+    let angle = sim.drum.angle.0 as f32;
     for mut transform in &mut frames {
-        transform.rotation = Quat::from_rotation_y(sim.drum.angle.0 as f32);
+        transform.rotation = Quat::from_rotation_y(angle);
+    }
+    if let Some(mut material) = glass.get_mut(&materials.glass) {
+        material.panes = pane_layout(sim.drum.ring, angle);
     }
 }
 
@@ -181,9 +262,11 @@ fn rebuild_terrain(
 /// The raised parts of the landscape in the wheel's frame, plus skirts down to the glass along
 /// both caps so raised ground reads as solid from the side. Bare glass gets no triangles, and
 /// nothing is placed on the glass itself, which would fight it for depth.
-fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
+fn terrain_mesh(landscape: &Landscape) -> Mesh {
+    let ring = landscape.ring();
+    let (radius, half_width) = (ring.radius.0, ring.half_width.0);
     let dphi = std::f32::consts::TAU / SEGMENTS as f32;
-    let dy = 2.0 * HALF_WIDTH / (ROWS as f32 - 1.0);
+    let dy = landscape.row_spacing() as f32;
     let rows = ROWS + 2;
     let mut positions = Vec::with_capacity(SEGMENTS * rows);
     let mut colours = Vec::with_capacity(SEGMENTS * rows);
@@ -191,17 +274,17 @@ fn terrain_mesh(landscape: &super::Landscape) -> Mesh {
         let phi = i as f32 * dphi;
         let (s, c) = phi.sin_cos();
         let mut push = |height: f32, y: f32, j: usize| {
-            let r = RADIUS - height.max(GLASS_INSET);
-            let y = y.clamp(-HALF_WIDTH + GLASS_INSET, HALF_WIDTH - GLASS_INSET);
+            let r = radius - height.max(GLASS_INSET);
+            let y = y.clamp(-half_width + GLASS_INSET, half_width - GLASS_INSET);
             positions.push([r * c, y, r * s]);
             let light = (i / PATCH + j / PATCH).is_multiple_of(2);
             colours.push(ground_colour(height, light));
         };
-        push(0.0, -HALF_WIDTH, 0);
+        push(0.0, -half_width, 0);
         for j in 0..ROWS {
-            push(landscape.height_at(i, j), -HALF_WIDTH + j as f32 * dy, j);
+            push(landscape.height_at(i, j), -half_width + j as f32 * dy, j);
         }
-        push(0.0, HALF_WIDTH, ROWS - 1);
+        push(0.0, half_width, ROWS - 1);
     }
     let raised = |i: usize, j: usize| {
         let row = j.clamp(1, ROWS) - 1;

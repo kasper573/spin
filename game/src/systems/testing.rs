@@ -18,7 +18,7 @@ use crate::systems::controls::pilot;
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
-use crate::systems::settings::Settings;
+use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SimSet, Simulation};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -47,6 +47,13 @@ pub enum ScriptCommand {
     Spin {
         value: f32,
     },
+    /// Make the ring another size.
+    Ring {
+        diameter: f32,
+        width: f32,
+    },
+    /// Set the thrusters' power to what the standing gravity calls for.
+    Equalize,
     /// Make the avatar a ghost and put its eye somewhere, looking at a point.
     Camera {
         x: f32,
@@ -112,6 +119,10 @@ pub struct ScriptStatus {
     pub airborne: bool,
     /// How hard each thruster is firing, in the order of `Thruster::ALL`.
     pub thrust: [f32; 8],
+    /// Peak acceleration of a thruster.
+    pub thrust_power: f32,
+    pub diameter: f32,
+    pub width: f32,
 }
 
 /// Thruster keys a script holds down until a simulated time.
@@ -179,6 +190,12 @@ fn execute(world: &mut World, command: ScriptCommand) {
             world.resource_mut::<Settings>().spin = RadiansPerSecond(value);
             world.resource_mut::<Simulation>().drum.target_spin = RadiansPerSecond(value);
         }
+        ScriptCommand::Ring { diameter, width } => {
+            let mut settings = world.resource_mut::<Settings>();
+            Dial::Diameter.set(&mut settings, diameter);
+            Dial::Width.set(&mut settings, width);
+        }
+        ScriptCommand::Equalize => world.resource_mut::<Settings>().equalize_thrust(),
         ScriptCommand::Camera {
             x,
             y,
@@ -271,6 +288,9 @@ fn publish(
         ground_speed: footing.ground_speed,
         airborne: footing.airborne,
         thrust: sim.thrusters.levels().map(|l| l as f32),
+        thrust_power: sim.thrusters.power.0 as f32,
+        diameter: sim.drum.ring.radius.0 * 2.0,
+        width: sim.drum.ring.half_width.0 * 2.0,
     };
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);

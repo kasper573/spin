@@ -1,9 +1,10 @@
 //! What the thrusters look and sound like. The widget is a three-axis cross in the bottom-left of
-//! the view, in the frame the thrusters act in: up, down, left and right arms at full length,
+//! the view, in the frame the thrusters sit in: up, down, left and right arms at full length,
 //! the forward and back arms receding diagonally, and a bent arm at each shoulder for the roll
-//! pair. Each arm fills from the centre outward as its thruster spools up. Each thruster also has
-//! a voice, the same jet for all of them, heard from where it sits around the head and as loud
-//! as its level says.
+//! pair. Each arm is a thruster where it is mounted, and fills from the centre outward as that
+//! thruster spools up: pushing forward lights the arm at the back. Each thruster also has a
+//! voice, the same jet for all of them, heard from where it sits around the head and as loud as
+//! its level says.
 //!
 //! The cross is projected onto the image plane by hand rather than left to the camera: a solid
 //! drawn off-axis under a wide lens skews toward the vanishing point.
@@ -16,7 +17,7 @@ use bevy::audio::{
 use bevy::prelude::*;
 
 use crate::core::audio::{self, Placement, Voice};
-use crate::core::avatar::Thruster;
+use crate::core::avatar::{self, Thruster};
 use crate::systems::controls::Controls;
 use crate::systems::player::{Player, PlayerCamera};
 use crate::systems::sim::{SimSet, Simulation};
@@ -99,10 +100,10 @@ fn draw(
         - view.up() * (half_height - margin);
     let place = |p: Vec2| centre + view.right() * (p.x * arm) + view.up() * (p.y * arm);
     for thruster in Thruster::ALL {
+        let mount = thruster.mount().map(|m| (m / avatar::RADIUS) as f32);
         let points = match thruster {
-            Thruster::RollLeft => shoulder(1.0),
-            Thruster::RollRight => shoulder(-1.0),
-            linear => vec![Vec2::ZERO, screen(linear.direction().map(|d| d as f32))],
+            Thruster::RollLeft | Thruster::RollRight => shoulder(mount[0]),
+            _ => vec![Vec2::ZERO, screen(mount)],
         };
         arms.linestrip(points.iter().map(|p| place(*p)), IDLE);
         let level = sim.thrusters.level(thruster) as f32;
@@ -113,13 +114,13 @@ fn draw(
     fills.sphere(Isometry3d::from_translation(centre), arm * 0.06, IDLE);
 }
 
-/// Where a direction in the thrusters' frame (x right, y up, z back) lands on the widget.
+/// Where a point of the hull in the thrusters' frame (x right, y up, z back) lands on the widget.
 fn screen(direction: [f32; 3]) -> Vec2 {
     Vec2::new(direction[0], direction[1]) - RECEDING * (direction[2] * RECEDING_LENGTH)
 }
 
 /// The bent arm at a shoulder (`side` 1 right, -1 left): an arc from below the shoulder up and
-/// over toward the other side. The right one lifts the right shoulder, rolling the body left.
+/// over toward the other side, the way that shoulder's roll thruster lifts it.
 fn shoulder(side: f32) -> Vec<Vec2> {
     (0..=ARC_SEGMENTS)
         .map(|i| {

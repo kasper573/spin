@@ -148,6 +148,18 @@ try {
   await command({ cmd: "spin", value: 1.0 });
   await command({ cmd: "advance", seconds: 4 });
 
+  await command({ cmd: "ring", diameter: 30, width: 16 });
+  await command({ cmd: "advance", seconds: 2 });
+  const resized = await status();
+  check("the ring resizes and keeps its water", resized.diameter === 30 && resized.width === 16 && resized.particles === 1800 && resized.landscape_max > 1.2, JSON.stringify({ diameter: resized.diameter, width: resized.width, particles: resized.particles, land: resized.landscape_max }));
+  await command({ cmd: "equalize" });
+  await command({ cmd: "advance", seconds: 0.2 });
+  const equalized = await status();
+  check("thruster power equalizes to the bigger ring's gravity", equalized.thrust_power > 1.78 * 14.0 && equalized.thrust_power < 1.78 * 14.6, `${equalized.thrust_power} m/s2`);
+  await screenshot("resized");
+  await command({ cmd: "ring", diameter: 21, width: 12 });
+  await command({ cmd: "advance", seconds: 2 });
+
   await sleep(2000);
   const live = await status();
   check("frames render", live.fps > 1, `${live.fps.toFixed(1)} fps, sim ${(live.sim_rate * 100).toFixed(0)}%`);

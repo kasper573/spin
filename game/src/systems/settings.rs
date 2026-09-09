@@ -1,11 +1,14 @@
 //! User-adjustable parameters and the keys that drive them. Every dial is a value with a range and
-//! a step; every toggle flips a flag.
+//! a step; every toggle flips a flag; every action is a single press.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::avatar;
+use crate::core::fluid::Fluid;
 use crate::core::units::{
-    EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecond, RadiansPerSecond,
+    EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecondSquared, RadiansPerSecond,
 };
+use crate::systems::drum::{DEFAULT_RING, LARGEST_RING, Ring};
 use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -19,22 +22,27 @@ pub struct Settings {
     pub air: bool,
     /// Whether the avatar is solid to the drum, the water and the rafts, or a ghost.
     pub collisions: bool,
-    pub brush_size: Metres,
-    pub brush_rate: MetresPerSecond,
+    /// The ring's size across and along its axis.
+    pub diameter: Metres,
+    pub width: Metres,
+    /// Peak acceleration of each of the avatar's thrusters.
+    pub thrust: MetresPerSecondSquared,
 }
 
 impl Default for Settings {
     fn default() -> Self {
+        let spin = standing_spin(DEFAULT_RING);
         Settings {
-            spin: standing_spin(),
+            spin,
             flow: LitresPerSecond(20_000.0),
             viscosity: 0.15,
             wall_friction: 0.5,
             raft_friction: 0.45,
             air: true,
             collisions: true,
-            brush_size: Metres(2.0),
-            brush_rate: MetresPerSecond(1.0),
+            diameter: Metres(DEFAULT_RING.radius.0 * 2.0),
+            width: Metres(DEFAULT_RING.half_width.0 * 2.0),
+            thrust: avatar::equalized_thrust(standing_gravity(spin, DEFAULT_RING)),
         }
     }
 }
@@ -54,6 +62,25 @@ impl Settings {
         }
         self
     }
+
+    /// The ring these settings ask for.
+    pub fn ring(&self) -> Ring {
+        Ring {
+            radius: Metres(self.diameter.0 / 2.0),
+            half_width: Metres(self.width.0 / 2.0),
+        }
+    }
+
+    /// The gravity the avatar stands under with this spin on this ring.
+    pub fn standing_gravity(&self) -> MetresPerSecondSquared {
+        standing_gravity(self.spin, self.ring())
+    }
+
+    /// Set the thrusters' power to what the standing gravity calls for, as the initial state
+    /// does, so that after changing the ring or its spin the game plays as it did at the start.
+    pub fn equalize_thrust(&mut self) {
+        self.thrust = avatar::equalized_thrust(self.standing_gravity());
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,19 +90,21 @@ pub enum Dial {
     Viscosity,
     WallFriction,
     RaftFriction,
-    BrushSize,
-    BrushRate,
+    Diameter,
+    Width,
+    Thrust,
 }
 
 impl Dial {
-    pub const ALL: [Dial; 7] = [
+    pub const ALL: [Dial; 8] = [
         Dial::Spin,
         Dial::Flow,
         Dial::Viscosity,
         Dial::WallFriction,
         Dial::RaftFriction,
-        Dial::BrushSize,
-        Dial::BrushRate,
+        Dial::Diameter,
+        Dial::Width,
+        Dial::Thrust,
     ];
 
     pub fn key(self) -> KeyCode {
@@ -85,8 +114,9 @@ impl Dial {
             Dial::Viscosity => KeyCode::F3,
             Dial::WallFriction => KeyCode::F4,
             Dial::RaftFriction => KeyCode::F5,
-            Dial::BrushSize => KeyCode::F6,
-            Dial::BrushRate => KeyCode::F7,
+            Dial::Diameter => KeyCode::F6,
+            Dial::Width => KeyCode::F7,
+            Dial::Thrust => KeyCode::F8,
         }
     }
 
@@ -97,8 +127,9 @@ impl Dial {
             Dial::Viscosity => "F3",
             Dial::WallFriction => "F4",
             Dial::RaftFriction => "F5",
-            Dial::BrushSize => "F6",
-            Dial::BrushRate => "F7",
+            Dial::Diameter => "F6",
+            Dial::Width => "F7",
+            Dial::Thrust => "F8",
         }
     }
 
@@ -109,18 +140,22 @@ impl Dial {
             Dial::Viscosity => "viscosity",
             Dial::WallFriction => "wall friction",
             Dial::RaftFriction => "raft friction",
-            Dial::BrushSize => "brush size",
-            Dial::BrushRate => "brush rate",
+            Dial::Diameter => "ring diameter",
+            Dial::Width => "ring width",
+            Dial::Thrust => "thruster power",
         }
     }
 
     pub fn min(self) -> f32 {
         match self {
-            Dial::Spin | Dial::Flow | Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => {
-                0.0
-            }
-            Dial::BrushSize => 0.5,
-            Dial::BrushRate => 0.1,
+            Dial::Spin
+            | Dial::Flow
+            | Dial::Viscosity
+            | Dial::WallFriction
+            | Dial::RaftFriction
+            | Dial::Thrust => 0.0,
+            Dial::Diameter => 6.0,
+            Dial::Width => 2.0,
         }
     }
 
@@ -129,8 +164,9 @@ impl Dial {
             Dial::Spin => 2.0,
             Dial::Flow => 200_000.0,
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 1.0,
-            Dial::BrushSize => 8.0,
-            Dial::BrushRate => 5.0,
+            Dial::Diameter => LARGEST_RING.radius.0 * 2.0,
+            Dial::Width => LARGEST_RING.half_width.0 * 2.0,
+            Dial::Thrust => 60.0,
         }
     }
 
@@ -139,8 +175,8 @@ impl Dial {
             Dial::Spin => 0.05,
             Dial::Flow => 5000.0,
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 0.05,
-            Dial::BrushSize => 0.5,
-            Dial::BrushRate => 0.1,
+            Dial::Diameter | Dial::Width => 1.0,
+            Dial::Thrust => 0.5,
         }
     }
 
@@ -151,8 +187,9 @@ impl Dial {
             Dial::Viscosity => s.viscosity,
             Dial::WallFriction => s.wall_friction,
             Dial::RaftFriction => s.raft_friction,
-            Dial::BrushSize => s.brush_size.0,
-            Dial::BrushRate => s.brush_rate.0,
+            Dial::Diameter => s.diameter.0,
+            Dial::Width => s.width.0,
+            Dial::Thrust => s.thrust.0 as f32,
         }
     }
 
@@ -164,8 +201,9 @@ impl Dial {
             Dial::Viscosity => s.viscosity = value,
             Dial::WallFriction => s.wall_friction = value,
             Dial::RaftFriction => s.raft_friction = value,
-            Dial::BrushSize => s.brush_size = Metres(value),
-            Dial::BrushRate => s.brush_rate = MetresPerSecond(value),
+            Dial::Diameter => s.diameter = Metres(value),
+            Dial::Width => s.width = Metres(value),
+            Dial::Thrust => s.thrust = MetresPerSecondSquared(value as f64),
         }
     }
 
@@ -180,12 +218,15 @@ impl Dial {
         match self {
             Dial::Spin => format!(
                 "{v:.3} rad/s ({:.2} g standing)",
-                standing_gravity(s.spin).0 / EARTH_GRAVITY.0
+                s.standing_gravity().0 / EARTH_GRAVITY.0
             ),
             Dial::Flow => format!("{:.1} m3/s", v / 1000.0),
             Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => format!("{v:.2}"),
-            Dial::BrushSize => format!("{v:.1} m"),
-            Dial::BrushRate => format!("{v:.1} m/s"),
+            Dial::Diameter | Dial::Width => format!("{v:.0} m"),
+            Dial::Thrust => format!(
+                "{v:.1} m/s2 ({:.2} g standing)",
+                s.thrust.0 / s.standing_gravity().0.max(1e-9)
+            ),
         }
     }
 }
@@ -235,6 +276,40 @@ impl Toggle {
     }
 }
 
+/// Single presses that set something rather than switch it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    EqualizeThrust,
+}
+
+impl Action {
+    pub const ALL: [Action; 1] = [Action::EqualizeThrust];
+
+    pub fn key(self) -> KeyCode {
+        match self {
+            Action::EqualizeThrust => KeyCode::KeyT,
+        }
+    }
+
+    pub fn key_label(self) -> &'static str {
+        match self {
+            Action::EqualizeThrust => "T",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::EqualizeThrust => "equalize thruster power to gravity",
+        }
+    }
+
+    pub fn apply(self, s: &mut Settings) {
+        match self {
+            Action::EqualizeThrust => s.equalize_thrust(),
+        }
+    }
+}
+
 pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
@@ -248,8 +323,12 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
+fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>, mut fluid: ResMut<Fluid>) {
+    let ring = settings.ring();
+    sim.resize(ring);
+    fluid.fit(ring.extent());
     sim.drum.target_spin = settings.spin;
+    sim.thrusters.power = settings.thrust;
     sim.params.viscosity = settings.viscosity;
     sim.params.wall_friction = settings.wall_friction;
     sim.params.air = settings.air;

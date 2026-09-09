@@ -111,6 +111,7 @@ pub fn apply(
 ) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
+    sim.resize(settings.ring());
     fluid.clear();
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-10.0, 10.0));
     sim.drum.target_spin = settings.spin;

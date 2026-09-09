@@ -234,7 +234,7 @@ const SPECS: [Spec; 15] = [
         shader: BODIES,
         entry: "buoyancy",
         particles: &[0, 1, 2, 9],
-        vessel: false,
+        vessel: true,
         bodies: &[0, 2, 3, 4],
         surface: &[],
         read_only: BODY_READS,

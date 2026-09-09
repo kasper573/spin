@@ -75,12 +75,12 @@ fn snapshot_round_trips_through_json() {
 
 #[test]
 fn settings_are_sanitized_on_load() {
-    let text = r#"{"spin": 99.0, "flow": null, "viscosity": "bad", "brush_size": -5.0}"#;
+    let text = r#"{"spin": 99.0, "flow": null, "viscosity": "bad", "diameter": -5.0}"#;
     let settings = serde_json::from_str::<Settings>(text)
         .unwrap_or_default()
         .sanitized();
     assert!(Dial::Spin.get(&settings) <= Dial::Spin.max());
-    assert!(Dial::BrushSize.get(&settings) >= Dial::BrushSize.min());
+    assert!(Dial::Diameter.get(&settings) >= Dial::Diameter.min());
 }
 
 #[test]

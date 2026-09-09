@@ -1,13 +1,14 @@
 use bevy::prelude::*;
 use game::core::audio::{self, Placement, Voice};
-use game::core::avatar::{self, EYE_HEIGHT, SPOOL_TIME, THRUST, Thruster, WALK_SPEED};
+use game::core::avatar::{self, EYE_HEIGHT, SPOOL_TIME, Thruster, WALK_SPEED, equalized_thrust};
+use game::core::fluid::Fluid;
 use game::core::math::norm;
-use game::core::units::{EARTH_GRAVITY, RadiansPerSecond, Seconds};
+use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{FLOOR_RADIUS, RADIUS};
+use game::systems::drum::DEFAULT_RING;
 use game::systems::player::{PilotInput, Player};
-use game::systems::settings::Settings;
-use game::systems::sim::{Simulation, standing_spin};
+use game::systems::settings::{Dial, Settings};
+use game::systems::sim::{Simulation, standing_gravity, standing_spin};
 use game::systems::testing;
 
 fn state(app: &App) -> &Simulation {
@@ -63,12 +64,12 @@ fn standing_on_the_ring_weighs_one_g_at_eye_height() {
     let mut app = testing::headless();
     testing::run(&mut app, Seconds(3.0));
     let sim = state(&app);
-    assert_eq!(sim.drum.spin, standing_spin());
+    assert_eq!(sim.drum.spin, standing_spin(DEFAULT_RING));
     let g = weight_in_g(sim);
     assert!((g - 1.0).abs() < 0.03, "weight {g} g");
     assert!(ground_slip(sim) < 0.05, "slip {}", ground_slip(sim));
     let eye = avatar::eye(sim.avatar());
-    let height = FLOOR_RADIUS as f64 - radius(eye);
+    let height = DEFAULT_RING.floor_radius().0 as f64 - radius(eye);
     assert!(
         (height - EYE_HEIGHT.0 as f64).abs() < 0.05,
         "eye {height} m above the ground"
@@ -148,9 +149,11 @@ fn up_thrust_lifts_off_and_the_ground_comes_back_to_meet_it() {
     hold(&mut app, PilotInput::firing(&[Thruster::Up]), 0.8);
     let sim = state(&app);
     assert!(sim.avatar().ground.is_none(), "still on the ground");
-    // full thrust beats the standing gravity by THRUST - g, less what spooling up cost
+    // full thrust beats the standing gravity by the margin it was equalized with, less what
+    // spooling up cost
     let rising = radius(start) - radius(sim.avatar().p);
-    let climb = (THRUST.0 - EARTH_GRAVITY.0) * (0.8 - SPOOL_TIME.0 as f64 / 2.0);
+    let thrust = equalized_thrust(EARTH_GRAVITY).0;
+    let climb = (thrust - EARTH_GRAVITY.0) * (0.8 - SPOOL_TIME.0 as f64 / 2.0);
     assert!(rising > 0.3, "rose only {rising} m");
     let inward = -(sim.avatar().v[0] * sim.avatar().p[0] + sim.avatar().v[2] * sim.avatar().p[2])
         / radius(sim.avatar().p);
@@ -248,7 +251,7 @@ fn a_solid_avatar_outside_stays_outside() {
     let p = sim.avatar().p;
     assert!(!sim.drum.encloses(p), "entered the drum at {p:?}");
     assert!(
-        radius(p) < RADIUS as f64 + 5.0 && p[1].abs() < 20.0,
+        radius(p) < DEFAULT_RING.radius.0 as f64 + 5.0 && p[1].abs() < 20.0,
         "flew off to {p:?}"
     );
 }
@@ -303,5 +306,121 @@ fn every_thruster_is_heard_from_where_it_sits() {
     assert!(
         behind < in_front,
         "the forward thruster fires behind the head"
+    );
+    for thruster in Thruster::ALL {
+        let [left, right] = ears(thruster);
+        let (near, far) = (left.max(right), left.min(right));
+        assert!(
+            far > near * 0.3,
+            "{thruster:?} is heard in one ear only: {left} {right}"
+        );
+    }
+}
+
+/// Half fill the drum with water, moving with the glass.
+fn flood(app: &mut App) {
+    for k in 0..30 {
+        let a = k as f32 * 0.52;
+        app.world_mut()
+            .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world.resource::<Simulation>().inject(
+                    &mut fluid,
+                    [a.cos() * 7.0, (k % 3) as f32 * 3.0 - 3.0, a.sin() * 7.0],
+                    1500,
+                )
+            });
+        testing::run(app, Seconds(0.2));
+    }
+    testing::run(app, Seconds(6.0));
+}
+
+#[test]
+fn the_thrusters_push_through_water_and_out_of_it() {
+    let mut app = testing::headless();
+    flood(&mut app);
+    let sim = state(&app);
+    assert!(
+        sim.avatar().wet > 0.5,
+        "standing dry: wet {}",
+        sim.avatar().wet
+    );
+    let start = radius(sim.avatar().p);
+    // a hop is a chord through the ring, so the rise is measured at its highest
+    let mut risen: f64 = 0.0;
+    for _ in 0..12 {
+        hold(&mut app, PilotInput::firing(&[Thruster::Up]), 0.1);
+        risen = risen.max(start - radius(state(&app).avatar().p));
+    }
+    assert!(risen > 1.5, "up thrust through water rose only {risen} m");
+    testing::run(&mut app, Seconds(4.0));
+    let sim = state(&app);
+    assert!(
+        sim.avatar().wet > 0.3 && sim.avatar().wet < 0.95,
+        "does not float: wet {}",
+        sim.avatar().wet
+    );
+    hold(&mut app, PilotInput::firing(&[Thruster::Forward]), 3.0);
+    let speed = ground_slip(state(&app));
+    assert!(
+        speed > 2.0 && speed < 6.0,
+        "forward thrust through water moves at {speed} m/s"
+    );
+}
+
+#[test]
+fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
+    let mut app = testing::headless();
+    testing::run(&mut app, Seconds(1.0));
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, 30.0);
+        Dial::Width.set(&mut settings, 16.0);
+    }
+    testing::run(&mut app, Seconds(6.0));
+    let settings = app.world().resource::<Settings>().clone();
+    let sim = state(&app);
+    assert_eq!(sim.drum.ring.radius, Metres(15.0));
+    assert_eq!(sim.drum.ring.half_width, Metres(8.0));
+    assert_eq!(sim.drum.spin, standing_spin(DEFAULT_RING));
+    let expected = standing_gravity(sim.drum.spin, sim.drum.ring).0 / EARTH_GRAVITY.0;
+    let g = weight_in_g(sim);
+    assert!(
+        (g - expected).abs() < 0.05,
+        "weight {g} g, expected {expected}"
+    );
+    assert!(expected > 1.3, "the bigger ring pulls {expected} g");
+    assert!(ground_slip(sim) < 0.1, "slip {}", ground_slip(sim));
+    let eye = avatar::eye(sim.avatar());
+    let height = sim.drum.ring.floor_radius().0 as f64 - radius(eye);
+    assert!(
+        (height - EYE_HEIGHT.0 as f64).abs() < 0.05,
+        "eye {height} m above the new ground"
+    );
+    let same_power = sim.thrusters.power;
+    assert_eq!(same_power, settings.thrust);
+    let hop = |app: &mut App| {
+        let start = radius(state(app).avatar().p);
+        hold(app, PilotInput::firing(&[Thruster::Up]), 1.0);
+        let risen = start - radius(state(app).avatar().p);
+        testing::run(app, Seconds(5.0));
+        assert!(state(app).avatar().ground.is_some(), "never came down");
+        risen
+    };
+    let heavy = hop(&mut app);
+    app.world_mut().resource_mut::<Settings>().equalize_thrust();
+    testing::run(&mut app, Seconds(0.1));
+    let sim = state(&app);
+    let equalized = equalized_thrust(standing_gravity(sim.drum.spin, sim.drum.ring));
+    assert_eq!(sim.thrusters.power, equalized);
+    assert!(
+        equalized.0 > same_power.0 * 1.3,
+        "equalized to {} from {}",
+        equalized.0,
+        same_power.0
+    );
+    let light = hop(&mut app);
+    assert!(
+        light > heavy * 2.0 && light > 1.0,
+        "a hop rose {heavy} m before equalizing and {light} m after"
     );
 }

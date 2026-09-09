@@ -39,7 +39,7 @@ impl FluidReady {
         self.0.store(true, Ordering::Relaxed);
     }
 }
-pub use surface::{MAX_INDICES, SurfaceBuffers};
+pub use surface::{MAX_INDICES, SurfaceBuffers, SurfaceParams};
 
 /// Rest spacing between particles (m); every kernel constant derives from it.
 pub const PARTICLE_SPACING: f32 = 0.32;
@@ -126,6 +126,11 @@ impl Grid {
         }
     }
 
+    /// The grid over the box reaching `extent` from the origin each way.
+    pub fn around(extent: [f32; 3], cell: f32) -> Self {
+        Grid::new(extent.map(|e| -e), extent, cell)
+    }
+
     pub fn cells(&self) -> usize {
         (self.dims[0] * self.dims[1] * self.dims[2]) as usize
     }
@@ -135,7 +140,11 @@ impl Grid {
 /// them, the most recent copy read back, and what the water did to the bodies last frame.
 #[derive(Resource)]
 pub struct Fluid {
+    /// The box the buffers were sized for, and the part of it in use.
+    capacity: [f32; 3],
+    extent: [f32; 3],
     grid: Grid,
+    surface: SurfaceParams,
     count: u32,
     pending: Vec<Particle>,
     changed: bool,
@@ -149,6 +158,9 @@ pub struct Fluid {
     /// Frames handed to the GPU and the latest frame whose coupling has come back.
     issued: u32,
     reported: u32,
+    /// The simulated time and substeps of every frame handed to the GPU whose coupling is still
+    /// to come back, by ticket.
+    timeline: Vec<(u32, f64, f64)>,
     rng: Rng,
 }
 
@@ -176,6 +188,24 @@ impl Fluid {
 
     pub fn grid(&self) -> Grid {
         self.grid
+    }
+
+    /// The surface extraction's grid over the part of the box in use.
+    pub fn surface(&self) -> &SurfaceParams {
+        &self.surface
+    }
+
+    /// Sort and extract over the box reaching `extent` from the origin each way, within what
+    /// the buffers were sized for; the particles themselves are untouched.
+    pub fn fit(&mut self, extent: [f32; 3]) {
+        let extent = [0, 1, 2].map(|a| extent[a].clamp(0.0, self.capacity[a]));
+        if extent == self.extent {
+            return;
+        }
+        self.extent = extent;
+        self.grid = Grid::around(extent, H);
+        self.surface = SurfaceParams::new(&surface::grid(extent));
+        self.changed = true;
     }
 
     pub fn add(&mut self, p: Particle) -> bool {
@@ -257,6 +287,11 @@ impl Fluid {
             })
             .collect::<Vec<_>>();
         self.issued = self.issued.wrapping_add(1);
+        self.timeline.push((
+            self.issued,
+            substeps.iter().map(|(dt, _)| dt.0 as f64).sum(),
+            substeps.len() as f64,
+        ));
         let frame = FluidFrame {
             ticket: self.issued,
             substeps: substeps
@@ -326,6 +361,21 @@ impl Fluid {
         self.coupling.take()
     }
 
+    /// The simulated time and substeps of every frame up to this ticket, whose coupling has
+    /// now come back.
+    fn settle(&mut self, ticket: u32) -> (f64, f64) {
+        let (mut seconds, mut substeps) = (0.0, 0.0);
+        self.timeline.retain(|(issued, s, n)| {
+            let reported = (ticket.wrapping_sub(*issued) as i32) >= 0;
+            if reported {
+                seconds += s;
+                substeps += n;
+            }
+            !reported
+        });
+        (seconds, substeps)
+    }
+
     fn snapshot_part(&mut self, part: u8) {
         self.snapshot.parts |= part;
         if self.snapshot.parts == 3 {
@@ -334,11 +384,11 @@ impl Fluid {
     }
 }
 
-/// The GPU fluid inside the given bounds; the vessel plugin must supply the shaders' `vessel`
-/// module and the render world's [`VesselLayout`](crate::core::vessel::VesselLayout).
+/// The GPU fluid, with room for the box reaching `extent` from the origin each way; the vessel
+/// plugin must supply the shaders' `vessel` module and the render world's
+/// [`VesselLayout`](crate::core::vessel::VesselLayout).
 pub struct FluidPlugin {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
+    pub extent: [f32; 3],
 }
 
 impl Plugin for FluidPlugin {
@@ -351,8 +401,8 @@ impl Plugin for FluidPlugin {
         let shaders = FluidShaders(
             SHADERS.map(|path| app.world().resource::<AssetServer>().load::<Shader>(path)),
         );
-        let grid = Grid::new(self.min, self.max, H);
-        let surface_grid = surface::grid(self.min, self.max);
+        let grid = Grid::around(self.extent, H);
+        let surface_grid = surface::grid(self.extent);
         let buffers = gpu::create_buffers(
             &mut app.world_mut().resource_mut::<Assets<ShaderBuffer>>(),
             &grid,
@@ -361,7 +411,10 @@ impl Plugin for FluidPlugin {
         let ready = FluidReady::default();
         app.insert_resource(ready.clone())
             .insert_resource(Fluid {
+                capacity: self.extent,
+                extent: self.extent,
                 grid,
+                surface: surface::SurfaceParams::new(&surface_grid),
                 count: 0,
                 pending: Vec::new(),
                 changed: true,
@@ -372,6 +425,7 @@ impl Plugin for FluidPlugin {
                 totals: Vec::new(),
                 issued: 0,
                 reported: 0,
+                timeline: Vec::new(),
                 rng: Rng::new(0x9E3779B97F4A7C15),
             })
             .insert_resource(buffers)
@@ -383,7 +437,8 @@ impl Plugin for FluidPlugin {
                 ExtractResourcePlugin::<FluidFrame>::default(),
                 ExtractResourcePlugin::<surface::SurfaceParams>::default(),
             ))
-            .add_systems(Startup, watch_impulses);
+            .add_systems(Startup, watch_impulses)
+            .add_systems(PostUpdate, sync_surface);
         let render_app = app.sub_app_mut(RenderApp);
         render_app.insert_resource(ready);
         gpu::install(render_app);
@@ -392,6 +447,13 @@ impl Plugin for FluidPlugin {
 
 #[derive(Resource)]
 struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 5]);
+
+/// Hand the render world the surface grid in use once it changes.
+fn sync_surface(fluid: Res<Fluid>, mut surface: ResMut<SurfaceParams>) {
+    if *surface != *fluid.surface() {
+        *surface = fluid.surface().clone();
+    }
+}
 
 fn watch_impulses(mut commands: Commands, buffers: Res<FluidBuffers>) {
     commands
@@ -406,6 +468,7 @@ fn receive_coupling(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
         _ => (0, fluid.reported),
     };
     fluid.reported = ticket;
+    let (seconds, taken) = fluid.settle(ticket);
     if substeps == 0 {
         return;
     }
@@ -418,7 +481,11 @@ fn receive_coupling(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
         .map(|(now, before)| now.wrapping_sub(*before))
         .collect();
     fluid.totals = raw;
-    let arrived = frame::decode_coupling(&delta);
+    let mut arrived = frame::decode_coupling(&delta);
+    for coupling in &mut arrived {
+        coupling.seconds = seconds;
+        coupling.substeps = taken;
+    }
     match &mut fluid.coupling {
         Some(pending) => {
             for (sum, more) in pending.iter_mut().zip(&arrived) {

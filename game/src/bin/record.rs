@@ -1,21 +1,37 @@
 //! A first-person video of the avatar on the ring: each thruster firing on its own for the widget
 //! to show, then walking, a hop, flying in bursts, turning round and walking against the spin,
-//! rendered headless frame by frame into `target/record/` as PNGs beside the thrusters' voices
-//! as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
+//! wading through water and out of it, and the ring made bigger with the thrusters equalized to
+//! it, rendered headless frame by frame into `target/record/` as PNGs beside the thrusters'
+//! voices as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+use bevy::prelude::*;
 use game::core::audio::{self, Placement, Voice};
 use game::core::avatar::Thruster;
+use game::core::fluid::Fluid;
 use game::core::units::Seconds;
 use game::systems::player::{PilotInput, Player};
+use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
 use game::systems::testing;
 
 const FPS: u32 = 30;
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+
+/// Something the script does to the world as a phase begins.
+#[derive(Clone, Copy, PartialEq)]
+enum Cue {
+    None,
+    /// Pour water in all round the ring.
+    Flood,
+    /// Make the ring bigger.
+    Enlarge,
+    /// Equalize the thruster power to the standing gravity.
+    Equalize,
+}
 
 /// A stretch of the script: how long it lasts, the thrusters held and where the head looks.
 struct Phase {
@@ -24,6 +40,7 @@ struct Phase {
     yaw: f64,
     pitch: f64,
     caption: &'static str,
+    cue: Cue,
 }
 
 fn script() -> Vec<Phase> {
@@ -36,6 +53,11 @@ fn script() -> Vec<Phase> {
         yaw,
         pitch,
         caption,
+        cue: Cue::None,
+    };
+    let cued = |cue, seconds, held: &[Thruster], yaw, pitch, caption| Phase {
+        cue,
+        ..phase(seconds, held, yaw, pitch, caption)
     };
     let mut phases = vec![
         phase(
@@ -48,14 +70,14 @@ fn script() -> Vec<Phase> {
         phase(1.5, &[], 0.0, level, "standing still"),
     ];
     let showcase = [
-        (Forward, "forward thruster (W)"),
-        (Back, "back thruster (S)"),
-        (Left, "left thruster (A)"),
-        (Right, "right thruster (D)"),
-        (Up, "up thruster (Space)"),
-        (Down, "down thruster (Shift)"),
-        (RollLeft, "roll left thruster (Q)"),
-        (RollRight, "roll right thruster (E)"),
+        (Forward, "W: the back thruster pushes forward"),
+        (Back, "S: the front thruster pushes back"),
+        (Left, "A: the right thruster pushes left"),
+        (Right, "D: the left thruster pushes right"),
+        (Up, "Space: the bottom thruster pushes up"),
+        (Down, "Shift: the top thruster pushes down"),
+        (RollLeft, "Q: the right shoulder thruster rolls left"),
+        (RollRight, "E: the left shoulder thruster rolls right"),
     ];
     for (thruster, caption) in showcase {
         phases.push(phase(0.8, &[thruster], 0.0, level, caption));
@@ -95,8 +117,77 @@ fn script() -> Vec<Phase> {
         phase(1.5, &[], pi, level, "turning round"),
         phase(4.0, &[Forward], pi, level, "walking against the spin (W)"),
         phase(1.5, &[], pi, level, "standing still"),
+        cued(
+            Cue::Flood,
+            4.0,
+            &[],
+            pi,
+            level,
+            "flooding the ring with water",
+        ),
+        phase(4.0, &[Forward], pi, level, "wading forward through the water (W)"),
+        phase(
+            2.0,
+            &[Up],
+            pi,
+            level,
+            "thrusting up out of the water (Space)",
+        ),
+        phase(3.5, &[], pi, -0.3, "floating"),
+        cued(
+            Cue::Enlarge,
+            5.0,
+            &[],
+            pi,
+            0.6,
+            "ring diameter 21 to 30 m, width 12 to 16 m (F6, F7): the spin stays, so it pulls harder",
+        ),
+        phase(
+            0.8,
+            &[Up],
+            pi,
+            level,
+            "a hop with the old thruster power (Space)",
+        ),
+        phase(2.0, &[], pi, level, "a hop with the old thruster power"),
+        cued(
+            Cue::Equalize,
+            1.0,
+            &[],
+            pi,
+            level,
+            "T: equalize thruster power to gravity",
+        ),
+        phase(0.8, &[Up], pi, level, "a hop with the equalized power (Space)"),
+        phase(3.0, &[], pi, -0.3, "a hop with the equalized power"),
+        phase(3.0, &[], pi + 1.2, 0.9, "the glass panes round the ring"),
     ]);
     phases
+}
+
+fn cue(app: &mut App, cue: Cue) {
+    match cue {
+        Cue::None => {}
+        Cue::Flood => {
+            for k in 0..30 {
+                let a = k as f32 * 0.52;
+                app.world_mut()
+                    .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                        world.resource::<Simulation>().inject(
+                            &mut fluid,
+                            [a.cos() * 7.0, (k % 3) as f32 * 3.0 - 3.0, a.sin() * 7.0],
+                            1500,
+                        )
+                    });
+            }
+        }
+        Cue::Enlarge => {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            Dial::Diameter.set(&mut settings, 30.0);
+            Dial::Width.set(&mut settings, 16.0);
+        }
+        Cue::Equalize => app.world_mut().resource_mut::<Settings>().equalize_thrust(),
+    }
 }
 
 fn main() {
@@ -113,6 +204,7 @@ fn main() {
     let mut frame = 0u32;
     let mut look = (0.0, 0.0);
     for phase in script() {
+        cue(&mut app, phase.cue);
         let frames = (phase.seconds * FPS as f32).round() as u32;
         for _ in 0..frames {
             look.0 += (phase.yaw - look.0) * 0.1;

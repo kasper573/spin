@@ -229,6 +229,8 @@ pub fn decode_coupling(raw: &[i32]) -> Vec<WaterCoupling> {
                 hull_tensor: [f(15), f(16), f(17), f(18), f(19), f(20)],
                 coupling: f(21),
                 wet: f(22),
+                seconds: 0.0,
+                substeps: 0.0,
             }
         })
         .collect()
