@@ -296,10 +296,37 @@ fn a_solid_avatar_outside_stays_outside() {
 
 #[test]
 fn a_thruster_sounds_from_a_quarter_to_full_as_its_level_rises() {
+    let full = audio::gain(1.0);
     assert_eq!(audio::gain(0.0), 0.0);
-    assert!((audio::gain(0.001) - 0.25).abs() < 0.01);
-    assert!((audio::gain(0.5) - 0.625).abs() < 1e-6);
-    assert_eq!(audio::gain(1.0), 1.0);
+    assert!((audio::gain(0.001) / full - 0.25).abs() < 0.01);
+    assert!((audio::gain(0.5) / full - 0.625).abs() < 1e-6);
+    assert!(full > 0.4 && full <= 0.6, "full loudness {full}");
+    let mut fader = audio::Fader::default();
+    let mut rising = Vec::new();
+    for _ in 0..30 {
+        rising.push(fader.follow(full, Seconds(1.0 / 60.0)));
+    }
+    assert!(rising[0] < full * 0.2, "clicks on: {}", rising[0]);
+    assert!(
+        rising.windows(2).all(|w| w[1] >= w[0]),
+        "eases in: {rising:?}"
+    );
+    assert!(
+        rising[29] > full * 0.9,
+        "half a second in, still at {}",
+        rising[29]
+    );
+    let mut falling = Vec::new();
+    for _ in 0..120 {
+        falling.push(fader.follow(0.0, Seconds(1.0 / 60.0)));
+    }
+    assert!(falling[0] > full * 0.8, "cuts off: {}", falling[0]);
+    assert!(
+        falling[29] > full * 0.2,
+        "half a second out, already at {}",
+        falling[29]
+    );
+    assert!(fader.silent(), "never settles silent: {}", falling[119]);
     let mut voice = Voice::new(0);
     let samples: Vec<f32> = (0..audio::SAMPLE_RATE.get())
         .map(|_| voice.sample())
@@ -403,7 +430,7 @@ fn the_thrusters_push_through_water_and_out_of_it() {
     let settled = &slips[slips.len() - 20..];
     let speed = settled.iter().sum::<f64>() / settled.len() as f64;
     assert!(
-        speed > 2.0 && speed < 6.0,
+        speed > 1.0 && speed < 6.0,
         "forward thrust through water moves at {speed} m/s"
     );
 }

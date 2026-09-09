@@ -15,8 +15,9 @@ use bevy::audio::{
 };
 use bevy::prelude::*;
 
-use crate::core::audio::{self, Placement, Voice};
+use crate::core::audio::{self, Fader, Placement, Voice};
 use crate::core::avatar::{self, Thruster};
+use crate::core::units::Seconds;
 use crate::systems::controls::Controls;
 use crate::systems::player::{Player, PlayerCamera};
 use crate::systems::sim::{SimSet, Simulation};
@@ -52,9 +53,12 @@ struct ThrusterDecoder {
     right: Option<f32>,
 }
 
-/// The entity playing one thruster's voice.
+/// The entity playing one thruster's voice, and how loud it is right now.
 #[derive(Component)]
-struct Speaker(Thruster);
+struct Speaker {
+    thruster: Thruster,
+    fader: Fader,
+}
 
 pub struct ThrustersPlugin;
 
@@ -133,21 +137,25 @@ fn fill(points: &[Vec2], level: f32) -> Vec<Vec2> {
 
 /// Start the voices once the viewer has taken control (a browser only lets sound start after a
 /// click; headless there are no controls and no voices), then keep each one as loud as its
-/// thruster's level says. A silent voice is paused rather than played at nothing, so idle
-/// thrusters cost no synthesis.
+/// thruster's level says, easing in and out. A silent voice is paused rather than played at
+/// nothing, so idle thrusters cost no synthesis.
 fn speak(
     mut commands: Commands,
     controls: Option<Res<Controls>>,
     sim: Res<Simulation>,
     mut sounds: ResMut<Assets<ThrusterSound>>,
-    mut speakers: Query<(&Speaker, &mut AudioSink)>,
+    mut speakers: Query<(&mut Speaker, &mut AudioSink)>,
+    time: Res<Time>,
     mut started: Local<bool>,
 ) {
     if !*started && controls.is_some_and(|controls| controls.active) {
         *started = true;
         for thruster in Thruster::ALL.into_iter().filter(|t| !t.turns()) {
             commands.spawn((
-                Speaker(thruster),
+                Speaker {
+                    thruster,
+                    fader: Fader::default(),
+                },
                 AudioPlayer(sounds.add(ThrusterSound(thruster))),
                 PlaybackSettings {
                     volume: Volume::Linear(0.0),
@@ -156,15 +164,19 @@ fn speak(
             ));
         }
     }
-    for (speaker, mut sink) in &mut speakers {
-        let gain = audio::gain(sim.thrusters.level(speaker.0));
-        if gain > 0.0 {
-            sink.set_volume(Volume::Linear(gain));
+    let dt = Seconds(time.delta_secs());
+    for (mut speaker, mut sink) in &mut speakers {
+        let wanted = audio::gain(sim.thrusters.level(speaker.thruster));
+        let volume = speaker.fader.follow(wanted, dt);
+        if speaker.fader.silent() {
+            if !sink.is_paused() {
+                sink.pause();
+            }
+        } else {
+            sink.set_volume(Volume::Linear(volume));
             if sink.is_paused() {
                 sink.play();
             }
-        } else if !sink.is_paused() {
-            sink.pause();
         }
     }
 }

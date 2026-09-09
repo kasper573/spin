@@ -7,10 +7,17 @@ use std::f32::consts::TAU;
 use std::num::NonZero;
 
 use crate::core::math::{Rng, Vec3d};
+use crate::core::units::Seconds;
 
 pub const SAMPLE_RATE: NonZero<u32> = NonZero::new(44_100).unwrap();
-/// Loudness of a voice as soon as its thruster fires at all.
+/// Loudness of a voice as soon as its thruster fires at all, as a share of its full loudness.
 const FLOOR: f32 = 0.25;
+/// Full loudness of a voice.
+const LOUDNESS: f32 = 0.5;
+/// A voice eases in on this time scale (seconds) as its thruster fires and out on this one as it
+/// stops, so it neither clicks on nor cuts off.
+const ATTACK: Seconds = Seconds(0.15);
+const RELEASE: Seconds = Seconds(0.4);
 /// The hum under the jet (Hz), and the jet noise's cutoff (Hz).
 const HUM: f32 = 80.0;
 const JET: f32 = 900.0;
@@ -21,12 +28,33 @@ const SHADOW_CUTOFF: f32 = 1800.0;
 const BEHIND_LEVEL: f32 = 0.8;
 const BEHIND_CUTOFF: f32 = 1200.0;
 
-/// Linear loudness of a thruster's voice at this level of thrust.
+/// Linear loudness a thruster's voice asks for at this level of thrust.
 pub fn gain(level: f64) -> f32 {
     if level <= 0.0 {
         0.0
     } else {
-        FLOOR + (1.0 - FLOOR) * level.min(1.0) as f32
+        (FLOOR + (1.0 - FLOOR) * level.min(1.0) as f32) * LOUDNESS
+    }
+}
+
+/// The loudness a voice is actually played at: it follows what its thruster asks for, easing in
+/// and out, and settles at exact silence once the thruster is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Fader(f32);
+
+impl Fader {
+    /// Move toward `wanted` over `dt` seconds and return where the loudness is now.
+    pub fn follow(&mut self, wanted: f32, dt: Seconds) -> f32 {
+        let tau = if wanted > self.0 { ATTACK } else { RELEASE };
+        self.0 += (wanted - self.0) * (1.0 - (-dt.0 / tau.0).exp());
+        if wanted <= 0.0 && self.0 < LOUDNESS * 0.01 {
+            self.0 = 0.0;
+        }
+        self.0
+    }
+
+    pub fn silent(self) -> bool {
+        self.0 <= 0.0
     }
 }
 

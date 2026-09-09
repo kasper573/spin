@@ -33,10 +33,6 @@ const SPEED_HEADROOM: f32 = 40.0;
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
-/// How many frames the bodies may run ahead of the water's coupling before the simulation waits
-/// for the GPU: a coupling this stale is still a fraction of a degree of the drum's turn, while
-/// an unbounded backlog would let the bodies chase water that has long moved on.
-const MAX_FRAMES_AHEAD: u32 = 3;
 const RATE_WINDOW: Seconds = Seconds(1.0);
 const AVATAR_SHAPE: usize = 0;
 const RAFT_SHAPE: usize = 1;
@@ -197,9 +193,6 @@ impl Simulation {
     pub fn advance(&mut self, real: Seconds, fluid: &mut Fluid) {
         let max_dt = SUBSTEP_RATE.period().0;
         self.substeps.clear();
-        if fluid.outstanding() > MAX_FRAMES_AHEAD {
-            return;
-        }
         let (steps, dt) = if self.queued > 0.0 {
             let steps = ((self.queued / max_dt).round() as usize).min(MAX_SUBSTEPS_PER_FRAME);
             self.queued = (self.queued - steps as f32 * max_dt).max(0.0);
@@ -220,7 +213,7 @@ impl Simulation {
             }
         };
         let coupling = if steps > 0 {
-            fluid.take_coupling()
+            fluid.take_coupling(steps as f64 * dt as f64)
         } else {
             None
         };

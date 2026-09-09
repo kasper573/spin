@@ -1,6 +1,6 @@
 //! A fixed workload: the ring world under one g a sixth full of water with a few rafts, then
-//! half full, run headless for a few hundred frames of one substep each and timed per frame, GPU
-//! included.
+//! half full, run headless for a few hundred frames of one substep each, issued as fast as the
+//! machine allows, and timed per frame, GPU included.
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
@@ -62,8 +62,9 @@ fn measure(app: &mut App, label: &str) {
     let frames = 300;
     let start = Instant::now();
     for _ in 0..frames {
-        testing::run(app, SUBSTEP_RATE.period());
+        testing::frame(app, SUBSTEP_RATE.period());
     }
+    testing::settle(app);
     testing::particles(app);
     let elapsed = start.elapsed().as_secs_f64();
     let per_frame_ms = elapsed / frames as f64 * 1000.0;

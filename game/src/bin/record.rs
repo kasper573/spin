@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use bevy::prelude::*;
-use game::core::audio::{self, Placement, Voice};
+use game::core::audio::{self, Fader, Placement, Voice};
 use game::core::avatar::{TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::units::Seconds;
@@ -255,6 +255,7 @@ fn main() {
 struct Soundtrack {
     writer: hound::WavWriter<std::io::BufWriter<fs::File>>,
     voices: Vec<(Voice, Placement)>,
+    faders: [Fader; 12],
     gains: [f32; 12],
 }
 
@@ -271,17 +272,20 @@ impl Soundtrack {
             voices: Thruster::ALL
                 .map(|t| (Voice::new(t as u64), Placement::around(t.mount())))
                 .to_vec(),
+            faders: [Fader::default(); 12],
             gains: [0.0; 12],
         }
     }
 
     fn frame(&mut self, levels: [f64; 12]) {
+        let dt = Seconds(1.0 / FPS as f32);
         let gains = Thruster::ALL.map(|t| {
-            if t.turns() {
+            let wanted = if t.turns() {
                 0.0
             } else {
                 audio::gain(levels[t as usize])
-            }
+            };
+            self.faders[t as usize].follow(wanted, dt)
         });
         let samples = audio::SAMPLE_RATE.get() / FPS;
         for k in 0..samples {

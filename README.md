@@ -91,7 +91,8 @@ over a third of a second, and the cross in the bottom-left corner shows each pus
 sits on you, filling as it fires: pushing forward lights the arm at the back. Every pushing
 thruster is the same jet, heard from where it sits (the one pushing you forward roars from
 behind, the one pushing you left is louder in your right ear) at a quarter loudness as soon as it
-fires and at full when it is at full. The turning thrusters are silent and not shown.
+fires and at full when it is at full, easing in and out rather than clicking on and cutting off.
+The turning thrusters are silent and not shown.
 Opposed thrusters cancel each other out; the widget still shows both firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in

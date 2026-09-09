@@ -117,6 +117,7 @@ pub struct Fluid {
     layout: Vec<frame::ShapeSamples>,
     samples: Option<Vec<[f32; 4]>>,
     snapshot: Snapshot,
+    /// What the water did to the bodies that they have yet to be given.
     coupling: Option<Vec<WaterCoupling>>,
     /// Σ midpoint·seconds over what the pending coupling covers, for its age when taken.
     measured: f64,
@@ -382,27 +383,39 @@ impl Fluid {
         self.snapshot.arrived >= ticket
     }
 
-    /// How many frames the GPU has yet to report the coupling for; the bodies should not run
-    /// further ahead of the water than a frame or two.
+    /// How many frames the GPU has yet to report the coupling for.
     pub fn outstanding(&self) -> u32 {
         self.timeline.len() as u32
     }
 
-    /// What the water did to each body since the last call, once the GPU has reported it, aged
-    /// by how far the water has stepped since the middle of the time it covers.
-    pub fn take_coupling(&mut self) -> Option<Vec<WaterCoupling>> {
-        let mut coupling = self.coupling.take()?;
-        let covered = coupling.first().map_or(0.0, |c| c.seconds);
-        let age = if covered > 0.0 {
-            self.stepped - self.measured / covered
-        } else {
-            0.0
-        };
-        for c in &mut coupling {
-            c.age = age;
+    /// What the water did to each body over the next `seconds` of their time, aged by how far
+    /// the water has stepped since the middle of the time it was measured over. A report is
+    /// spent over as many seconds as it covers, so one that came back late is not a lump.
+    pub fn take_coupling(&mut self, seconds: f64) -> Option<Vec<WaterCoupling>> {
+        let mut pool = self.coupling.take()?;
+        let covered = pool.first().map_or(0.0, |c| c.seconds);
+        if covered <= 0.0 {
+            return None;
         }
-        self.measured = 0.0;
-        Some(coupling)
+        let age = self.stepped - self.measured / covered;
+        let share = (seconds / covered).min(1.0);
+        let taken = pool
+            .iter()
+            .map(|c| WaterCoupling {
+                age,
+                ..c.scaled(share)
+            })
+            .collect();
+        if share < 1.0 {
+            for c in &mut pool {
+                *c = c.scaled(1.0 - share);
+            }
+            self.measured *= 1.0 - share;
+            self.coupling = Some(pool);
+        } else {
+            self.measured = 0.0;
+        }
+        Some(taken)
     }
 
     /// Every particle stands for twice the water from now on: the GPU keeps every other one of
@@ -543,17 +556,16 @@ fn spawn_watcher(mut commands: Commands) {
     commands.spawn(CouplingWatcher).observe(receive_coupling);
 }
 
-/// Ask for the coupling when a frame has any, one readback at a time: the watcher asks again
-/// once the answer is back, so what is in flight never piles up, and nothing is read back at
-/// all while there is nothing to report.
+/// Ask for the coupling while any frame's is still to come back, one readback at a time: the
+/// watcher asks again once the answer is back, so what is in flight never piles up, and nothing
+/// is read back at all while there is nothing to report.
 fn watch_impulses(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
-    frame: Res<FluidFrame>,
     mut fluid: ResMut<Fluid>,
     watcher: Single<Entity, With<CouplingWatcher>>,
 ) {
-    if !fluid.awaiting && frame.is_changed() && frame.coupling {
+    if !fluid.awaiting && fluid.outstanding() > 0 {
         commands
             .entity(*watcher)
             .insert((Readback::buffer(buffers.accum.clone()), ReadOnce));

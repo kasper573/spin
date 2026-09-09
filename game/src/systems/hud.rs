@@ -2,6 +2,7 @@
 use bevy::prelude::*;
 
 use crate::core::fluid::Fluid;
+use crate::core::units::Seconds;
 use crate::systems::controls::{ClearAction, Controls};
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -11,18 +12,27 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameRate>()
-            .init_resource::<FrameTime>()
+            .init_resource::<FrameWindow>()
             .add_systems(Startup, spawn)
             .add_systems(Update, refresh.in_set(SimSet::Observe));
     }
 }
 
-/// Frames per second from a smoothed frame time.
-#[derive(Resource, Default)]
-pub struct FrameRate(pub f32);
+/// The last full second of frames: how many there were, and the longest one. An average alone
+/// would hide a stall among quick frames.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct FrameRate {
+    pub fps: f32,
+    pub worst: Seconds,
+}
 
+/// The second of frames being gathered.
 #[derive(Resource, Default)]
-struct FrameTime(f32);
+struct FrameWindow {
+    seconds: f32,
+    frames: u32,
+    worst: f32,
+}
 
 #[derive(Component)]
 struct HudText;
@@ -70,7 +80,7 @@ pub fn hud_text(
     sim: &Simulation,
     fluid: &Fluid,
     controls: &Controls,
-    fps: f32,
+    rate: FrameRate,
 ) -> String {
     let mut out = String::new();
     out.push_str("SPIN GRAVITY WHEEL\n");
@@ -123,11 +133,12 @@ pub fn hud_text(
         )
     };
     out.push_str(&format!(
-        "\n{footing}\nwater {:.1} m3 | rafts {} | spin {:.3} rad/s | {:.0} fps | sim {:.0}%",
+        "\n{footing}\nwater {:.1} m3 | rafts {} | spin {:.3} rad/s | {:.0} fps, worst {:.0} ms | sim {:.0}%",
         fluid.litres().0 / 1000.0,
         sim.rafts().len(),
         sim.drum.spin.0,
-        fps,
+        rate.fps,
+        rate.worst.0 * 1000.0,
         sim.rate * 100.0
     ));
     out
@@ -136,7 +147,7 @@ pub fn hud_text(
 #[allow(clippy::too_many_arguments)]
 fn refresh(
     time: Res<Time>,
-    mut frame_time: ResMut<FrameTime>,
+    mut window: ResMut<FrameWindow>,
     mut rate: ResMut<FrameRate>,
     settings: Res<Settings>,
     sim: Res<Simulation>,
@@ -145,11 +156,17 @@ fn refresh(
     mut texts: Query<&mut Text, With<HudText>>,
 ) {
     let dt = time.delta_secs();
-    if dt > 0.0 {
-        frame_time.0 += (dt - frame_time.0) * 0.1;
-        rate.0 = 1.0 / frame_time.0;
+    window.seconds += dt;
+    window.frames += 1;
+    window.worst = window.worst.max(dt);
+    if window.seconds >= 1.0 {
+        *rate = FrameRate {
+            fps: window.frames as f32 / window.seconds,
+            worst: Seconds(window.worst),
+        };
+        *window = FrameWindow::default();
     }
-    let text = hud_text(&settings, &sim, &fluid, &controls, rate.0);
+    let text = hud_text(&settings, &sim, &fluid, &controls, *rate);
     for mut t in &mut texts {
         if t.0 != text {
             t.0 = text.clone();

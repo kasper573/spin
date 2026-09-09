@@ -50,6 +50,23 @@ impl WaterCoupling {
         self.substeps += other.substeps;
     }
 
+    /// The share `f` of the sums, covering that share of their time.
+    pub fn scaled(&self, f: f64) -> WaterCoupling {
+        WaterCoupling {
+            buoyancy: self.buoyancy.map(|x| x * f),
+            buoyancy_torque: self.buoyancy_torque.map(|x| x * f),
+            flow: self.flow.map(|x| x * f),
+            flow_moment: self.flow_moment.map(|x| x * f),
+            hull: self.hull.map(|x| x * f),
+            hull_tensor: self.hull_tensor.map(|x| x * f),
+            coupling: self.coupling * f,
+            wet: self.wet * f,
+            seconds: self.seconds * f,
+            substeps: self.substeps * f,
+            age: self.age,
+        }
+    }
+
     /// The sums as they stand after everything they were taken from has turned by `q`.
     pub fn turned(&self, q: &Quatd) -> WaterCoupling {
         let t = &self.hull_tensor;

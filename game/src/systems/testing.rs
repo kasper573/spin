@@ -9,7 +9,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::storage::ShaderBuffer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, ReadOnce};
+use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::app;
@@ -18,7 +18,7 @@ use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
 use crate::systems::settings::{Dial, Settings};
-use crate::systems::sim::{SimSet, Simulation};
+use crate::systems::sim::{SUBSTEP_RATE, SimSet, Simulation};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -108,6 +108,8 @@ pub struct ScriptStatus {
     pub angle: Radians,
     pub time: Seconds,
     pub fps: f32,
+    /// The longest frame of the last second.
+    pub worst_frame: Seconds,
     pub sim_rate: f32,
     pub landscape_max: f32,
     /// Saves written to storage so far.
@@ -126,8 +128,11 @@ pub struct ScriptStatus {
     pub diameter: f32,
     pub width: f32,
     pub avatar: [f32; 3],
-    /// Frames whose water coupling the GPU has yet to report.
+    /// Frames whose water coupling the GPU has yet to report, and frames so far in which the
+    /// bodies waited for it.
     pub outstanding: u32,
+    /// The water's substeps in the last frame.
+    pub substeps: usize,
     /// The render passes' smoothed times in ms, on the GPU and the CPU, where the device can
     /// time them.
     pub render: Vec<(String, f32)>,
@@ -284,7 +289,8 @@ fn publish(
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
-        fps: fps.0,
+        fps: fps.fps,
+        worst_frame: fps.worst,
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
         saves: saves.completed,
@@ -306,6 +312,7 @@ fn publish(
         width: sim.drum.ring.half_width.0 * 2.0,
         avatar: sim.avatar().p.map(|c| c as f32),
         outstanding: fluid.outstanding(),
+        substeps: sim.substeps.len(),
         render: diagnostics
             .iter()
             .flat_map(|store| store.iter())
@@ -329,20 +336,41 @@ pub fn headless() -> App {
     app
 }
 
-/// Run frames until this much simulated time has passed.
+/// Run frames until this much simulated time has passed, a frame's worth at a time, each frame
+/// waiting for the water's report on the last: the bodies never run ahead of the water, however
+/// fast or slow the machine.
 pub fn run(app: &mut App, seconds: Seconds) {
+    let longest = SUBSTEP_RATE.period().0 * MAX_SUBSTEPS_PER_FRAME as f32;
+    let mut left = seconds.0;
+    while left > 0.0 {
+        let step = left.min(longest);
+        left -= step;
+        frame(app, Seconds(step));
+        settle(app);
+    }
+}
+
+/// Run one frame of this much simulated time without waiting for the water's report on it.
+pub fn frame(app: &mut App, seconds: Seconds) {
     app.world_mut()
         .resource_mut::<Simulation>()
         .request(seconds);
+    app.update();
+}
+
+/// Run frames that simulate nothing until the water has reported on every frame issued.
+pub fn settle(app: &mut App) {
     let mut idle = 0;
-    while app.world().resource::<Simulation>().queued().0 > 0.0 {
-        app.update();
-        if app.world().resource::<FluidReady>().get() {
-            idle = 0;
-        } else {
-            idle += 1;
-            assert!(idle < 2000, "the water's shaders never became ready");
+    loop {
+        let ready = app.world().resource::<FluidReady>().get();
+        let queued = app.world().resource::<Simulation>().queued().0 > 0.0;
+        let outstanding = app.world().resource::<Fluid>().outstanding() > 0;
+        if ready && !queued && !outstanding {
+            return;
         }
+        app.update();
+        idle += 1;
+        assert!(idle < 2000, "the water never reported back");
     }
 }
 
