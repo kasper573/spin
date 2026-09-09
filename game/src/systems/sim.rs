@@ -149,14 +149,24 @@ impl Simulation {
 
     /// Make the ring another size. The water and the landscape stretch to fit on their own;
     /// whatever body the new walls would cut through is pulled inside them.
+    /// Change the ring's size about every body, which stays where it was about the axis: the
+    /// wall moves, not the bodies, except that solid ones are kept inside it.
     pub fn resize(&mut self, ring: Ring) {
         if ring == self.drum.ring {
             return;
         }
+        let about_the_axis: Vec<Vec3d> = self
+            .bodies
+            .iter()
+            .map(|body| self.drum.to_water(body.p))
+            .collect();
         self.drum.resize(ring);
-        for body in self.bodies.iter_mut().filter(|body| body.solid) {
-            let reach = self.shapes[body.shape].reach();
-            body.p = self.drum.place_sphere_inside(body.p, reach);
+        for (body, p) in self.bodies.iter_mut().zip(about_the_axis) {
+            body.p = self.drum.from_water(p);
+            if body.solid {
+                let reach = self.shapes[body.shape].reach();
+                body.p = self.drum.place_sphere_inside(body.p, reach);
+            }
         }
     }
 }

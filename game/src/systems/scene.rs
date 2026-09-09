@@ -175,6 +175,10 @@ struct StarsMaterial {
 }
 
 impl Material for StarsMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://game/systems/shaders/stars.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://game/systems/shaders/stars.wgsl".into()
     }

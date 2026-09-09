@@ -4,7 +4,9 @@ use game::core::avatar::{
     self, EYE_HEIGHT, Gyros, SPOOL_TIME, Thruster, WALK_SPEED, equalized_thrust,
 };
 use game::core::fluid::Fluid;
-use game::core::math::{add_scaled, cross, dot, norm, quat_from_basis};
+use game::core::math::{
+    Quatd, Vec3d, add_scaled, cross, dot, norm, quat_conjugate, quat_from_basis, quat_mul,
+};
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
 use game::systems::drum::{DEFAULT_RING, GROUND_DEPTH};
@@ -499,6 +501,22 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
     );
 }
 
+/// Where the avatar is and which way it faces about the drum's axis, which a ghost outside
+/// the ring keeps whatever happens to the ring.
+fn about_the_axis(sim: &Simulation) -> (Vec3d, Quatd) {
+    let frame = sim.drum.water_frame();
+    let body = sim.avatar();
+    (frame.to_water(body.p), quat_mul(&frame.rotation, &body.q))
+}
+
+fn angle_between(a: &Quatd, b: &Quatd) -> f64 {
+    let d = quat_mul(&quat_conjugate(a), b);
+    2.0 * norm(&[d[0], d[1], d[2]]).atan2(d[3].abs())
+}
+
+/// The ring is resized under a ghost outside it, a metre at a time as the dial is held, and
+/// the ghost moves and turns in every frame of it as smoothly as in the frame before: the
+/// wall moves, not the ghost.
 #[test]
 fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
     let mut app = testing::headless();
@@ -507,19 +525,36 @@ fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
         let mut sim = state_mut(&mut app);
         let mut player = Player;
         let outside = sim.drum.from_water([30.0, 5.0, 0.0]);
-        player.teleport(&mut sim, outside, [0.0; 3]);
+        let axis = sim.drum.from_water([0.0, 5.0, 0.0]);
+        player.teleport(&mut sim, outside, axis);
     }
     testing::run(&mut app, Seconds(0.5));
-    let before = (altitude(state(&app)), state(&app).avatar().p[1]);
-    assert!(before.0 < -15.0, "drifted to {before:?}");
-    {
-        let mut settings = app.world_mut().resource_mut::<Settings>();
-        Dial::Diameter.set(&mut settings, 30.0);
+    let frame = Seconds(1.0 / 60.0);
+    let drift = |from: &(Vec3d, Quatd), to: &(Vec3d, Quatd)| {
+        let d = [
+            to.0[0] - from.0[0],
+            to.0[1] - from.0[1],
+            to.0[2] - from.0[2],
+        ];
+        (norm(&d), angle_between(&from.1, &to.1))
+    };
+    let a = about_the_axis(state(&app));
+    testing::run(&mut app, frame);
+    let mut last = about_the_axis(state(&app));
+    let (mut usual, mut turned) = drift(&a, &last);
+    for diameter in 22..=60 {
+        {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            Dial::Diameter.set(&mut settings, diameter as f32);
+        }
+        testing::run(&mut app, frame);
+        let now = about_the_axis(state(&app));
+        let (moved, jumped) = drift(&last, &now);
+        assert!(
+            (moved - usual).abs() < 0.05 && (jumped - turned).abs() < 0.01,
+            "resizing to {diameter} m moved the ghost {moved} m and turned it {jumped} rad in a frame, against {usual} m and {turned} rad the frame before"
+        );
+        (last, usual, turned) = (now, moved, jumped);
     }
-    testing::run(&mut app, Seconds(0.5));
-    let after = (altitude(state(&app)), state(&app).avatar().p[1]);
-    assert!(
-        after.0 < -15.0 && (after.1 - before.1).abs() < 0.5,
-        "the resize moved the ghost from {before:?} to {after:?}"
-    );
+    assert_eq!(state(&app).drum.ring.radius, Metres(30.0));
 }
