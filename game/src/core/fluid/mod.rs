@@ -30,7 +30,9 @@ mod surface;
 pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
 pub use gpu::FluidBuffers;
 pub use resolution::{REST_DENSITY, Resolution};
-pub use surface::{MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, SurfaceBuffers, SurfaceParams};
+pub use surface::{
+    MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, SurfaceBuffers, SurfaceParams, grid_reach,
+};
 
 /// Set by the render world once every kernel has compiled and the vessel is bound; until then
 /// nothing is handed to the GPU, so nothing is lost.

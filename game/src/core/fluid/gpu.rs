@@ -110,9 +110,9 @@ enum Kernel {
     Mark,
     List,
     PrepareDispatch,
-    Density,
-    PlaceVertices,
-    PlaceQuads,
+    Extract,
+    PrepareQuads,
+    Quads,
 }
 
 const PARTICLES: &str = "embedded://game/core/fluid/shaders/particles.wgsl";
@@ -314,7 +314,7 @@ const SPECS: [Spec; 21] = [
         particles: &[0, 1],
         vessel: true,
         bodies: &[],
-        surface: &[0, 6],
+        surface: &[0, 4],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -325,7 +325,7 @@ const SPECS: [Spec; 21] = [
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 5, 6, 7, 8],
+        surface: &[0, 3, 4, 5, 6],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -336,40 +336,40 @@ const SPECS: [Spec; 21] = [
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 5, 9],
+        surface: &[0, 3, 7],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::Density,
+        kernel: Kernel::Extract,
         shader: SURFACE,
-        entry: "density",
+        entry: "extract",
         particles: &[0, 1, 9, 12],
         vessel: true,
         bodies: &[],
-        surface: &[0, 1, 8],
+        surface: &[0, 1, 3, 6, 8, 9],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::PlaceVertices,
+        kernel: Kernel::PrepareQuads,
         shader: SURFACE,
-        entry: "place_vertices",
+        entry: "prepare_quads",
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 1, 2, 3, 5, 8],
+        surface: &[0, 3, 7],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::PlaceQuads,
+        kernel: Kernel::Quads,
         shader: SURFACE,
-        entry: "place_quads",
+        entry: "quads",
         particles: &[0],
         vessel: false,
         bodies: &[],
-        surface: &[0, 1, 2, 4, 5, 6, 7, 8],
+        surface: &[0, 1, 2, 3, 4, 5, 6, 8, 9],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -423,6 +423,7 @@ struct RawBuffers {
     cell_count: Buffer,
     counters: Buffer,
     table: Buffer,
+    cell_table: Buffer,
     dispatch: Buffer,
 }
 
@@ -652,18 +653,19 @@ fn prepare(
         position_sorted: particles[2].clone(),
         velocity_next: particles[3].clone(),
         cell_count: particles[7].clone(),
-        counters: surface[4].clone(),
-        table: surface[5].clone(),
-        dispatch: surface[8].clone(),
+        counters: surface[2].clone(),
+        table: surface[3].clone(),
+        cell_table: surface[7].clone(),
+        dispatch: surface[6].clone(),
     });
 }
 
-/// How many threads a kernel runs: a count of them, or one workgroup per block the surface
+/// How many threads a kernel runs: a count of them, or the workgroups an entry of the surface
 /// kernels' own dispatch buffer names.
 #[derive(Clone, Copy)]
 enum Threads<'a> {
     Count(u32),
-    PerBlock(&'a Buffer),
+    Indirect(&'a Buffer, u64),
 }
 
 struct Dispatch<'a> {
@@ -723,7 +725,7 @@ impl Dispatch<'_> {
         }
         match threads {
             Threads::Count(n) => pass.dispatch_workgroups(n.div_ceil(spec.workgroup).max(1), 1, 1),
-            Threads::PerBlock(buffer) => pass.dispatch_workgroups_indirect(buffer, 0),
+            Threads::Indirect(buffer, offset) => pass.dispatch_workgroups_indirect(buffer, offset),
         }
     }
 }
@@ -831,17 +833,19 @@ fn dispatch(
     if frame.changed {
         let so = groups.surface_offset;
         let count = Threads::Count(frame.surface.count);
-        let blocks = Threads::PerBlock(&raw.dispatch);
+        let blocks = Threads::Indirect(&raw.dispatch, 0);
+        let cells = Threads::Indirect(&raw.dispatch, 16);
         sort(encoder, so, vessel_now, frame.surface.count);
         encoder.clear_buffer(&raw.counters, 0, None);
         encoder.clear_buffer(&raw.table, 0, None);
+        encoder.clear_buffer(&raw.cell_table, 0, None);
         d.run(encoder, Kernel::Mark, 0, so, 0, vessel_now, count);
         let slots = Threads::Count(TABLE_SLOTS as u32);
         d.run(encoder, Kernel::List, 0, so, 0, vessel_now, slots);
         let one = Threads::Count(1);
         d.run(encoder, Kernel::PrepareDispatch, 0, so, 0, vessel_now, one);
-        d.run(encoder, Kernel::Density, 0, so, 0, vessel_now, blocks);
-        d.run(encoder, Kernel::PlaceVertices, 0, so, 0, vessel_now, blocks);
-        d.run(encoder, Kernel::PlaceQuads, 0, so, 0, vessel_now, blocks);
+        d.run(encoder, Kernel::Extract, 0, so, 0, vessel_now, blocks);
+        d.run(encoder, Kernel::PrepareQuads, 0, so, 0, vessel_now, one);
+        d.run(encoder, Kernel::Quads, 0, so, 0, vessel_now, cells);
     }
 }
