@@ -208,7 +208,8 @@ fn fill(points: &[Vec2], level: f32) -> Vec<Vec2> {
 
 /// Start the voices once the viewer has taken control (a browser only lets sound start after a
 /// click; headless there are no controls and no voices), then keep each one as loud as its
-/// thruster's level says.
+/// thruster's level says. A silent voice is paused rather than played at nothing, so idle
+/// thrusters cost no synthesis.
 fn speak(
     mut commands: Commands,
     controls: Option<Res<Controls>>,
@@ -231,7 +232,15 @@ fn speak(
         }
     }
     for (speaker, mut sink) in &mut speakers {
-        sink.set_volume(Volume::Linear(audio::gain(sim.thrusters.level(speaker.0))));
+        let gain = audio::gain(sim.thrusters.level(speaker.0));
+        if gain > 0.0 {
+            sink.set_volume(Volume::Linear(gain));
+            if sink.is_paused() {
+                sink.play();
+            }
+        } else if !sink.is_paused() {
+            sink.pause();
+        }
     }
 }
 

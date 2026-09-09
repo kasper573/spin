@@ -155,7 +155,7 @@ impl Simulation {
             return;
         }
         self.drum.resize(ring);
-        for body in &mut self.bodies {
+        for body in self.bodies.iter_mut().filter(|body| body.solid) {
             let reach = self.shapes[body.shape].reach();
             body.p = self.drum.place_sphere_inside(body.p, reach);
         }

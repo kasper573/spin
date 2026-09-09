@@ -42,6 +42,7 @@ walking spinward and less walking against the spin, exactly as a ring this small
 | `just dist`  | the page plus the wasm bundle in `dist/`                       |
 | `just serve` | build `dist/` and serve it on http://localhost:8000            |
 | `just dev`   | the same with a fast plain-release build, for local iteration  |
+| `just dev-native` | the client in a native window, at native speed              |
 | `just e2e`   | build `dist/` and drive it in headless Chrome                  |
 
 Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pages.
@@ -91,7 +92,8 @@ sits on you, filling as it fires: pushing forward lights the arm at the back. Th
 the cross, one about each axis, show the turning pairs: an arrow grows along the ring the way you
 are turning. Every pushing thruster is the same jet, heard from where it sits (the one pushing
 you forward roars from behind, the one pushing you left is louder in your right ear) at a quarter
-loudness as soon as it fires and at full when it is at full; the turning ones are a lighter puff.
+loudness as soon as it fires and at full when it is at full; the turning ones are a subtle hiss
+of escaping air.
 Opposed thrusters cancel each other out; the widget still shows both firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in
@@ -113,8 +115,8 @@ Every setting is a key, listed on screen with its current value. Hold F1–F8 (s
 viscosity, wall friction, raft friction, ring diameter, ring width, thruster power) and turn the
 mouse wheel to change it, in steps that grow with the value so the top of a dial is a few hundred
 clicks away; G toggles air drag and Enter solid or ghost. Changing the ring's size
-keeps everything else: the water and the landscape stretch to fit, and whatever the new walls
-would cut through is pulled inside them. The spin stays, so a bigger ring pulls harder; T
+keeps everything else: the water and the landscape stretch to fit, and whatever solid the new
+walls would cut through is pulled inside them; a ghost stays where it is. The spin stays, so a bigger ring pulls harder; T
 equalizes the thruster power to the standing gravity again, the way the initial state is set up,
 so the game plays as it did at the start. Backspace chorded with 0 resets everything to the
 initial state; with 1, 2 or 3 it removes all water, removes all rafts, or flattens the landscape

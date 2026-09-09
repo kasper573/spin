@@ -6,6 +6,7 @@ mod contacts;
 pub use body::{Body, BodyShape, Collider, Ground, WaterCoupling};
 pub use contacts::{collide_pair, collide_vessel};
 
+use crate::core::math::quat_from_rotation_vector;
 use crate::core::units::{Hertz, MetresPerSecond, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 
@@ -55,10 +56,16 @@ pub fn step(
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
     for (i, b) in bodies.iter_mut().enumerate() {
         if let Some(impulse) = water.and_then(|w| w.get(i)) {
+            let since = quat_from_rotation_vector(&spin.map(|s| s * impulse.age));
             // water may push a body with a few times the vessel's artificial gravity, no more
             let shape = &shapes[b.shape];
             let max_accel = 20.0 + 4.0 * spin_mag * spin_mag * shape.reach();
-            b.couple(impulse, max_accel, &spin, shape.turns_in_water());
+            b.couple(
+                &impulse.turned(&since),
+                max_accel,
+                &spin,
+                shape.turns_in_water(),
+            );
         }
         let wet_k = (b.wet * params.wet_spin_rate.0 as f64 * dt).min(1.0);
         if wet_k > 0.0 && shapes[b.shape].turns_in_water() {

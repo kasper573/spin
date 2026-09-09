@@ -44,6 +44,10 @@ serve: dist
 dev: (dist "release")
     python3 -m http.server --directory dist 8000
 
+# The same client in a native window, at native speed, for playing and profiling.
+dev-native:
+    cargo run --release -p game --bin client
+
 # Load dist/ in headless Chrome and drive it through the page's script hooks.
 e2e: dist
     node e2e/smoke.mjs

@@ -100,6 +100,16 @@ pub fn quat_integrate(q: &Quatd, w: &Vec3d, dt: f64) -> Quatd {
     out
 }
 
+/// The rotation by a rotation vector: about its direction, by its length in radians.
+pub fn quat_from_rotation_vector(v: &Vec3d) -> Quatd {
+    let angle = norm(v);
+    if angle < 1e-12 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let s = (angle / 2.0).sin() / angle;
+    [v[0] * s, v[1] * s, v[2] * s, (angle / 2.0).cos()]
+}
+
 /// The shortest rotation taking the unit vector `a` onto the unit vector `b`.
 pub fn quat_between(a: &Vec3d, b: &Vec3d) -> Quatd {
     let c = cross(a, b);

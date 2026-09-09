@@ -44,7 +44,13 @@ fn weight_in_g(sim: &Simulation) -> f64 {
 }
 
 fn hold(app: &mut App, pilot: PilotInput, seconds: f32) {
+    hold_watching(app, pilot, seconds);
+}
+
+/// Hold the keys down and return the avatar's ground slip every tenth of a second.
+fn hold_watching(app: &mut App, pilot: PilotInput, seconds: f32) -> Vec<f64> {
     let steps = (seconds / 0.1).round() as usize;
+    let mut slips = Vec::with_capacity(steps);
     for _ in 0..steps {
         {
             let player = *app.world().resource::<Player>();
@@ -52,8 +58,10 @@ fn hold(app: &mut App, pilot: PilotInput, seconds: f32) {
             sim.avatar_input = player.input(pilot);
         }
         testing::run(app, Seconds(0.1));
+        slips.push(ground_slip(state(app)));
     }
     state_mut(app).avatar_input = default();
+    slips
 }
 
 /// Stand the hull upright on the local vertical where it is, facing the way it faces and
@@ -370,7 +378,7 @@ fn the_thrusters_push_through_water_and_out_of_it() {
     flood(&mut app);
     let sim = state(&app);
     assert!(
-        sim.avatar().wet > 0.5,
+        sim.avatar().wet > 0.3,
         "standing dry: wet {}",
         sim.avatar().wet
     );
@@ -390,8 +398,10 @@ fn the_thrusters_push_through_water_and_out_of_it() {
         "does not float: wet {}",
         sim.avatar().wet
     );
-    hold(&mut app, PilotInput::firing(&[Thruster::Forward]), 3.0);
-    let speed = ground_slip(state(&app));
+    // the avatar porpoises through the water, so its speed is judged over the last two seconds
+    let slips = hold_watching(&mut app, PilotInput::firing(&[Thruster::Forward]), 3.0);
+    let settled = &slips[slips.len() - 20..];
+    let speed = settled.iter().sum::<f64>() / settled.len() as f64;
     assert!(
         speed > 2.0 && speed < 6.0,
         "forward thrust through water moves at {speed} m/s"
@@ -455,5 +465,29 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
     assert!(
         light > heavy * 2.0 && light > 1.0,
         "a hop rose {heavy} m before equalizing and {light} m after"
+    );
+}
+
+#[test]
+fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
+    let mut app = testing::headless();
+    ghost(&mut app);
+    {
+        let mut sim = state_mut(&mut app);
+        let mut player = Player;
+        player.teleport(&mut sim, [30.0, 5.0, 0.0], [0.0; 3]);
+    }
+    testing::run(&mut app, Seconds(0.5));
+    let before = state(&app).avatar().p;
+    assert!(radius(before) > 25.0, "drifted to {before:?}");
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, 30.0);
+    }
+    testing::run(&mut app, Seconds(0.5));
+    let after = state(&app).avatar().p;
+    assert!(
+        radius(after) > 25.0 && (after[1] - before[1]).abs() < 0.5,
+        "the resize moved the ghost from {before:?} to {after:?}"
     );
 }

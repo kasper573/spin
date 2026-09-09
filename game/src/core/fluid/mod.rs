@@ -118,16 +118,30 @@ pub struct Fluid {
     samples: Option<Vec<[f32; 4]>>,
     snapshot: Snapshot,
     coupling: Option<Vec<WaterCoupling>>,
+    /// Σ midpoint·seconds over what the pending coupling covers, for its age when taken.
+    measured: f64,
+    /// Simulated seconds of water stepped so far.
+    stepped: f64,
     /// The GPU's running totals as of the last readback; the totals never reset, so what arrives
     /// late or twice in a frame is still applied exactly once.
     totals: Vec<i32>,
     /// Frames handed to the GPU and the latest frame whose coupling has come back.
     issued: u32,
     reported: u32,
-    /// The simulated time and substeps of every frame handed to the GPU whose coupling is still
-    /// to come back, by ticket.
-    timeline: Vec<(u32, f64, f64)>,
+    /// Every frame handed to the GPU whose coupling is still to come back.
+    timeline: Vec<Issue>,
+    /// Whether a readback of the coupling is in flight.
+    awaiting: bool,
     rng: Rng,
+}
+
+/// A frame handed to the GPU that couples water and bodies: the simulated time and substeps it
+/// covers, and the midpoint of that time on the water's clock (so its coupling can be aged).
+struct Issue {
+    ticket: u32,
+    seconds: f64,
+    substeps: f64,
+    midpoint: f64,
 }
 
 #[derive(Default)]
@@ -155,7 +169,10 @@ impl Default for Fluid {
             totals: Vec::new(),
             issued: 0,
             reported: 0,
+            measured: 0.0,
+            stepped: 0.0,
             timeline: Vec::new(),
+            awaiting: false,
             rng: Rng::new(0x9E3779B97F4A7C15),
         }
     }
@@ -262,7 +279,8 @@ impl Fluid {
     }
 
     /// What the GPU should run this frame: thin the water if it is due, append what joined,
-    /// then step the substeps.
+    /// then step the substeps. Without water there is nothing to step, extract or read back,
+    /// and a frame that couples nothing counts as reported at once.
     pub fn frame(&mut self, params: &FluidParams, substeps: &[(Seconds, Bodies)]) -> FluidFrame {
         let count_before = self.count - self.pending.len() as u32;
         let pending = self
@@ -276,11 +294,20 @@ impl Fluid {
             })
             .collect::<Vec<_>>();
         self.issued = self.issued.wrapping_add(1);
-        self.timeline.push((
-            self.issued,
-            substeps.iter().map(|(dt, _)| dt.0 as f64).sum(),
-            substeps.len() as f64,
-        ));
+        let stepping = self.count > 0 && !substeps.is_empty();
+        let seconds: f64 = substeps.iter().map(|(dt, _)| dt.0 as f64).sum();
+        let coupling = stepping && substeps.iter().any(|(_, b)| b.sample_count > 0);
+        if coupling {
+            self.timeline.push(Issue {
+                ticket: self.issued,
+                seconds,
+                substeps: substeps.len() as f64,
+                midpoint: self.stepped + seconds / 2.0,
+            });
+        }
+        if stepping {
+            self.stepped += seconds;
+        }
         let res = self.resolution;
         let still = Bodies::default();
         let frame = FluidFrame {
@@ -288,19 +315,24 @@ impl Fluid {
             thin: self.thin.take().map(|before| {
                 Params::new(0.0, params, res, before, &still).with_pending(count_before)
             }),
-            substeps: substeps
-                .iter()
-                .map(|(dt, bodies)| Substep {
-                    params: Params::new(dt.0, params, res, self.count, bodies),
-                    bodies: bodies.clone(),
-                })
-                .collect(),
+            substeps: if stepping {
+                substeps
+                    .iter()
+                    .map(|(dt, bodies)| Substep {
+                        params: Params::new(dt.0, params, res, self.count, bodies),
+                        bodies: bodies.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             inject: Params::new(0.0, params, res, count_before, &still)
                 .with_pending(pending.len() as u32 / 2),
             surface: Params::new(0.0, params, res, self.count, &still),
             pending,
             samples: self.samples.take(),
-            changed: self.changed || !substeps.is_empty(),
+            changed: self.changed || stepping,
+            coupling,
         };
         self.changed = false;
         frame
@@ -331,10 +363,16 @@ impl Fluid {
         }
         let bytes = self.count as u64 * 16;
         commands
-            .spawn(Readback::buffer_range(buffers.position.clone(), 0, bytes))
+            .spawn((
+                Readback::buffer_range(buffers.position.clone(), 0, bytes),
+                ReadOnce,
+            ))
             .observe(receive_positions);
         commands
-            .spawn(Readback::buffer_range(buffers.velocity.clone(), 0, bytes))
+            .spawn((
+                Readback::buffer_range(buffers.velocity.clone(), 0, bytes),
+                ReadOnce,
+            ))
             .observe(receive_velocities);
         self.snapshot.requested
     }
@@ -347,12 +385,24 @@ impl Fluid {
     /// How many frames the GPU has yet to report the coupling for; the bodies should not run
     /// further ahead of the water than a frame or two.
     pub fn outstanding(&self) -> u32 {
-        self.issued.wrapping_sub(self.reported)
+        self.timeline.len() as u32
     }
 
-    /// What the water did to each body since the last call, once the GPU has reported it.
+    /// What the water did to each body since the last call, once the GPU has reported it, aged
+    /// by how far the water has stepped since the middle of the time it covers.
     pub fn take_coupling(&mut self) -> Option<Vec<WaterCoupling>> {
-        self.coupling.take()
+        let mut coupling = self.coupling.take()?;
+        let covered = coupling.first().map_or(0.0, |c| c.seconds);
+        let age = if covered > 0.0 {
+            self.stepped - self.measured / covered
+        } else {
+            0.0
+        };
+        for c in &mut coupling {
+            c.age = age;
+        }
+        self.measured = 0.0;
+        Some(coupling)
     }
 
     /// Every particle stands for twice the water from now on: the GPU keeps every other one of
@@ -378,19 +428,28 @@ impl Fluid {
         self.samples = Some(samples);
     }
 
-    /// The simulated time and substeps of every frame up to this ticket, whose coupling has
-    /// now come back.
-    fn settle(&mut self, ticket: u32) -> (f64, f64) {
-        let (mut seconds, mut substeps) = (0.0, 0.0);
-        self.timeline.retain(|(issued, s, n)| {
-            let reported = (ticket.wrapping_sub(*issued) as i32) >= 0;
+    /// Every frame up to this ticket, whose coupling has now come back, as one issue: their
+    /// time and substeps summed, with the midpoint of that time.
+    fn settle(&mut self, ticket: u32) -> Issue {
+        let mut settled = Issue {
+            ticket,
+            seconds: 0.0,
+            substeps: 0.0,
+            midpoint: 0.0,
+        };
+        self.timeline.retain(|issue| {
+            let reported = (ticket.wrapping_sub(issue.ticket) as i32) >= 0;
             if reported {
-                seconds += s;
-                substeps += n;
+                settled.seconds += issue.seconds;
+                settled.substeps += issue.substeps;
+                settled.midpoint += issue.midpoint * issue.seconds;
             }
             !reported
         });
-        (seconds, substeps)
+        if settled.seconds > 0.0 {
+            settled.midpoint /= settled.seconds;
+        }
+        settled
     }
 
     fn snapshot_part(&mut self, part: u8) {
@@ -429,8 +488,9 @@ impl Plugin for FluidPlugin {
                 ExtractResourcePlugin::<FluidFrame>::default(),
                 ExtractResourcePlugin::<SurfaceParams>::default(),
             ))
-            .add_systems(Startup, watch_impulses)
-            .add_systems(PostUpdate, sync_surface);
+            .add_systems(Startup, spawn_watcher)
+            .add_systems(PostUpdate, (watch_impulses, sync_surface))
+            .add_systems(Last, stop_rereading);
         let render_app = app.sub_app_mut(RenderApp);
         render_app.insert_resource(ready);
         gpu::install(render_app);
@@ -448,20 +508,70 @@ fn sync_surface(fluid: Res<Fluid>, mut surface: ResMut<SurfaceParams>) {
     }
 }
 
-fn watch_impulses(mut commands: Commands, buffers: Res<FluidBuffers>) {
-    commands
-        .spawn(Readback::buffer(buffers.accum.clone()))
-        .observe(receive_coupling);
+/// Marks a `Readback` to be performed once. Bevy reads an entity's buffer back every frame the
+/// component is on it, and the answer takes a few frames to come, so left alone a readback
+/// would be issued again and again until it arrived, and a GPU that falls behind would be
+/// buried under ever more of them. The marker has the readback dropped the frame after it is
+/// issued, while the entity and its observer stay to receive the answer.
+#[derive(Component)]
+pub struct ReadOnce;
+
+fn stop_rereading(
+    mut commands: Commands,
+    issued: Query<Entity, (With<Readback>, With<Issued>)>,
+    fresh: Query<Entity, (With<ReadOnce>, Without<Issued>)>,
+) {
+    for entity in &issued {
+        commands
+            .entity(entity)
+            .remove::<(Readback, ReadOnce, Issued)>();
+    }
+    for entity in &fresh {
+        commands.entity(entity).insert(Issued);
+    }
+}
+
+/// A `ReadOnce` at the end of the frame it was asked in, which the render world reads back.
+#[derive(Component)]
+struct Issued;
+
+/// The entity whose readback brings the coupling back from the GPU.
+#[derive(Component)]
+struct CouplingWatcher;
+
+fn spawn_watcher(mut commands: Commands) {
+    commands.spawn(CouplingWatcher).observe(receive_coupling);
+}
+
+/// Ask for the coupling when a frame has any, one readback at a time: the watcher asks again
+/// once the answer is back, so what is in flight never piles up, and nothing is read back at
+/// all while there is nothing to report.
+fn watch_impulses(
+    mut commands: Commands,
+    buffers: Res<FluidBuffers>,
+    frame: Res<FluidFrame>,
+    mut fluid: ResMut<Fluid>,
+    watcher: Single<Entity, With<CouplingWatcher>>,
+) {
+    if !fluid.awaiting && frame.is_changed() && frame.coupling {
+        commands
+            .entity(*watcher)
+            .insert((Readback::buffer(buffers.accum.clone()), ReadOnce));
+        fluid.awaiting = true;
+    }
 }
 
 fn receive_coupling(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
+    fluid.awaiting = false;
     let raw: Vec<i32> = event.to_shader_type();
     let ticket = raw
         .get(frame::STAMP_SLOT)
         .map_or(fluid.reported, |t| *t as u32);
-    fluid.reported = ticket;
-    let (seconds, taken) = fluid.settle(ticket);
-    if taken == 0.0 {
+    if (ticket.wrapping_sub(fluid.reported) as i32) > 0 {
+        fluid.reported = ticket;
+    }
+    let settled = fluid.settle(ticket);
+    if settled.substeps == 0.0 {
         return;
     }
     if fluid.totals.len() != raw.len() {
@@ -475,9 +585,10 @@ fn receive_coupling(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
     fluid.totals = raw;
     let mut arrived = frame::decode_coupling(&delta);
     for coupling in &mut arrived {
-        coupling.seconds = seconds;
-        coupling.substeps = taken;
+        coupling.seconds = settled.seconds;
+        coupling.substeps = settled.substeps;
     }
+    fluid.measured += settled.midpoint * settled.seconds;
     match &mut fluid.coupling {
         Some(pending) => {
             for (sum, more) in pending.iter_mut().zip(&arrived) {

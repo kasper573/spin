@@ -1,6 +1,6 @@
 //! Procedural thruster sound. Every pushing thruster is the same jet, filtered noise under a hum,
-//! and every turning one the same lighter puff of air, and a thruster's level sets how loud it
-//! plays: silent when idle, a quarter as soon as it fires, full at full level. What tells the
+//! and every turning one the same subtle hiss of escaping air, and a thruster's level sets how
+//! loud it plays: silent when idle, a quarter as soon as it fires, full at full level. What tells the
 //! thrusters apart is where they sit around the head: the head shadows the far ear, so a jet to
 //! one side is a little quieter and duller in the other ear, and one behind is duller in both.
 use std::f32::consts::TAU;
@@ -14,9 +14,11 @@ const FLOOR: f32 = 0.25;
 /// The hum under the jet (Hz), and the jet noise's cutoff (Hz).
 const HUM: f32 = 80.0;
 const JET: f32 = 900.0;
-/// The puff of a turning thruster: airier noise, no hum, and this much of the jet's loudness.
-const PUFF: f32 = 2600.0;
-const PUFF_LEVEL: f32 = 0.4;
+/// The hiss of a turning thruster: noise kept between these cutoffs (Hz), no hum, and this much
+/// of the jet's loudness, so it reads as air escaping a valve rather than a jet.
+const HISS_LOW: f32 = 2200.0;
+const HISS_HIGH: f32 = 7000.0;
+const HISS_LEVEL: f32 = 0.3;
 /// A jet straight to one side reaches the far ear this much quieter, cut off here.
 const SHADOW_LEVEL: f32 = 0.45;
 const SHADOW_CUTOFF: f32 = 1800.0;
@@ -41,6 +43,10 @@ pub struct Voice {
     phase: f32,
     jet: [f32; 2],
     smoothing: f32,
+    /// What the noise loses below the low cutoff, and how fast that follows it: nothing for a
+    /// jet, which keeps its rumble.
+    floor: f32,
+    floor_smoothing: f32,
     hum: f32,
     level: f32,
 }
@@ -53,23 +59,28 @@ impl Voice {
             phase: 0.0,
             jet: [0.0; 2],
             smoothing: lowpass(JET),
+            floor: 0.0,
+            floor_smoothing: 0.0,
             hum: 0.35,
             level: 0.6,
         }
     }
 
-    /// The lighter puff of a turning thruster.
+    /// The hiss of a turning thruster.
     pub fn puff(seed: u64) -> Voice {
         Voice {
-            smoothing: lowpass(PUFF),
+            smoothing: lowpass(HISS_HIGH),
+            floor_smoothing: lowpass(HISS_LOW),
             hum: 0.0,
-            level: 0.6 * PUFF_LEVEL,
+            level: 0.6 * HISS_LEVEL,
             ..Voice::new(seed)
         }
     }
 
     pub fn sample(&mut self) -> f32 {
-        let noise = self.rng.next_f32() * 2.0 - 1.0;
+        let white = self.rng.next_f32() * 2.0 - 1.0;
+        self.floor += (white - self.floor) * self.floor_smoothing;
+        let noise = white - self.floor;
         self.jet[0] += (noise - self.jet[0]) * self.smoothing;
         self.jet[1] += (self.jet[0] - self.jet[1]) * self.smoothing;
         self.phase = (self.phase + HUM / SAMPLE_RATE.get() as f32) % 1.0;

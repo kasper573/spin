@@ -9,7 +9,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::storage::ShaderBuffer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::fluid::{Fluid, FluidBuffers, FluidReady};
+use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, ReadOnce};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::app;
@@ -125,6 +125,9 @@ pub struct ScriptStatus {
     pub thrust_power: f32,
     pub diameter: f32,
     pub width: f32,
+    pub avatar: [f32; 3],
+    /// Frames whose water coupling the GPU has yet to report.
+    pub outstanding: u32,
 }
 
 /// Thruster keys a script holds down until a simulated time.
@@ -297,6 +300,8 @@ fn publish(
         thrust_power: sim.thrusters.power.0 as f32,
         diameter: sim.drum.ring.radius.0 * 2.0,
         width: sim.drum.ring.half_width.0 * 2.0,
+        avatar: sim.avatar().p.map(|c| c as f32),
+        outstanding: fluid.outstanding(),
     };
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);
@@ -421,7 +426,7 @@ fn read_u32s(app: &mut App, buffer: Handle<ShaderBuffer>) -> Vec<u32> {
 
 fn read_back(app: &mut App, readback: Readback) -> Vec<u8> {
     app.world_mut().insert_resource(ReadResult::default());
-    app.world_mut().spawn(readback).observe(
+    app.world_mut().spawn((readback, ReadOnce)).observe(
         |event: On<ReadbackComplete>, mut result: ResMut<ReadResult>, mut commands: Commands| {
             result.0 = Some(event.data.clone());
             commands.entity(event.entity).try_despawn();

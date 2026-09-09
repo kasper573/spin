@@ -35,6 +35,8 @@ pub struct FluidFrame {
     pub samples: Option<Vec<[f32; 4]>>,
     /// Whether anything moved, so the surface needs rebuilding.
     pub changed: bool,
+    /// Whether the substeps couple water and bodies, so the accumulators want reading back.
+    pub coupling: bool,
 }
 
 #[derive(Clone)]
@@ -252,6 +254,7 @@ pub fn decode_coupling(raw: &[i32]) -> Vec<WaterCoupling> {
                 wet: f(22),
                 seconds: 0.0,
                 substeps: 0.0,
+                age: 0.0,
             }
         })
         .collect()

@@ -1,4 +1,6 @@
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve, quat_integrate};
+use crate::core::math::{
+    Quatd, Vec3d, add_scaled, cross, mat3mul, mat3solve, quat_integrate, quat_rotate,
+};
 use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
 
 /// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
@@ -25,6 +27,9 @@ pub struct WaterCoupling {
     /// Simulated time the sums cover, and how many substeps it was taken in.
     pub seconds: f64,
     pub substeps: f64,
+    /// Simulated seconds from the middle of the time the sums cover to the moment they are
+    /// applied; the water and the hull turn with the vessel meanwhile.
+    pub age: f64,
 }
 
 impl WaterCoupling {
@@ -43,6 +48,27 @@ impl WaterCoupling {
         self.wet += other.wet;
         self.seconds += other.seconds;
         self.substeps += other.substeps;
+    }
+
+    /// The sums as they stand after everything they were taken from has turned by `q`.
+    pub fn turned(&self, q: &Quatd) -> WaterCoupling {
+        let t = &self.hull_tensor;
+        let columns = [
+            quat_rotate(q, &[t[0], t[3], t[5]]),
+            quat_rotate(q, &[t[3], t[1], t[4]]),
+            quat_rotate(q, &[t[5], t[4], t[2]]),
+        ];
+        let row = |i: usize| quat_rotate(q, &[columns[0][i], columns[1][i], columns[2][i]]);
+        let (x, y, z) = (row(0), row(1), row(2));
+        WaterCoupling {
+            buoyancy: quat_rotate(q, &self.buoyancy),
+            buoyancy_torque: quat_rotate(q, &self.buoyancy_torque),
+            flow: quat_rotate(q, &self.flow),
+            flow_moment: quat_rotate(q, &self.flow_moment),
+            hull: quat_rotate(q, &self.hull),
+            hull_tensor: [x[0], y[1], z[2], x[1], y[2], z[0]],
+            ..*self
+        }
     }
 
     /// The length of the substeps the sums were taken in.
