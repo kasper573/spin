@@ -25,27 +25,6 @@ pub fn mat3mul(m: &[f64; 9], v: &Vec3d) -> Vec3d {
     ]
 }
 
-/// Solve `m x = b` for a row-major 3x3 `m`; `None` when it is singular.
-pub fn mat3solve(m: &[f64; 9], b: &Vec3d) -> Option<Vec3d> {
-    let c = [
-        m[4] * m[8] - m[5] * m[7],
-        m[2] * m[7] - m[1] * m[8],
-        m[1] * m[5] - m[2] * m[4],
-        m[5] * m[6] - m[3] * m[8],
-        m[0] * m[8] - m[2] * m[6],
-        m[2] * m[3] - m[0] * m[5],
-        m[3] * m[7] - m[4] * m[6],
-        m[1] * m[6] - m[0] * m[7],
-        m[0] * m[4] - m[1] * m[3],
-    ];
-    let det = m[0] * c[0] + m[1] * c[3] + m[2] * c[6];
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let x = mat3mul(&c, b);
-    Some([x[0] / det, x[1] / det, x[2] / det])
-}
-
 /// a += b * s
 #[inline]
 pub fn add_scaled(a: &mut Vec3d, b: &Vec3d, s: f64) {
@@ -160,20 +139,6 @@ pub fn quat_from_basis(ex: &Vec3d, ey: &Vec3d, ez: &Vec3d) -> Quatd {
         let s = (1.0 + m8 - m0 - m4).sqrt() * 2.0;
         [(m2 + m6) / s, (m5 + m7) / s, 0.25 * s, (m3 - m1) / s]
     }
-}
-
-/// Orientation of a board lying flat against a surface with normal n (the board's local y).
-pub fn basis_from_normal(n: &Vec3d) -> Quatd {
-    let helper = if n[1].abs() < 0.9 {
-        [0.0, 1.0, 0.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let mut ex = cross(&helper, n);
-    let l = norm(&ex).max(1e-12);
-    ex = [ex[0] / l, ex[1] / l, ex[2] / l];
-    let ez = cross(&ex, n);
-    quat_from_basis(&ex, n, &ez)
 }
 
 /// Small deterministic RNG (xorshift64*), uniform in [0, 1).

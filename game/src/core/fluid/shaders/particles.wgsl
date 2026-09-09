@@ -223,48 +223,20 @@ fn exclude_from_bodies(q_in: vec3<f32>) -> vec3<f32> {
         if (body.position.w <= 0.0) {
             continue;
         }
-        let r = q - body.position.xyz;
-        if (body.slots.w == 0u) {
-            let half = body.shape.xyz;
-            let e = half + vec3(0.3, 0.4, 0.3) * d;
-            if (dot(r, r) > dot(e, e)) {
-                continue;
-            }
-            let l = vec3(dot(body.row_x.xyz, r), dot(body.row_y.xyz, r), dot(body.row_z.xyz, r));
-            let a = abs(l);
-            if (any(a >= e)) {
-                continue;
-            }
-            let pen = e - a;
-            var axis = vec3(0.0);
-            var amount = 0.0;
-            if (pen.y <= pen.x && pen.y <= pen.z) {
-                axis = vec3(body.row_x.y, body.row_y.y, body.row_z.y);
-                amount = pen.y * sign(l.y);
-            } else if (pen.x <= pen.z) {
-                axis = vec3(body.row_x.x, body.row_y.x, body.row_z.x);
-                amount = pen.x * sign(l.x);
-            } else {
-                axis = vec3(body.row_x.z, body.row_y.z, body.row_z.z);
-                amount = pen.z * sign(l.z);
-            }
-            q += axis * amount;
-        } else {
-            let centre = body.position.xyz + vec3(dot(body.row_x.xyz, body.shape.xyz), dot(body.row_y.xyz, body.shape.xyz), dot(body.row_z.xyz, body.shape.xyz));
-            let radius = body.shape.w;
-            let rc = q - centre;
-            let r2 = dot(rc, rc);
-            let keep_out = radius + 0.3 * d;
-            if (r2 >= keep_out * keep_out) {
-                continue;
-            }
-            let len = sqrt(r2);
-            var n = vec3(0.0, 1.0, 0.0);
-            if (len > 1e-9) {
-                n = rc / len;
-            }
-            q += n * (keep_out - len);
+        let centre = body.position.xyz + vec3(dot(body.row_x.xyz, body.shape.xyz), dot(body.row_y.xyz, body.shape.xyz), dot(body.row_z.xyz, body.shape.xyz));
+        let radius = body.shape.w;
+        let rc = q - centre;
+        let r2 = dot(rc, rc);
+        let keep_out = radius + 0.3 * d;
+        if (r2 >= keep_out * keep_out) {
+            continue;
         }
+        let len = sqrt(r2);
+        var n = vec3(0.0, 1.0, 0.0);
+        if (len > 1e-9) {
+            n = rc / len;
+        }
+        q += n * (keep_out - len);
     }
     return q;
 }

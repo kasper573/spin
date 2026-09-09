@@ -1,13 +1,13 @@
-//! Rigid bodies: shared shapes, per-body state, impulse-based contacts, and the step that
-//! applies what the water did, drags them through the air and resolves their contacts.
+//! Rigid bodies: shared shapes, per-body state, impulse-based contacts with the vessel, and the
+//! step that applies what the water did, drags them through the air and resolves their contacts.
 mod body;
 mod contacts;
 
-pub use body::{Body, BodyShape, Collider, Ground, WaterCoupling};
-pub use contacts::{collide_pair, collide_vessel};
+pub use body::{Body, BodyShape, Ground, Hull, WaterCoupling};
+pub use contacts::collide_vessel;
 
 use crate::core::math::quat_from_rotation_vector;
-use crate::core::units::{Hertz, MetresPerSecond, RadiansPerSecond, Seconds};
+use crate::core::units::{MetresPerSecond, RadiansPerSecond, Seconds};
 use crate::core::vessel::Vessel;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,9 +15,6 @@ pub struct BodyParams {
     pub air: bool,
     /// Time constant for the vessel's air to drag free bodies along with its walls.
     pub air_tau: Seconds,
-    /// Rate at which a fully wetted body the water turns has its spin relax toward the vessel's
-    /// rotation.
-    pub wet_spin_rate: Hertz,
     /// Safety clamps on speed and spin, well above anything the vessel's walls reach.
     pub max_speed: MetresPerSecond,
     pub max_spin: RadiansPerSecond,
@@ -28,15 +25,14 @@ impl Default for BodyParams {
         BodyParams {
             air: true,
             air_tau: Seconds(12.0),
-            wet_spin_rate: Hertz(20.0),
             max_speed: MetresPerSecond(40.0),
             max_spin: RadiansPerSecond(25.0),
         }
     }
 }
 
-/// One substep: apply the water's impulses (if any arrived), air and wet damping, integrate, and
-/// resolve contacts with the vessel and between solid bodies. The air pushes on the hull's
+/// One substep: apply the water's impulses (if any arrived) and the air's drag, integrate, and
+/// resolve contacts with the vessel. The air pushes on the hull's
 /// centre of pressure and spins it toward its own rotation, so a ballasted hull that drifts
 /// through it turns ballast-first, and where there is no air nothing turns it at all.
 pub fn step(
@@ -60,21 +56,12 @@ pub fn step(
             // water may push a body with a few times the vessel's artificial gravity, no more
             let shape = &shapes[b.shape];
             let max_accel = 20.0 + 4.0 * spin_mag * spin_mag * shape.reach();
-            b.couple(
-                &impulse.turned(&since),
-                max_accel,
-                &spin,
-                shape.turns_in_water(),
-            );
-        }
-        let wet_k = (b.wet * params.wet_spin_rate.0 as f64 * dt).min(1.0);
-        if wet_k > 0.0 && shapes[b.shape].turns_in_water() {
-            relax(&mut b.w, &spin, wet_k);
+            b.couple(&impulse.turned(&since), max_accel);
         }
         if air_k > 0.0
             && let Some(a) = vessel.air_velocity(b.p)
         {
-            let at = b.to_world(&shapes[b.shape].collider.centre_of_pressure());
+            let at = b.to_world(&shapes[b.shape].hull.centre_of_pressure());
             let hull = b.point_velocity(&at);
             let push = [a[0] - hull[0], a[1] - hull[1], a[2] - hull[2]];
             let impulse = push.map(|p| p * air_k / b.inv_m);
@@ -87,16 +74,6 @@ pub fn step(
         b.ground = None;
         if b.solid {
             collide_vessel(b, &shapes[b.shape], vessel, dt);
-        }
-    }
-    let n = bodies.len();
-    for a in 0..n {
-        for b in (a + 1)..n {
-            if !(bodies[a].solid && bodies[b].solid) {
-                continue;
-            }
-            collide_pair(bodies, a, b, shapes);
-            collide_pair(bodies, b, a, shapes);
         }
     }
 }

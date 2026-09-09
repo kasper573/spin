@@ -29,14 +29,6 @@ pub enum ScriptCommand {
         z: f32,
         count: u32,
     },
-    Raft {
-        x: f64,
-        y: f64,
-        z: f64,
-        nx: f64,
-        ny: f64,
-        nz: f64,
-    },
     Sculpt {
         phi: f64,
         y: f64,
@@ -103,7 +95,6 @@ pub struct ScriptStatus {
     pub frame: u32,
     pub particles: usize,
     pub litres: f32,
-    pub rafts: usize,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
     pub time: Seconds,
@@ -114,8 +105,6 @@ pub struct ScriptStatus {
     pub landscape_max: f32,
     /// Saves written to storage so far.
     pub saves: u32,
-    /// Each raft's distance from the axis and its tangential speed relative to the glass.
-    pub raft_slip: Vec<[f32; 2]>,
     /// The avatar's weight in g as the ground pushes back, zero when nothing does.
     pub weight: f32,
     /// The avatar's speed over the ground it stands on, or through the air.
@@ -176,18 +165,6 @@ fn execute(world: &mut World, command: ScriptCommand) {
                     .resource::<Simulation>()
                     .inject(&mut fluid, [x, y, z], count)
             });
-        }
-        ScriptCommand::Raft {
-            x,
-            y,
-            z,
-            nx,
-            ny,
-            nz,
-        } => {
-            world
-                .resource_mut::<Simulation>()
-                .spawn_raft([x, y, z], [nx, ny, nz]);
         }
         ScriptCommand::Sculpt {
             phi,
@@ -285,7 +262,6 @@ fn publish(
         frame: frame.0,
         particles: fluid.len(),
         litres: fluid.litres().0,
-        rafts: sim.rafts().len(),
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,
@@ -294,15 +270,6 @@ fn publish(
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
         saves: saves.completed,
-        raft_slip: sim
-            .rafts()
-            .iter()
-            .map(|b| {
-                let r = (b.p[0] * b.p[0] + b.p[2] * b.p[2]).sqrt().max(1e-9);
-                let tangential = (b.v[0] * b.p[2] - b.v[2] * b.p[0]) / r;
-                [r as f32, (tangential - sim.drum.spin.0 as f64 * r) as f32]
-            })
-            .collect(),
         weight: footing.weight,
         ground_speed: footing.ground_speed,
         airborne: footing.airborne,

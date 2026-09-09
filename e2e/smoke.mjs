@@ -92,7 +92,7 @@ try {
   await send("Page.navigate", { url });
   check("app starts", await waitForApp());
   const fresh = await status();
-  check("starts empty", fresh.particles === 0 && fresh.rafts === 0, JSON.stringify(fresh));
+  check("starts empty", fresh.particles === 0, JSON.stringify(fresh));
 
   check("stands on the ground under one g", Math.abs(fresh.weight - 1) < 0.05 && fresh.ground_speed < 0.1, `${fresh.weight} g, ${fresh.ground_speed} m/s`);
   await screenshot("standing");
@@ -118,15 +118,9 @@ try {
     await command({ cmd: "inject", x: Math.cos(a) * 8.0, y: (k % 3) * 2.0 - 2.0, z: Math.sin(a) * 8.0, count: 150 });
     await command({ cmd: "advance", seconds: 0.2 });
   }
-  for (let k = 0; k < 3; k++) {
-    const a = k * 2.0;
-    await command({ cmd: "raft", x: Math.cos(a) * 9.0, y: 0, z: Math.sin(a) * 9.0, nx: -Math.cos(a), ny: 0, nz: -Math.sin(a) });
-  }
   await command({ cmd: "advance", seconds: 8 });
   const filled = await status();
   check("water injected", filled.particles === 1800, `${filled.particles} particles, ${filled.litres} L`);
-  check("rafts placed", filled.rafts === 3, `${filled.rafts}`);
-  check("rafts ride with the glass", filled.raft_slip.every(([r, slip]) => r > 7.5 && Math.abs(slip) < 1.5), JSON.stringify(filled.raft_slip));
   check("drum spinning", Math.abs(filled.spin - 1.0) < 1e-3, `${filled.spin}`);
   await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
   await screenshot("water");
@@ -170,7 +164,7 @@ try {
   await send("Page.reload");
   check("app restarts", await waitForApp());
   const restored = await status();
-  check("state persists across reload", restored.particles === live.particles && restored.rafts === 3 && restored.landscape_max > 1.2 && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, rafts: restored.rafts, land: restored.landscape_max, spin: restored.spin }));
+  check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, spin: restored.spin }));
   await screenshot("restored");
 
   const errors = [...new Set(logs.filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];

@@ -21,12 +21,9 @@
 const ACC_BUOYANCY: u32 = 0u;
 const ACC_BUOYANCY_TORQUE: u32 = 3u;
 const ACC_FLOW: u32 = 6u;
-const ACC_FLOW_MOMENT: u32 = 9u;
-const ACC_HULL: u32 = 12u;
-const ACC_HULL_TENSOR: u32 = 15u;
-const ACC_COUPLING: u32 = 21u;
-const ACC_WET: u32 = 22u;
-const ACC_STRIDE: u32 = 32u;
+const ACC_COUPLING: u32 = 9u;
+const ACC_WET: u32 = 10u;
+const ACC_STRIDE: u32 = 16u;
 
 fn body_of_sample(k: u32) -> u32 {
     for (var b = 0u; b < params.body_count; b++) {
@@ -147,7 +144,6 @@ fn drag(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = s.pos.xyz;
     let b = u32(s.vel.w);
     let body = bodies.items[b];
-    let r_body = x - body.position.xyz;
     var flow = vec3(0.0);
     var coupling = 0.0;
     let c = coords_of(x);
@@ -181,13 +177,5 @@ fn drag(@builtin(global_invocation_id) id: vec3<u32>) {
     coupling *= body.extra.y;
     let base = b * ACC_STRIDE;
     add_fixed3(base + ACC_FLOW, flow);
-    add_fixed3(base + ACC_FLOW_MOMENT, cross(r_body, flow));
-    add_fixed3(base + ACC_HULL, coupling * r_body);
-    add_fixed(base + ACC_HULL_TENSOR, coupling * r_body.x * r_body.x);
-    add_fixed(base + ACC_HULL_TENSOR + 1u, coupling * r_body.y * r_body.y);
-    add_fixed(base + ACC_HULL_TENSOR + 2u, coupling * r_body.z * r_body.z);
-    add_fixed(base + ACC_HULL_TENSOR + 3u, coupling * r_body.x * r_body.y);
-    add_fixed(base + ACC_HULL_TENSOR + 4u, coupling * r_body.y * r_body.z);
-    add_fixed(base + ACC_HULL_TENSOR + 5u, coupling * r_body.z * r_body.x);
     add_fixed(base + ACC_COUPLING, coupling);
 }

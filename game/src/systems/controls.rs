@@ -1,5 +1,5 @@
 //! Mouse and keyboard: pointer lock, piloting the avatar, the dials (hold a key, turn the wheel),
-//! the toggles, the clearing chords, and the three mouse buttons that act on the crosshair.
+//! the toggles, the clearing chords, and the mouse buttons that act on the crosshair.
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -10,7 +10,6 @@ use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotInput, Player};
-use crate::systems::rafts::PLACEMENT_OFFSET;
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -28,15 +27,13 @@ const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
 pub enum ClearAction {
     ResetAll,
     ClearWater,
-    ClearRafts,
     ResetLandscape,
 }
 
 impl ClearAction {
-    pub const ALL: [ClearAction; 4] = [
+    pub const ALL: [ClearAction; 3] = [
         ClearAction::ResetAll,
         ClearAction::ClearWater,
-        ClearAction::ClearRafts,
         ClearAction::ResetLandscape,
     ];
 
@@ -46,8 +43,7 @@ impl ClearAction {
         match self {
             ClearAction::ResetAll => KeyCode::Digit0,
             ClearAction::ClearWater => KeyCode::Digit1,
-            ClearAction::ClearRafts => KeyCode::Digit2,
-            ClearAction::ResetLandscape => KeyCode::Digit3,
+            ClearAction::ResetLandscape => KeyCode::Digit2,
         }
     }
 
@@ -55,8 +51,7 @@ impl ClearAction {
         match self {
             ClearAction::ResetAll => "Backspace+0",
             ClearAction::ClearWater => "Backspace+1",
-            ClearAction::ClearRafts => "Backspace+2",
-            ClearAction::ResetLandscape => "Backspace+3",
+            ClearAction::ResetLandscape => "Backspace+2",
         }
     }
 
@@ -64,7 +59,6 @@ impl ClearAction {
         match self {
             ClearAction::ResetAll => "reset everything to the initial state",
             ClearAction::ClearWater => "remove all water",
-            ClearAction::ClearRafts => "remove all rafts",
             ClearAction::ResetLandscape => "flatten landscape",
         }
     }
@@ -77,7 +71,6 @@ impl ClearAction {
                 fluid.clear();
             }
             ClearAction::ClearWater => fluid.clear(),
-            ClearAction::ClearRafts => sim.clear_rafts(),
             ClearAction::ResetLandscape => sim.drum.landscape.flatten(GROUND_DEPTH),
         }
     }
@@ -235,13 +228,6 @@ fn mouse(
         sim.inject(&mut fluid, at.to_array(), count as u32);
     } else {
         controls.inject_carry = 0.0;
-    }
-    if mouse.just_pressed(MouseButton::Right) {
-        let at = target.point + target.normal * PLACEMENT_OFFSET.0;
-        sim.spawn_raft(
-            at.as_dvec3().to_array(),
-            target.normal.as_dvec3().to_array(),
-        );
     }
     if mouse.pressed(MouseButton::Middle) {
         controls.sculpting = true;

@@ -1,4 +1,4 @@
-//! A fixed workload: the ring world under one g a sixth full of water with a few rafts, then
+//! A fixed workload: the ring world under one g a sixth full of water, then
 //! half full, run headless for a few hundred frames of one substep each, issued as fast as the
 //! machine allows, and timed per frame, GPU included.
 use bevy::platform::time::Instant;
@@ -25,13 +25,6 @@ fn main() {
                 )
             });
         testing::run(&mut app, Seconds(0.2));
-    }
-    for k in 0..4 {
-        let a = k as f64 * 1.3;
-        let n = [-a.cos(), 0.0, -a.sin()];
-        app.world_mut()
-            .resource_mut::<Simulation>()
-            .spawn_raft([a.cos() * 9.5, 0.0, a.sin() * 9.5], n);
     }
     testing::run(&mut app, Seconds(3.0));
     measure(&mut app, "a sixth full");
@@ -69,10 +62,7 @@ fn measure(app: &mut App, label: &str) {
     let elapsed = start.elapsed().as_secs_f64();
     let per_frame_ms = elapsed / frames as f64 * 1000.0;
     let per_particle_us = elapsed / frames as f64 / particles as f64 * 1e6;
-    println!(
-        "{label}: {particles} particles, {} rafts",
-        app.world().resource::<Simulation>().rafts().len()
-    );
+    println!("{label}: {particles} particles");
     println!(
         "frame: {per_frame_ms:.2} ms ({:.0} fps), {per_particle_us:.3} us per particle",
         1000.0 / per_frame_ms

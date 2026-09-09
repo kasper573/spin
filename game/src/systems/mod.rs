@@ -5,7 +5,6 @@ pub mod drum;
 pub mod hud;
 pub mod persistence;
 pub mod player;
-pub mod rafts;
 pub mod scene;
 pub mod settings;
 pub mod sim;

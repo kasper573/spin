@@ -1,4 +1,4 @@
-//! The running simulation: the drum, the avatar and the rafts are stepped on the CPU and the
+//! The running simulation: the drum and the avatar are stepped on the CPU and the
 //! water follows on the GPU. Real time takes one substep per frame, no longer than a sixtieth
 //! of a second, so a fast display gets smooth bodies and a slow frame is split into a few
 //! substeps; beyond that, time stretches rather than the frame. The water steps at exactly
@@ -13,9 +13,9 @@ use bevy::prelude::*;
 
 use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
-    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_BODIES, MAX_SUBSTEPS_PER_FRAME,
+    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
-use crate::core::math::{basis_from_normal, norm, quat_from_basis};
+use crate::core::math::{norm, quat_from_basis};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
@@ -23,11 +23,9 @@ use crate::core::units::{
 };
 use crate::core::vessel::Vessel;
 use crate::systems::drum::{DEFAULT_RING, Drum, Ring};
-use crate::systems::rafts;
 
 /// The water's step rate, and the most the bodies are stepped by at once.
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
-pub const MAX_RAFTS: usize = MAX_BODIES - 1;
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
 /// Shortest substep real time is split into; faster frames are gathered into one.
@@ -35,7 +33,6 @@ const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
 const RATE_WINDOW: Seconds = Seconds(1.0);
 const AVATAR_SHAPE: usize = 0;
-const RAFT_SHAPE: usize = 1;
 
 #[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum SimSet {
@@ -82,9 +79,9 @@ pub struct Simulation {
     pub rate: f32,
     /// The water's steps of the last frame.
     pub substeps: Vec<SubstepRecord>,
-    /// The avatar first, then the rafts.
+    /// The avatar.
     bodies: Vec<Body>,
-    shapes: [BodyShape; 2],
+    shapes: [BodyShape; 1],
     accumulator: f32,
     /// Simulated time since the water last stepped.
     water_due: f64,
@@ -118,7 +115,7 @@ impl Simulation {
     /// The initial ring world at this size: ground all the way round, spinning at one g, the
     /// avatar standing on it with its thrusters equalized to that.
     pub fn new(ring: Ring) -> Simulation {
-        let shapes = [avatar::shape(), rafts::shape()];
+        let shapes = [avatar::shape()];
         let mut drum = Drum::new(ring);
         drum.spin = standing_spin(ring);
         drum.target_spin = drum.spin;
@@ -283,7 +280,6 @@ impl Simulation {
     pub fn reset(&mut self) {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
-        let raft_shape = self.shapes[RAFT_SHAPE].friction;
         let target = self.drum.target_spin;
         let power = self.thrusters.power;
         let gyros = self.gyros;
@@ -291,15 +287,10 @@ impl Simulation {
         *self = Simulation::new(self.drum.ring);
         self.params = params;
         self.body_params = body_params;
-        self.shapes[RAFT_SHAPE].friction = raft_shape;
         self.drum.target_spin = target;
         self.thrusters.power = power;
         self.gyros = gyros;
         self.bodies[0] = avatar;
-    }
-
-    pub fn set_raft_friction(&mut self, friction: f64) {
-        self.shapes[RAFT_SHAPE].friction = friction;
     }
 
     pub fn shapes(&self) -> &[BodyShape] {
@@ -343,18 +334,6 @@ impl Simulation {
         &mut self.bodies[0]
     }
 
-    pub fn rafts(&self) -> &[Body] {
-        &self.bodies[1..]
-    }
-
-    pub fn rafts_mut(&mut self) -> &mut [Body] {
-        &mut self.bodies[1..]
-    }
-
-    pub fn clear_rafts(&mut self) {
-        self.bodies.truncate(1);
-    }
-
     /// Add up to `count` particles around a point inside the drum, moving with the glass.
     pub fn inject(&self, fluid: &mut Fluid, centre: [f32; 3], count: u32) -> u32 {
         let drum = &self.drum;
@@ -367,19 +346,6 @@ impl Simulation {
             count,
             |p| drum.place_inside(p),
         )
-    }
-
-    /// Spawn a raft centred at `p`, lying flat against a surface with inward normal `n` and
-    /// moving with the glass.
-    pub fn spawn_raft(&mut self, p: [f64; 3], n: [f64; 3]) -> bool {
-        if self.rafts().len() >= MAX_RAFTS {
-            return false;
-        }
-        let q = basis_from_normal(&n);
-        let (v, w) = (self.drum.wall_velocity(p), self.drum.angular_velocity());
-        self.bodies
-            .push(Body::new(RAFT_SHAPE, &self.shapes[RAFT_SHAPE], p, q, v, w));
-        true
     }
 }
 

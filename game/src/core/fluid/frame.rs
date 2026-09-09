@@ -8,11 +8,11 @@ use super::{
     EPS_LAMBDA, FluidParams, MAX_BODIES, REST_DENSITY, Resolution, SCORR_K, TABLE_CELLS, WET_REF,
 };
 use crate::core::math::Vec3d;
-use crate::core::rigid::{Body, BodyShape, Collider, WaterCoupling};
+use crate::core::rigid::{Body, BodyShape, Hull, WaterCoupling};
 
 /// Units per unit in the shaders' fixed-point accumulators.
 const FIXED: f64 = 65536.0;
-pub const ACCUMULATORS_PER_BODY: usize = 32;
+pub const ACCUMULATORS_PER_BODY: usize = 16;
 /// An accumulator slot no body uses, stamped with the frame's ticket so a readback tells which
 /// frame it reports.
 pub const STAMP_SLOT: usize = ACCUMULATORS_PER_BODY - 1;
@@ -200,21 +200,13 @@ pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> B
             continue;
         };
         let count = if body.solid { samples.count } else { 0 };
-        let (shape_v, kind) = match shape.collider {
-            Collider::Box { half } => (
-                Vec4::new(half[0] as f32, half[1] as f32, half[2] as f32, 0.0),
-                0,
-            ),
-            Collider::Sphere { radius, centre } => (
-                Vec4::new(
-                    centre[0] as f32,
-                    centre[1] as f32,
-                    centre[2] as f32,
-                    radius as f32,
-                ),
-                1,
-            ),
-        };
+        let Hull { radius, centre } = shape.hull;
+        let shape_v = Vec4::new(
+            centre[0] as f32,
+            centre[1] as f32,
+            centre[2] as f32,
+            radius as f32,
+        );
         let m = body.m.map(|v| v as f32);
         *item = GpuBody {
             position: v4(body.p, if body.solid { 1.0 } else { 0.0 }),
@@ -224,7 +216,7 @@ pub fn pack(bodies: &[Body], shapes: &[BodyShape], layout: &[ShapeSamples]) -> B
             velocity: v4(body.v, 0.0),
             angular: v4(body.w, 0.0),
             shape: shape_v,
-            slots: UVec4::new(samples.first, count, boundary, kind),
+            slots: UVec4::new(samples.first, count, boundary, 0),
             extra: Vec4::new(
                 samples.volume_per_sample,
                 body.inv_m as f32,
@@ -247,11 +239,8 @@ pub fn decode_coupling(raw: &[i32]) -> Vec<WaterCoupling> {
                 buoyancy: [f(0), f(1), f(2)],
                 buoyancy_torque: [f(3), f(4), f(5)],
                 flow: [f(6), f(7), f(8)],
-                flow_moment: [f(9), f(10), f(11)],
-                hull: [f(12), f(13), f(14)],
-                hull_tensor: [f(15), f(16), f(17), f(18), f(19), f(20)],
-                coupling: f(21),
-                wet: f(22),
+                coupling: f(9),
+                wet: f(10),
                 seconds: 0.0,
                 substeps: 0.0,
                 age: 0.0,

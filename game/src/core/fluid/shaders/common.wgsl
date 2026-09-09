@@ -48,9 +48,9 @@ struct GpuBody {
     row_z: vec4<f32>,
     velocity: vec4<f32>,
     angular: vec4<f32>,
-    // box: half extents; sphere: local centre and radius in w
+    // the hull's local centre, and its radius in w
     shape: vec4<f32>,
-    // x: first sample of the shape, y: sample count, z: first boundary entry, w: 1 for a sphere
+    // x: first sample of the shape, y: sample count, z: first boundary entry
     slots: vec4<u32>,
     // volume per sample, inverse mass, largest inverse inertia, reach
     extra: vec4<f32>,

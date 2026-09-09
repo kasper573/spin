@@ -13,7 +13,6 @@ fn snapshot_round_trips_through_json() {
     {
         let mut sim = app.world_mut().resource_mut::<Simulation>();
         sim.drum.target_spin = RadiansPerSecond(1.5);
-        sim.spawn_raft([9.0, 0.0, 0.0], [-1.0, 0.0, 0.0]);
         sim.drum.landscape.sculpt(0.3, 0.1, 1.5, 0.2);
     }
     app.world_mut()
@@ -37,8 +36,7 @@ fn snapshot_round_trips_through_json() {
 
     let json = serde_json::to_string(&snapshot(&settings, sim, fluid)).unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
-    let (raft, shuttle, attitude, angle, heights) = (
-        sim.rafts()[0].p,
+    let (shuttle, attitude, angle, heights) = (
         sim.avatar().p,
         sim.avatar().q,
         sim.drum.angle.0,
@@ -52,12 +50,6 @@ fn snapshot_round_trips_through_json() {
 
     assert_eq!(settings2, settings);
     assert_eq!(fluid2.len(), 40);
-    assert_eq!(sim2.rafts().len(), 1);
-    let (a, b) = (sim2.rafts()[0].p, raft);
-    assert!(
-        (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5 && (a[2] - b[2]).abs() < 1e-5,
-        "raft {a:?} vs {b:?}"
-    );
     assert_eq!(sim2.drum.landscape.heights(), heights);
     assert!((sim2.drum.angle.0 - angle).abs() < 1e-9);
     assert_eq!(sim2.avatar().p, shuttle);

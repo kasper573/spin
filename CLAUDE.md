@@ -42,7 +42,7 @@ The game crate's `src/` is organized into `core/` and `systems/`:
 `systems/`:
 
 - high level systems and compositions of core primitives
-- the majority of our content and mechanics goes here (the drum, water, rafts, landscape, controls, hud, persistence)
+- the majority of our content and mechanics goes here (the drum, water, landscape, controls, hud, persistence)
 - may depend on other high level systems
 
 The binaries under `src/bin/` are thin: the client only assembles the app, nothing more.

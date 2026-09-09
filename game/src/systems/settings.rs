@@ -20,9 +20,8 @@ pub struct Settings {
     pub flow: LitresPerSecond,
     pub viscosity: f32,
     pub wall_friction: f32,
-    pub raft_friction: f32,
     pub air: bool,
-    /// Whether the avatar is solid to the drum, the water and the rafts, or a ghost.
+    /// Whether the avatar is solid to the drum and the water, or a ghost.
     pub collisions: bool,
     /// The ring's size across and along its axis.
     pub diameter: Metres,
@@ -39,7 +38,6 @@ impl Default for Settings {
             flow: LitresPerSecond(20_000.0),
             viscosity: 0.15,
             wall_friction: 0.5,
-            raft_friction: 0.45,
             air: true,
             collisions: true,
             diameter: Metres(DEFAULT_RING.radius.0 * 2.0),
@@ -93,19 +91,17 @@ pub enum Dial {
     Flow,
     Viscosity,
     WallFriction,
-    RaftFriction,
     Diameter,
     Width,
     Thrust,
 }
 
 impl Dial {
-    pub const ALL: [Dial; 8] = [
+    pub const ALL: [Dial; 7] = [
         Dial::Spin,
         Dial::Flow,
         Dial::Viscosity,
         Dial::WallFriction,
-        Dial::RaftFriction,
         Dial::Diameter,
         Dial::Width,
         Dial::Thrust,
@@ -117,10 +113,9 @@ impl Dial {
             Dial::Flow => KeyCode::F2,
             Dial::Viscosity => KeyCode::F3,
             Dial::WallFriction => KeyCode::F4,
-            Dial::RaftFriction => KeyCode::F5,
-            Dial::Diameter => KeyCode::F6,
-            Dial::Width => KeyCode::F7,
-            Dial::Thrust => KeyCode::F8,
+            Dial::Diameter => KeyCode::F5,
+            Dial::Width => KeyCode::F6,
+            Dial::Thrust => KeyCode::F7,
         }
     }
 
@@ -130,10 +125,9 @@ impl Dial {
             Dial::Flow => "F2",
             Dial::Viscosity => "F3",
             Dial::WallFriction => "F4",
-            Dial::RaftFriction => "F5",
-            Dial::Diameter => "F6",
-            Dial::Width => "F7",
-            Dial::Thrust => "F8",
+            Dial::Diameter => "F5",
+            Dial::Width => "F6",
+            Dial::Thrust => "F7",
         }
     }
 
@@ -143,7 +137,6 @@ impl Dial {
             Dial::Flow => "flow",
             Dial::Viscosity => "viscosity",
             Dial::WallFriction => "wall friction",
-            Dial::RaftFriction => "raft friction",
             Dial::Diameter => "ring diameter",
             Dial::Width => "ring width",
             Dial::Thrust => "thruster power",
@@ -152,12 +145,7 @@ impl Dial {
 
     pub fn min(self) -> f32 {
         match self {
-            Dial::Spin
-            | Dial::Flow
-            | Dial::Viscosity
-            | Dial::WallFriction
-            | Dial::RaftFriction
-            | Dial::Thrust => 0.0,
+            Dial::Spin | Dial::Flow | Dial::Viscosity | Dial::WallFriction | Dial::Thrust => 0.0,
             Dial::Diameter => 6.0,
             Dial::Width => 2.0,
         }
@@ -168,7 +156,7 @@ impl Dial {
         match self {
             Dial::Spin | Dial::Thrust => 999.0,
             Dial::Flow => 999_000.0,
-            Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 1.0,
+            Dial::Viscosity | Dial::WallFriction => 1.0,
             Dial::Diameter => LARGEST_RING.radius.0 * 2.0,
             Dial::Width => LARGEST_RING.half_width.0 * 2.0,
         }
@@ -179,7 +167,7 @@ impl Dial {
         match self {
             Dial::Spin => 0.05,
             Dial::Flow => 5000.0,
-            Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => 0.05,
+            Dial::Viscosity | Dial::WallFriction => 0.05,
             Dial::Diameter | Dial::Width => 1.0,
             Dial::Thrust => 0.5,
         }
@@ -200,7 +188,6 @@ impl Dial {
             Dial::Flow => s.flow.0,
             Dial::Viscosity => s.viscosity,
             Dial::WallFriction => s.wall_friction,
-            Dial::RaftFriction => s.raft_friction,
             Dial::Diameter => s.diameter.0,
             Dial::Width => s.width.0,
             Dial::Thrust => s.thrust.0 as f32,
@@ -214,7 +201,6 @@ impl Dial {
             Dial::Flow => s.flow = LitresPerSecond(value),
             Dial::Viscosity => s.viscosity = value,
             Dial::WallFriction => s.wall_friction = value,
-            Dial::RaftFriction => s.raft_friction = value,
             Dial::Diameter => s.diameter = Metres(value),
             Dial::Width => s.width = Metres(value),
             Dial::Thrust => s.thrust = MetresPerSecondSquared(value as f64),
@@ -241,7 +227,7 @@ impl Dial {
                 s.standing_gravity().0 / EARTH_GRAVITY.0
             ),
             Dial::Flow => format!("{:.1} m3/s", v / 1000.0),
-            Dial::Viscosity | Dial::WallFriction | Dial::RaftFriction => format!("{v:.2}"),
+            Dial::Viscosity | Dial::WallFriction => format!("{v:.2}"),
             Dial::Diameter | Dial::Width => format!("{v:.0} m"),
             Dial::Thrust => {
                 let standing = s.standing_gravity().0;
@@ -354,7 +340,6 @@ fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
     sim.params.viscosity = settings.viscosity;
     sim.params.wall_friction = settings.wall_friction;
     sim.params.air = settings.air;
-    sim.set_raft_friction(settings.raft_friction as f64);
     sim.body_params.air = settings.air;
     sim.avatar_mut().solid = settings.collisions;
 }

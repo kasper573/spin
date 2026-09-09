@@ -1,4 +1,4 @@
-//! Everything worth keeping across a reload — settings, avatar, drum, water, rafts, landscape —
+//! Everything worth keeping across a reload — settings, avatar, drum, water, landscape —
 //! as one JSON snapshot in the browser's storage, written every couple of seconds. The water
 //! lives on the GPU, so a save first asks for a copy and writes when it arrives.
 use bevy::prelude::*;
@@ -28,9 +28,6 @@ pub struct Snapshot {
     /// Seven floats per particle: position, velocity, foam.
     #[serde(with = "codec::f32s")]
     pub fluid: Vec<f32>,
-    /// Thirteen floats per raft: position, orientation (x y z w), velocity, angular velocity.
-    #[serde(with = "codec::f32s")]
-    pub rafts: Vec<f32>,
     #[serde(with = "codec::f32s")]
     pub landscape: Vec<f32>,
 }
@@ -86,17 +83,6 @@ pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapsho
                 [x, y, z, vx, vy, vz, p.foam]
             })
             .collect(),
-        rafts: sim
-            .rafts()
-            .iter()
-            .flat_map(|b| {
-                [
-                    b.p[0], b.p[1], b.p[2], b.q[0], b.q[1], b.q[2], b.q[3], b.v[0], b.v[1], b.v[2],
-                    b.w[0], b.w[1], b.w[2],
-                ]
-                .map(|v| v as f32)
-            })
-            .collect(),
         landscape: sim.drum.landscape.heights().to_vec(),
     }
 }
@@ -126,17 +112,6 @@ pub fn apply(
                 velocity: [chunk[3], chunk[4], chunk[5]],
                 foam: chunk[6].clamp(0.0, 1.0),
             });
-        }
-    }
-    for chunk in snapshot.rafts.chunks_exact(13) {
-        if chunk.iter().all(|v| v.is_finite()) {
-            let f = |i: usize| chunk[i] as f64;
-            sim.spawn_raft([f(0), f(1), f(2)], [0.0, 1.0, 0.0]);
-            if let Some(raft) = sim.rafts_mut().last_mut() {
-                raft.place([f(0), f(1), f(2)], [f(3), f(4), f(5), f(6)]);
-                raft.v = [f(7), f(8), f(9)];
-                raft.w = [f(10), f(11), f(12)];
-            }
         }
     }
     pose_avatar(&snapshot.avatar, sim);

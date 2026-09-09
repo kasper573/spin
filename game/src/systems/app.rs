@@ -9,7 +9,7 @@ use crate::core::fluid::FluidPlugin;
 use crate::core::web;
 use crate::systems::{
     aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
-    persistence::PersistencePlugin, player::PlayerPlugin, rafts::RaftsPlugin, scene::ScenePlugin,
+    persistence::PersistencePlugin, player::PlayerPlugin, scene::ScenePlugin,
     settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin,
     thrusters::ThrustersPlugin, water::WaterPlugin,
 };
@@ -58,7 +58,6 @@ fn simulation(app: &mut App) {
         DrumPlugin,
         FluidPlugin,
         WaterPlugin,
-        RaftsPlugin,
         PlayerPlugin,
         ThrustersPlugin,
         AimPlugin,
