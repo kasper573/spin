@@ -71,7 +71,7 @@ One crate, `game/`, split into two layers plus thin binaries:
   the avatar walking, hopping and flying, rendered headless), `lint` (core may not reference systems).
 - `tests/` — contract tests against the public API, run headless on whatever GPU (or Vulkan
   software driver) the machine has.
-- `static/` — the page that loads the wasm bundle. `e2e/` — the headless Chrome smoke test.
+- `static/` — the page that loads the wasm bundle; opened with `?probe` it mirrors the app's status into the window title and runs the `cmd=` commands in the URL, for driving a browser that refuses DevTools. `e2e/` — the headless Chrome smoke test.
 
 ## Controls
 
@@ -88,12 +88,10 @@ you tilted by the angle you flew round the ring and a spell adrift in water movi
 drum leaves you leaning, until you level yourself again with the mouse. Outside the drum nothing
 turns you but your own thrusters and whatever you bump into. Thrusters spool up and down
 over a third of a second, and the cross in the bottom-left corner shows each pushing one where it
-sits on you, filling as it fires: pushing forward lights the arm at the back. Three rings around
-the cross, one about each axis, show the turning pairs: an arrow grows along the ring the way you
-are turning. Every pushing thruster is the same jet, heard from where it sits (the one pushing
-you forward roars from behind, the one pushing you left is louder in your right ear) at a quarter
-loudness as soon as it fires and at full when it is at full; the turning ones are a subtle hiss
-of escaping air.
+sits on you, filling as it fires: pushing forward lights the arm at the back. Every pushing
+thruster is the same jet, heard from where it sits (the one pushing you forward roars from
+behind, the one pushing you left is louder in your right ear) at a quarter loudness as soon as it
+fires and at full when it is at full. The turning thrusters are silent and not shown.
 Opposed thrusters cancel each other out; the widget still shows both firing.
 
 On the ground the horizontal thrust is your legs' orders, and they walk you at walking speed in

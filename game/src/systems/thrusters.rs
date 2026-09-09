@@ -1,12 +1,9 @@
 //! What the thrusters look and sound like. The widget is a three-axis cross in the bottom-left of
 //! the view, in the frame the thrusters sit in: up, down, left and right arms at full length,
-//! the forward and back arms receding diagonally. Each arm is a linear thruster where it is
+//! the forward and back arms receding diagonally. Each arm is a pushing thruster where it is
 //! mounted, and fills from the centre outward as that thruster spools up: pushing forward lights
-//! the arm at the back. Around the cross, three rings form a ball, one about each axis, for the
-//! turning pairs: as the hull turns, an arrow grows along that axis's ring from its front the way
-//! the hull is turning, as far round as the pair's net level says. Each thruster also has a
-//! voice, a jet for the pushing ones and a lighter puff for the turning ones, heard from where it
-//! sits around the head and as loud as its level says.
+//! the arm at the back. Each pushing thruster also has a voice, a jet heard from where it sits
+//! around the head and as loud as its level says. The turning thrusters show and sound nothing.
 //!
 //! The cross is projected onto the image plane by hand rather than left to the camera: a solid
 //! drawn off-axis under a wide lens skews toward the vanishing point.
@@ -32,14 +29,8 @@ const ARM: f32 = 0.17;
 /// other arms' length; the back arm comes out the opposite way.
 const RECEDING: Vec2 = Vec2::new(0.707, 0.707);
 const RECEDING_LENGTH: f32 = 0.85;
-/// The rings' radius as a multiple of the arm length, how far past them the widget keeps from
-/// the view's edge, how far round a ring an arrow reaches at full turn, and the size of its head
-/// as a fraction of the arm length.
-const RING: f32 = 1.25;
-const RING_MARGIN: f32 = 0.6;
-const RING_SEGMENTS: usize = 48;
-const FULL_TURN: f32 = 90.0;
-const ARROWHEAD: f32 = 0.1;
+/// How far the cross's centre keeps from the view's edge, as a multiple of the arm length.
+const MARGIN: f32 = 1.85;
 const STEREO: ChannelCount = NonZero::new(2).unwrap();
 const IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.9);
 const FIRING: Color = Color::srgb(1.0, 0.32, 0.04);
@@ -98,7 +89,7 @@ fn draw(
     let half_height = DEPTH * (lens.fov / 2.0).tan();
     let half_width = half_height * lens.aspect_ratio;
     let arm = ARM * half_height;
-    let margin = (RING + RING_MARGIN) * arm;
+    let margin = MARGIN * arm;
     let centre = view.translation + view.forward() * DEPTH
         - view.right() * (half_width - margin)
         - view.up() * (half_height - margin);
@@ -115,72 +106,6 @@ fn draw(
             fills.linestrip(fill(&points, level).into_iter().map(place), FIRING);
         }
     }
-    for (axis, turn) in [
-        (Axis::Pitch, sim.thrusters.pitch() as f32),
-        (Axis::Yaw, sim.thrusters.yaw() as f32),
-        (Axis::Roll, sim.thrusters.roll() as f32),
-    ] {
-        arms.linestrip(ring(axis, 0.0, 360.0).into_iter().map(place), IDLE);
-        if turn != 0.0 {
-            fills.linestrip(arrow(axis, turn).into_iter().map(place), FIRING);
-        }
-    }
-}
-
-/// The hull's turning axes, each with a ring around it: pitch about the right axis, yaw about
-/// the up axis and roll about the back axis, turning the right-hand way about each.
-#[derive(Clone, Copy)]
-enum Axis {
-    Pitch,
-    Yaw,
-    Roll,
-}
-
-impl Axis {
-    /// The axis in the thrusters' frame (x right, y up, z back).
-    fn direction(self) -> Vec3 {
-        match self {
-            Axis::Pitch => Vec3::X,
-            Axis::Yaw => Vec3::Y,
-            Axis::Roll => Vec3::Z,
-        }
-    }
-
-    /// Where an arrow along the ring starts: straight ahead for the pitch and yaw rings, the top
-    /// of the head for the roll ring.
-    fn front(self) -> Vec3 {
-        match self {
-            Axis::Pitch | Axis::Yaw => Vec3::NEG_Z,
-            Axis::Roll => Vec3::Y,
-        }
-    }
-}
-
-/// A stretch of an axis's ring, by angle turned about the axis from the ring's front in degrees.
-fn ring(axis: Axis, from: f32, to: f32) -> Vec<Vec2> {
-    let segments = ((to - from).abs() / 360.0 * RING_SEGMENTS as f32)
-        .ceil()
-        .max(1.0) as usize;
-    (0..=segments)
-        .map(|i| {
-            let a = (from + (to - from) * i as f32 / segments as f32).to_radians();
-            let p = Quat::from_axis_angle(axis.direction(), a) * axis.front() * RING;
-            screen(p.to_array())
-        })
-        .collect()
-}
-
-/// An arrow from the front of a ring along it, as far round as `turn` says (-1 to 1) and with
-/// its head at the far end, pointing the way the hull is turning.
-fn arrow(axis: Axis, turn: f32) -> Vec<Vec2> {
-    let mut shaft = ring(axis, 0.0, turn.clamp(-1.0, 1.0) * FULL_TURN);
-    let tip = shaft[shaft.len() - 1];
-    let along = (tip - shaft[shaft.len() - 2]).normalize_or_zero();
-    let across = along.perp();
-    shaft.push(tip - along * ARROWHEAD + across * ARROWHEAD * 0.6);
-    shaft.push(tip);
-    shaft.push(tip - along * ARROWHEAD - across * ARROWHEAD * 0.6);
-    shaft
 }
 
 /// Where a point of the hull in the thrusters' frame (x right, y up, z back) lands on the widget.
@@ -220,7 +145,7 @@ fn speak(
 ) {
     if !*started && controls.is_some_and(|controls| controls.active) {
         *started = true;
-        for thruster in Thruster::ALL {
+        for thruster in Thruster::ALL.into_iter().filter(|t| !t.turns()) {
             commands.spawn((
                 Speaker(thruster),
                 AudioPlayer(sounds.add(ThrusterSound(thruster))),
@@ -250,11 +175,7 @@ impl Decodable for ThrusterSound {
     fn decoder(&self) -> ThrusterDecoder {
         let seed = self.0 as u64;
         ThrusterDecoder {
-            voice: if self.0.turns() {
-                Voice::puff(seed)
-            } else {
-                Voice::new(seed)
-            },
+            voice: Voice::new(seed),
             placement: Placement::around(self.0.mount()),
             right: None,
         }

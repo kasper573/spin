@@ -80,6 +80,25 @@
           );
         }
         await init();
+        // Automation without DevTools (a browser on its own profile refuses them): with ?probe the
+        // status is mirrored into the window title and the commands given as cmd= are run once
+        // the app is up.
+        const params = new URLSearchParams(location.search);
+        if (params.has("probe")) {
+          const commands = params.getAll("cmd");
+          setInterval(() => {
+            let status = "";
+            try {
+              status = spin_status();
+            } catch {
+              return;
+            }
+            if (commands.length && JSON.parse(status).frame > 5) {
+              commands.splice(0).forEach((command) => spin_command(command));
+            }
+            document.title = status;
+          }, 250);
+        }
       } catch (e) {
         const log = document.getElementById("error-log");
         log.hidden = false;

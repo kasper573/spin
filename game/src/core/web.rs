@@ -59,13 +59,9 @@ pub fn sync_window(window: &mut Window) {
 }
 
 /// Whether the page holds the pointer lock; the browser drops it on Escape without telling bevy.
-/// Without a page there is no browser to drop it, and bevy's own grab stands.
 pub fn pointer_locked() -> bool {
-    let Some(window) = web_sys::window() else {
-        return true;
-    };
-    window
-        .document()
+    web_sys::window()
+        .and_then(|w| w.document())
         .and_then(|d| d.pointer_lock_element())
         .is_some()
 }

@@ -6,4 +6,8 @@ pub mod math;
 pub mod rigid;
 pub mod units;
 pub mod vessel;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "desktop.rs"]
 pub mod web;

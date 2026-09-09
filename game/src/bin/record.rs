@@ -269,21 +269,20 @@ impl Soundtrack {
         Soundtrack {
             writer: hound::WavWriter::create(path, spec).expect("create thrusters.wav"),
             voices: Thruster::ALL
-                .map(|t| {
-                    let voice = if t.turns() {
-                        Voice::puff(t as u64)
-                    } else {
-                        Voice::new(t as u64)
-                    };
-                    (voice, Placement::around(t.mount()))
-                })
+                .map(|t| (Voice::new(t as u64), Placement::around(t.mount())))
                 .to_vec(),
             gains: [0.0; 12],
         }
     }
 
     fn frame(&mut self, levels: [f64; 12]) {
-        let gains = levels.map(audio::gain);
+        let gains = Thruster::ALL.map(|t| {
+            if t.turns() {
+                0.0
+            } else {
+                audio::gain(levels[t as usize])
+            }
+        });
         let samples = audio::SAMPLE_RATE.get() / FPS;
         for k in 0..samples {
             let t = k as f32 / samples as f32;
