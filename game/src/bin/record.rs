@@ -208,7 +208,7 @@ fn marker_script() -> Vec<Phase> {
             &[YawRight],
             sweep,
             true,
-            "middle mouse held: the brush raises a ridge, and its outline wraps what it raises",
+            "right mouse held: the brush raises a ridge, and its outline wraps what it raises",
         ),
         eased(
             turn_time(1.8, pan),

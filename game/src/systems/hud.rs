@@ -90,7 +90,7 @@ pub fn hud_text(
         "click the view to take control\n\n"
     });
     out.push_str("thrust   W/S fore/aft | A/D left/right | Space/Shift up/down | Q/E roll\n");
-    out.push_str("mouse    pitch/yaw | LMB water | MMB raise land (Ctrl lowers)\n\n");
+    out.push_str("mouse    pitch/yaw | LMB water | RMB raise land (Ctrl lowers)\n\n");
     out.push_str("hold a key and turn the mouse wheel to adjust:\n");
     for dial in Dial::ALL {
         let held = if controls.held_dial == Some(dial) {

@@ -226,7 +226,7 @@ fn mouse(
     } else {
         controls.inject_carry = 0.0;
     }
-    if mouse.pressed(MouseButton::Middle) {
+    if mouse.pressed(MouseButton::Right) {
         aim.brush = Some(BRUSH_SIZE);
         let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
