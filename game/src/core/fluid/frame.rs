@@ -11,7 +11,7 @@ use super::{
     EPS_LAMBDA, FluidParams, MAX_BODIES, REST_DENSITY, Resolution, SCORR_K, TABLE_CELLS, WET_REF,
 };
 use crate::core::math::{Vec3d, mat3mul, quat_rotate};
-use crate::core::rigid::{Body, BodyShape, Hull, WaterCoupling};
+use crate::core::rigid::{Body, BodyShape, HullSphere, WaterCoupling};
 use crate::core::units::Seconds;
 use crate::core::vessel::WaterFrame;
 
@@ -250,7 +250,7 @@ pub fn pack(
             continue;
         };
         let count = if body.solid { samples.count } else { 0 };
-        let Hull { radius, centre } = shape.hull;
+        let HullSphere { centre, radius } = shape.hull.bulk();
         let p = frame.to_water(body.p).map(|x| x / length);
         let v = frame.vector_to_water(body.v).map(|x| x * time / length);
         let w = frame.vector_to_water(body.w).map(|x| x * time);

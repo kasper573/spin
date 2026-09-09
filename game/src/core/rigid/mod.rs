@@ -3,7 +3,7 @@
 mod body;
 mod contacts;
 
-pub use body::{Body, BodyShape, Ground, Hull, WaterCoupling};
+pub use body::{Body, BodyShape, Ground, Hull, HullSphere, WaterCoupling};
 pub use contacts::collide_vessel;
 
 use crate::core::math::{add_scaled, quat_from_rotation_vector, quat_rotate};

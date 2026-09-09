@@ -1,4 +1,4 @@
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, quat_integrate};
+use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, norm, quat_integrate};
 use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
 
 /// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
@@ -77,20 +77,32 @@ pub struct Ground {
     pub support: Newtons,
 }
 
-/// What a body is made of, for contacts: a sphere whose centre may sit away from the centre of
-/// mass, so that whatever pushes on the hull, the ground, the water or the air, turns it until
-/// the ballast hangs below. Friction acts through the centre of mass rather than at the hull,
-/// so the sphere slides instead of rolling. The centre is local to the centre of mass.
+/// A sphere of a hull, local to the centre of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Hull {
-    pub radius: f64,
+pub struct HullSphere {
     pub centre: Vec3d,
+    pub radius: f64,
+}
+
+/// What a body is made of, for contacts: spheres, the first of which is its bulk, whose centre
+/// may sit away from the centre of mass so that whatever pushes on the hull, the ground, the
+/// water or the air, turns it until the ballast hangs below. Any further spheres, such as a
+/// head above the bulk, only collide. Friction acts through the centre of mass rather than at
+/// the hull, so the spheres slide instead of rolling.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hull {
+    pub spheres: Vec<HullSphere>,
 }
 
 impl Hull {
-    /// Where the air pushes on the hull: its geometric centre.
-    pub fn centre_of_pressure(self) -> Vec3d {
-        self.centre
+    /// The sphere the water and the air push on.
+    pub fn bulk(&self) -> HullSphere {
+        self.spheres[0]
+    }
+
+    /// Where the air pushes on the hull: its bulk's centre.
+    pub fn centre_of_pressure(&self) -> Vec3d {
+        self.bulk().centre
     }
 }
 
@@ -122,7 +134,9 @@ impl BodyShape {
         let samples = sphere_samples(radius, centre, sample_count);
         let volume = 4.0 / 3.0 * std::f64::consts::PI * radius * radius * radius;
         BodyShape {
-            hull: Hull { radius, centre },
+            hull: Hull {
+                spheres: vec![HullSphere { centre, radius }],
+            },
             mass,
             inv_inertia,
             friction: DEFAULT_FRICTION,
@@ -138,10 +152,19 @@ impl BodyShape {
         self
     }
 
+    /// With another sphere that collides, local to the centre of mass.
+    pub fn with_sphere(mut self, centre: Vec3d, radius: f64) -> BodyShape {
+        self.hull.spheres.push(HullSphere { centre, radius });
+        self
+    }
+
     /// Distance from the centre of mass to the farthest point of the hull.
     pub fn reach(&self) -> f64 {
-        let Hull { radius, centre } = self.hull;
-        radius + (centre[0] * centre[0] + centre[1] * centre[1] + centre[2] * centre[2]).sqrt()
+        self.hull
+            .spheres
+            .iter()
+            .map(|sphere| sphere.radius + norm(&sphere.centre))
+            .fold(0.0, f64::max)
     }
 }
 

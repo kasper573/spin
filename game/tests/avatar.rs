@@ -301,6 +301,40 @@ fn a_solid_avatar_outside_stays_outside() {
     );
 }
 
+/// A solid avatar standing by a cap and rolling toward it leans its head against the glass
+/// and no further: the whole hull, head included, collides, so the view never leaves the ring.
+#[test]
+fn a_solid_avatar_cannot_lean_its_head_through_the_glass() {
+    let mut touched = false;
+    for (thruster, side) in [(Thruster::RollLeft, -1.0), (Thruster::RollRight, 1.0)] {
+        let mut app = testing::headless();
+        let half_width = state(&app).drum.ring.half_width.0 as f64;
+        {
+            let mut sim = state_mut(&mut app);
+            let body = sim.avatar();
+            let (mut p, q) = (body.p, body.q);
+            p[1] = side * (half_width - avatar::RADIUS - 0.2);
+            sim.avatar_mut().place(p, q);
+            sim.gyros = Gyros::holding(sim.avatar());
+        }
+        testing::run(&mut app, Seconds(0.5));
+        let mut least = f64::INFINITY;
+        for _ in 0..30 {
+            hold(&mut app, PilotInput::firing(&[thruster]), 0.1);
+            let sim = state(&app);
+            let eye = avatar::eye(sim.avatar());
+            let clearance = half_width - side * sim.drum.axial(eye);
+            assert!(
+                sim.drum.encloses(eye) && clearance > 0.2,
+                "rolling {thruster:?} put the eye {clearance} m inside the cap at {eye:?}"
+            );
+            least = least.min(clearance);
+        }
+        touched |= least < 0.4;
+    }
+    assert!(touched, "neither roll brought the head to the glass");
+}
+
 #[test]
 fn a_thruster_sounds_from_a_quarter_to_full_as_its_level_rises() {
     let full = audio::gain(1.0);

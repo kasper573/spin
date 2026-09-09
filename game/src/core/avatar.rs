@@ -38,6 +38,9 @@ const DISPLACEMENT: f64 = 0.1;
 const BOUNDARY_SAMPLES: usize = 300;
 /// Where the eye sits above the ground when standing.
 pub const EYE_HEIGHT: Metres = Metres(1.7);
+/// The head about the eye, which collides like the rest of the hull so that the view never
+/// leans through a wall.
+const HEAD_RADIUS: f64 = 0.25;
 /// Ground speed the legs settle on when thrust along the ground.
 pub const WALK_SPEED: MetresPerSecond = MetresPerSecond(1.5);
 /// Time scale on which the legs bring the body to the speed it wants.
@@ -251,7 +254,8 @@ impl Gyros {
 
 pub fn shape() -> BodyShape {
     let mut shape = BodyShape::weighted_sphere(RADIUS, MASS, BALLAST, BOUNDARY_SAMPLES)
-        .displacing(DISPLACEMENT);
+        .displacing(DISPLACEMENT)
+        .with_sphere(eye_offset(), HEAD_RADIUS);
     shape.friction = 0.0;
     shape.restitution = 0.0;
     shape

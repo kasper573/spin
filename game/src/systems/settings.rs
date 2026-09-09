@@ -267,7 +267,7 @@ impl Toggle {
     pub fn label(self) -> &'static str {
         match self {
             Toggle::Air => "air drag",
-            Toggle::Collisions => "collisions",
+            Toggle::Collisions => "player collisions",
         }
     }
 

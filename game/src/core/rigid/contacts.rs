@@ -1,6 +1,6 @@
 //! Sequential impulses with Coulomb friction against the vessel walls, which stand still in
 //! the vessel's frame.
-use super::{Body, BodyShape, Ground, Hull};
+use super::{Body, BodyShape, Ground};
 use crate::core::math::{Vec3d, add_scaled, cross, dot, mat3mul, norm};
 use crate::core::units::Newtons;
 use crate::core::vessel::Vessel;
@@ -21,17 +21,18 @@ pub fn collide_vessel(body: &mut Body, shape: &BodyShape, vessel: &impl Vessel, 
             });
         }
     };
-    let Hull { radius, centre } = shape.hull;
     for _pass in 0..2 {
-        let c = body.to_world(&centre);
-        for pen in vessel.sphere_penetrations(c, radius).iter() {
-            let at = [
-                c[0] - pen.normal[0] * radius,
-                c[1] - pen.normal[1] * radius,
-                c[2] - pen.normal[2] * radius,
-            ];
-            let j = resolve_wall_contact(body, &at, &pen, restitution, friction);
-            stand(&mut ground, at, pen.normal, j);
+        for sphere in &shape.hull.spheres {
+            let (c, radius) = (body.to_world(&sphere.centre), sphere.radius);
+            for pen in vessel.sphere_penetrations(c, radius).iter() {
+                let at = [
+                    c[0] - pen.normal[0] * radius,
+                    c[1] - pen.normal[1] * radius,
+                    c[2] - pen.normal[2] * radius,
+                ];
+                let j = resolve_wall_contact(body, &at, &pen, restitution, friction);
+                stand(&mut ground, at, pen.normal, j);
+            }
         }
     }
     body.ground = ground.map(|g| Ground {
