@@ -28,23 +28,14 @@ const FAR: f32 = 1e15;
 /// finely to draw it.
 const NEAREST: f64 = 1.0;
 
-/// What the scene is drawn about: the avatar's centre in the drum's frame, how far the viewer
-/// was from the wall when the site was last moved, and where the site is in the patterns
-/// fixed to the wheel, which the site's moves are added up in exactly so that they never
-/// jump.
+/// What the scene is drawn about: the avatar's centre in the drum's frame, and how far the
+/// viewer was from the wall when the site was last moved.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct Viewpoint {
     /// The avatar's centre; the renderer's origin.
     pub origin: Vec3d,
     /// How far the viewer was from the wall when the site last moved.
     pub standoff: f64,
-    /// How far spinward round the ring the site has moved since the ring was set, within one
-    /// turn of it.
-    pub arc: f64,
-    /// The site's place along the axis.
-    pub axial: f64,
-    /// How far the site has turned round the ring since the ring was set, within one turn.
-    pub turn: f64,
 }
 
 impl Default for Viewpoint {
@@ -52,9 +43,6 @@ impl Default for Viewpoint {
         Viewpoint {
             origin: [0.0; 3],
             standoff: avatar::EYE_HEIGHT.0 as f64,
-            arc: 0.0,
-            axial: 0.0,
-            turn: 0.0,
         }
     }
 }
@@ -132,12 +120,7 @@ pub fn locate(mut sim: ResMut<Simulation>, mut viewpoint: ResMut<Viewpoint>) {
     let closer = standoff < viewpoint.standoff / 2.0;
     let farther = standoff > viewpoint.standoff * 4.0;
     if moved || closer || farther {
-        let shift = sim.resite(p);
-        let circumference = std::f64::consts::TAU * ring.radius.0 as f64;
-        viewpoint.arc = (viewpoint.arc + shift.arc).rem_euclid(circumference);
-        viewpoint.turn =
-            (viewpoint.turn + shift.arc / ring.radius.0 as f64).rem_euclid(std::f64::consts::TAU);
-        viewpoint.axial = sim.drum.site.y;
+        sim.resite(p);
         viewpoint.standoff = standoff;
     }
     viewpoint.origin = sim.avatar().p;

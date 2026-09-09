@@ -149,6 +149,14 @@ impl Simulation {
 
     /// Make the ring another size. The water and the landscape stretch to fit on their own;
     /// whatever body the new walls would cut through is pulled inside them.
+    /// Raise (or, by a negative amount, lower) the ground within `radius` of a point of the
+    /// frame.
+    pub fn sculpt(&mut self, at: Vec3d, radius: f64, amount: f64) {
+        let phi = self.drum.wheel_angle_of(at);
+        let y = self.drum.axial(at);
+        self.drum.landscape.sculpt(phi, y, radius, amount);
+    }
+
     /// Change the ring's size about every body, which stays where it was about the axis: the
     /// wall moves, not the bodies, except that solid ones are kept inside it.
     pub fn resize(&mut self, ring: Ring) {

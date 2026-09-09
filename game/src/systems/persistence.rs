@@ -113,10 +113,11 @@ pub fn apply(
     sim.drum.target_spin = settings.spin;
     sim.drum.angle = Radians(finite_f64(snapshot.angle.0));
     let half_width = sim.drum.ring.half_width.0 as f64;
-    sim.drum.site = Site {
-        phi: finite_f64(snapshot.site.phi).rem_euclid(std::f64::consts::TAU),
-        y: finite_f64(snapshot.site.y).clamp(-half_width, half_width),
-    };
+    sim.drum.site = Site::at(
+        finite_f64(snapshot.site.phi),
+        finite_f64(snapshot.site.y).clamp(-half_width, half_width),
+        sim.drum.ring,
+    );
     sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
     let margin = fluid.resolution().margin().0 as f64;

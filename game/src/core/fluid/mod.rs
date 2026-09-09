@@ -68,7 +68,37 @@ const ITERATIONS: usize = 3;
 const SCORR_K: f32 = 0.001;
 const WET_REF: f32 = 300.0;
 /// The random nudge new water gets, in the canonical water's units.
-const JITTER: f64 = 0.3 / 0.32;
+/// How far off its lattice site, in spacings, water is put down, so that no two rows of it are
+/// ever exactly in line.
+const JITTER: f64 = 0.05;
+/// How many sites a placement offers per particle, and at least, so that water placed onto
+/// water finds free room round it.
+const SITES_PER_PARTICLE: usize = 64;
+const LEAST_SITES: usize = 512;
+
+/// The offsets of the lattice sites in a ball about a site, nearest first: what every
+/// placement of water is offered, so that water placed onto water finds free room around it.
+fn lattice_ball() -> &'static [[i32; 3]] {
+    static BALL: std::sync::OnceLock<Vec<[i32; 3]>> = std::sync::OnceLock::new();
+    BALL.get_or_init(|| {
+        let reach = (3.0 * gpu::SITES as f64 / (4.0 * std::f64::consts::PI))
+            .cbrt()
+            .ceil() as i32
+            + 1;
+        let mut ball = Vec::new();
+        for i in -reach..=reach {
+            for j in -reach..=reach {
+                for k in -reach..=reach {
+                    ball.push([i, j, k]);
+                }
+            }
+        }
+        let d2 = |o: &[i32; 3]| o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
+        ball.sort_by_key(d2);
+        ball.truncate(gpu::SITES);
+        ball
+    })
+}
 /// Resolutions remembered by the frame they took effect, for reading back what an older frame
 /// left on the GPU.
 const GENERATIONS_KEPT: usize = 64;
@@ -130,6 +160,9 @@ pub struct Fluid {
     /// The particle count before a thinning this frame and their resolution, if one is due.
     thin: Option<(u32, Resolution)>,
     pending: Vec<Particle>,
+    /// Water placed this frame: how many particles, and the lattice sites offered to them.
+    joining: u32,
+    sites: Vec<[f32; 4]>,
     changed: bool,
     shapes: Vec<frame::ShapePoints>,
     layout: Vec<frame::ShapeSamples>,
@@ -183,6 +216,8 @@ impl Default for Fluid {
             count: 0,
             thin: None,
             pending: Vec::new(),
+            joining: 0,
+            sites: Vec::new(),
             changed: true,
             shapes: Vec::new(),
             layout: Vec::new(),
@@ -251,6 +286,69 @@ impl Fluid {
     /// Add a particle of the current resolution. When the budget is full the water is made
     /// coarser first, which frees half of it; only a second fill within one frame is refused.
     pub fn add(&mut self, p: Particle) -> bool {
+        if !self.reserve() {
+            return false;
+        }
+        self.pending.push(p);
+        true
+    }
+
+    /// Put down up to `count` particles of water about a point of the vessel's frame, at rest
+    /// in it: each takes a site of the water's rest lattice, the free sites nearest the point
+    /// first, so that water is added as gently as can be and water placed onto water spreads
+    /// round it rather than into it. Once a frame has offered all the sites it can, the rest
+    /// take the nearest sites free or not. `place` gets the final say on every site. Returns
+    /// how many were added.
+    pub fn inject(
+        &mut self,
+        centre: Vec3d,
+        count: u32,
+        mut place: impl FnMut(Vec3d) -> Vec3d,
+    ) -> u32 {
+        let length = self.resolution.length();
+        let base = centre.map(|x| (x / length).floor());
+        let mut site = |offset: &[i32; 3], rng: &mut Rng| {
+            let mut nudge = |x: f64| x + 0.5 + (rng.next_f32() as f64 - 0.5) * JITTER;
+            place([
+                nudge(base[0] + offset[0] as f64) * length,
+                nudge(base[1] + offset[1] as f64) * length,
+                nudge(base[2] + offset[2] as f64) * length,
+            ])
+        };
+        let room = gpu::SITES - self.sites.len();
+        let offered = (count as usize * SITES_PER_PARTICLE)
+            .max(LEAST_SITES)
+            .min(room);
+        let mut added = 0;
+        if offered >= count as usize {
+            while added < count && self.reserve() {
+                added += 1;
+            }
+            self.joining += added;
+            let length = self.resolution.length();
+            for offset in lattice_ball().iter().take(offered) {
+                let p = site(offset, &mut self.rng).map(|x| (x / length) as f32);
+                self.sites.push([p[0], p[1], p[2], 0.0]);
+            }
+        } else {
+            for offset in lattice_ball().iter().take(count as usize) {
+                let position = site(offset, &mut self.rng);
+                let particle = Particle {
+                    position,
+                    velocity: [0.0; 3],
+                    foam: 0.0,
+                };
+                if !self.add(particle) {
+                    break;
+                }
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Make room in the count for one more particle, coarsening the water if it is full.
+    fn reserve(&mut self) -> bool {
         if self.count as usize >= MAX_PARTICLES {
             if self.thin.is_some() {
                 return false;
@@ -258,43 +356,8 @@ impl Fluid {
             self.coarsen();
         }
         self.count += 1;
-        self.pending.push(p);
         self.changed = true;
         true
-    }
-
-    /// Add up to `count` particles in a small cloud around a point of the vessel's frame, at
-    /// rest in it but for a little random nudge. `place` gets the final say on every position.
-    pub fn inject(
-        &mut self,
-        centre: Vec3d,
-        count: u32,
-        mut place: impl FnMut(Vec3d) -> Vec3d,
-    ) -> u32 {
-        let spread = 2.5 * self.resolution.length();
-        let jitter = JITTER * self.resolution.length() / self.resolution.time();
-        let mut added = 0;
-        for _ in 0..count {
-            let position = place([
-                centre[0] + (self.rng.next_f32() as f64 - 0.5) * spread,
-                centre[1] + (self.rng.next_f32() as f64 - 0.5) * spread,
-                centre[2] + (self.rng.next_f32() as f64 - 0.5) * spread,
-            ]);
-            let particle = Particle {
-                position,
-                velocity: [
-                    (self.rng.next_f32() as f64 - 0.5) * jitter,
-                    (self.rng.next_f32() as f64 - 0.5) * jitter,
-                    (self.rng.next_f32() as f64 - 0.5) * jitter,
-                ],
-                foam: 0.1,
-            };
-            if !self.add(particle) {
-                break;
-            }
-            added += 1;
-        }
-        added
     }
 
     /// Remove all water; what comes next starts out as fine as the vessel allows.
@@ -308,6 +371,8 @@ impl Fluid {
         self.count = 0;
         self.thin = None;
         self.pending.clear();
+        self.joining = 0;
+        self.sites.clear();
         self.set_resolution(resolution.at_least(self.floor));
     }
 
@@ -346,7 +411,10 @@ impl Fluid {
         substeps: &[(Seconds, Bodies)],
         frame: &WaterFrame,
     ) -> FluidFrame {
-        let count_before = self.count - self.pending.len() as u32;
+        let count_before = self.count - self.pending.len() as u32 - self.joining;
+        let joined = count_before + self.pending.len() as u32;
+        let joining = std::mem::take(&mut self.joining);
+        let sites = std::mem::take(&mut self.sites);
         let res = self.resolution;
         let (length, time) = (res.length(), res.time());
         let pending = self
@@ -397,8 +465,12 @@ impl Fluid {
             },
             inject: Params::new(Seconds(0.0), params, res, count_before, &still)
                 .with_pending(pending.len() as u32 / 2),
+            join: Params::new(Seconds(0.0), params, res, joined, &still)
+                .with_pending(joining)
+                .with_candidates(sites.len() as u32),
             surface: Params::new(Seconds(0.0), params, res, self.count, &still),
             pending,
+            sites,
             samples: self.samples.take(),
             changed: self.changed || stepping,
             coupling,
@@ -487,11 +559,18 @@ impl Fluid {
     /// Every particle stands for twice the water from now on: the GPU keeps every other one of
     /// those it has, and whatever is waiting to join them joins the rest.
     fn coarsen(&mut self) {
-        let waiting = self.pending.len() as u32;
+        let waiting = self.pending.len() as u32 + self.joining;
         let on_gpu = self.count - waiting;
         self.thin = Some((on_gpu, self.resolution));
         self.count = on_gpu.div_ceil(2) + waiting;
+        let before = self.resolution.length();
         self.set_resolution(self.resolution.coarser());
+        let scale = (before / self.resolution.length()) as f32;
+        for site in &mut self.sites {
+            for x in &mut site[..3] {
+                *x *= scale;
+            }
+        }
     }
 
     fn set_resolution(&mut self, resolution: Resolution) {

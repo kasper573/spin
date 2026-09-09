@@ -36,10 +36,15 @@ pub struct FluidFrame {
     pub substeps: Vec<Substep>,
     /// Parameters for appending `pending`: the count before the append and how many join.
     pub inject: Params,
+    /// Parameters for settling water onto `sites`: the count once `pending` has joined, how
+    /// many settle and how many sites there are.
+    pub join: Params,
     /// Parameters for re-sorting the final positions before the surface is extracted.
     pub surface: Params,
     /// Two entries per joining particle: position with foam, velocity.
     pub pending: Vec<[f32; 4]>,
+    /// Lattice sites, nearest the point of placement first, for the settling water to take.
+    pub sites: Vec<[f32; 4]>,
     /// The bodies' boundary samples in their local frames (xyz, Ψ), when they changed.
     pub samples: Option<Vec<[f32; 4]>>,
     /// Whether anything moved, so the surface needs rebuilding.
@@ -84,7 +89,8 @@ pub struct Params {
     pub cells: u32,
     /// The first accumulator of this frame's slots.
     pub accumulators: u32,
-    pub pad: u32,
+    /// Lattice sites on offer to the particles joining, free ones first.
+    pub candidates: u32,
     /// What thinning scales the kept particles' positions and velocities by.
     pub thin_scale: f32,
     pub thin_scale_v: f32,
@@ -125,7 +131,7 @@ impl Params {
             inv_cell: 1.0 / canonical::H,
             cells: TABLE_CELLS as u32,
             accumulators: 0,
-            pad: 0,
+            candidates: 0,
             thin_scale: 1.0,
             thin_scale_v: 1.0,
         }
@@ -133,6 +139,11 @@ impl Params {
 
     pub fn with_pending(mut self, pending: u32) -> Self {
         self.pending = pending;
+        self
+    }
+
+    pub fn with_candidates(mut self, candidates: u32) -> Self {
+        self.candidates = candidates;
         self
     }
 

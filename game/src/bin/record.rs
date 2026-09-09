@@ -3,7 +3,8 @@
 //! wading through water and out of it, and the ring made bigger with the thrusters equalized to
 //! it, rendered headless frame by frame into `target/record/` as PNGs beside the thrusters'
 //! voices as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
-//! The body turns to look, so looking round is a matter of the turning thrusters.
+//! The body turns to look, so looking round is a matter of the turning thrusters. Run with
+//! `marker` as its argument, it records the crosshair's marker wrapping the ground instead.
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -13,6 +14,8 @@ use game::core::audio::{self, Fader, Placement, Voice};
 use game::core::avatar::{TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::units::Seconds;
+use game::systems::aim::Aim;
+use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
@@ -32,6 +35,8 @@ enum Cue {
     Enlarge,
     /// Equalize the thruster power to the standing gravity.
     Equalize,
+    /// Raise a few hills on the ground ahead.
+    Hills,
 }
 
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
@@ -40,6 +45,8 @@ struct Phase {
     pilot: PilotInput,
     caption: &'static str,
     cue: Cue,
+    /// Whether the sculpting brush is held on the crosshair throughout.
+    sculpting: bool,
 }
 
 /// The time the turning thrusters at `level` take to turn the body by `radians`.
@@ -55,6 +62,7 @@ fn script() -> Vec<Phase> {
         pilot: PilotInput::firing(held),
         caption,
         cue: Cue::None,
+        sculpting: false,
     };
     let eased = |seconds, held: &[Thruster], level: f32, caption| {
         let mut pilot = PilotInput::default();
@@ -160,6 +168,105 @@ fn script() -> Vec<Phase> {
     phases
 }
 
+/// The crosshair's marker: looking down at flat ground, panning across it, raising a ridge
+/// with the brush while its outline wraps what it raises, and panning over hills and hollows
+/// with the brush and with the marker at rest.
+fn marker_script() -> Vec<Phase> {
+    use Thruster::*;
+    let eased = |seconds, held: &[Thruster], level: f32, sculpting, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            seconds,
+            pilot,
+            caption,
+            cue: Cue::None,
+            sculpting,
+        }
+    };
+    let (pan, sweep) = (0.3, 0.55);
+    vec![
+        eased(
+            turn_time(0.55, 0.5),
+            &[PitchDown],
+            0.5,
+            false,
+            "the crosshair's marker: looking down at flat ground",
+        ),
+        eased(1.0, &[], 0.0, false, "the marker lies flat on flat ground"),
+        eased(
+            turn_time(0.9, pan),
+            &[YawLeft],
+            pan,
+            false,
+            "panning across flat ground: the marker lies on it",
+        ),
+        eased(
+            turn_time(1.8, sweep),
+            &[YawRight],
+            sweep,
+            true,
+            "middle mouse held: the brush raises a ridge, and its outline wraps what it raises",
+        ),
+        eased(
+            turn_time(1.8, pan),
+            &[YawLeft],
+            pan,
+            false,
+            "the marker at rest follows the ridge exactly, up its sides and over its top",
+        ),
+        eased(
+            turn_time(1.8, pan),
+            &[YawRight],
+            pan,
+            true,
+            "the brush outline wraps the ridge just the same",
+        ),
+        Phase {
+            cue: Cue::Hills,
+            ..eased(0.5, &[], 0.0, false, "hills of three heights raised ahead")
+        },
+        eased(
+            turn_time(0.25, 0.5),
+            &[PitchUp],
+            0.5,
+            false,
+            "looking a little further ahead",
+        ),
+        eased(
+            turn_time(1.8, pan),
+            &[YawLeft],
+            pan,
+            false,
+            "the marker over hills and hollows, wrapped like a sheet laid on them",
+        ),
+        eased(
+            turn_time(1.8, pan),
+            &[YawRight],
+            pan,
+            true,
+            "the brush outline over the hills",
+        ),
+        eased(
+            3.0,
+            &[Forward],
+            1.0,
+            false,
+            "walking onto the raised ground (W)",
+        ),
+        eased(
+            turn_time(1.2, pan),
+            &[YawLeft],
+            pan,
+            false,
+            "the marker from close up",
+        ),
+        eased(1.5, &[], 0.0, true, "the brush outline from close up"),
+    ]
+}
+
 fn cue(app: &mut App, cue: Cue) {
     match cue {
         Cue::None => {}
@@ -187,6 +294,21 @@ fn cue(app: &mut App, cue: Cue) {
             Dial::Width.set(&mut settings, 16.0);
         }
         Cue::Equalize => app.world_mut().resource_mut::<Settings>().equalize_thrust(),
+        Cue::Hills => {
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            let site = sim.drum.site;
+            for (k, (arc, y, height)) in [(-6.0, 1.0, 0.6), (-9.0, -1.5, 1.2), (-12.0, 2.5, 2.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let phi = site.phi + arc / sim.drum.ring.radius.0 as f64;
+                for _ in 0..20 {
+                    sim.drum
+                        .landscape
+                        .sculpt(phi, site.y + y, 1.5 + k as f64 * 0.5, height / 20.0);
+                }
+            }
+        }
     }
 }
 
@@ -201,15 +323,31 @@ fn main() {
     let frame_time = Seconds(1.0 / FPS as f32);
     let mut srt = String::new();
     let mut soundtrack = Soundtrack::new(out.join("thrusters.wav"));
+    let script = match std::env::args().nth(1).as_deref() {
+        None => script(),
+        Some("marker") => {
+            app.world_mut().resource_mut::<Aim>().engaged = true;
+            marker_script()
+        }
+        Some(other) => panic!("unknown script {other:?}: the only one is `marker`"),
+    };
     let mut frame = 0u32;
-    for phase in script() {
+    for phase in script {
         cue(&mut app, phase.cue);
         let frames = (phase.seconds * FPS as f32).round() as u32;
         for _ in 0..frames {
             {
                 let player = *app.world().resource::<Player>();
+                let target = app.world().resource::<Aim>().target;
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 sim.avatar_input = player.input(phase.pilot);
+                if phase.sculpting
+                    && let Some(target) = target
+                {
+                    let amount = BRUSH_RATE.0 * frame_time.0;
+                    sim.sculpt(target.point.to_array(), BRUSH_SIZE.0 as f64, amount as f64);
+                }
+                app.world_mut().resource_mut::<Aim>().brush = phase.sculpting.then_some(BRUSH_SIZE);
             }
             testing::run(&mut app, frame_time);
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());

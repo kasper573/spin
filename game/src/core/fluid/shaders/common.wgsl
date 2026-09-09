@@ -39,7 +39,8 @@ struct Params {
     cells: u32,
     // the first accumulator of this frame's slots
     accumulators: u32,
-    pad: u32,
+    // lattice sites on offer to the particles joining
+    candidates: u32,
     // what thinning scales the kept particles' positions and velocities by
     thin_scale: f32,
     thin_scale_v: f32,

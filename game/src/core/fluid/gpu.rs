@@ -27,6 +27,9 @@ use crate::core::vessel::{VesselBinding, VesselLayout};
 
 /// Threads per workgroup of the particle kernels, and of the scan's.
 const WORKGROUP: u32 = 64;
+/// The most lattice sites one placement of water may offer, and the threads that weigh them.
+pub const SITES: usize = 4096;
+const JOIN_THREADS: u32 = 256;
 const SCAN_THREADS: usize = 256;
 const ACCUMULATORS: usize = STAMP_SLOT + 4;
 
@@ -47,6 +50,8 @@ pub struct FluidBuffers {
     pub key: Handle<ShaderBuffer>,
     /// The scan's per-run totals.
     pub run_total: Handle<ShaderBuffer>,
+    /// Lattice sites on offer to water being placed.
+    pub sites: Handle<ShaderBuffer>,
     pub samples: Handle<ShaderBuffer>,
     pub boundary: Handle<ShaderBuffer>,
     pub sample_state: Handle<ShaderBuffer>,
@@ -76,6 +81,7 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
         pending: make(vec4s(2 * MAX_PARTICLES)),
         key: make(MAX_PARTICLES * 4),
         run_total: make(TABLE_CELLS.div_ceil(SCAN_THREADS) * 4),
+        sites: make(vec4s(SITES)),
         samples: make(vec4s(MAX_SAMPLES)),
         boundary: make(vec4s(2 * MAX_SAMPLES)),
         sample_state: make(vec4s(2 * MAX_SAMPLES)),
@@ -102,6 +108,7 @@ enum Kernel {
     Thin,
     Predict,
     Inject,
+    Join,
     Lambda,
     Delta,
     UpdateVelocities,
@@ -139,11 +146,11 @@ struct Spec {
 }
 
 const NONE: &[(usize, u32)] = &[];
-const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (2, 2), (2, 3)];
+const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (0, 14), (2, 2), (2, 3)];
 const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12), (2, 1)];
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 21] = [
+const SPECS: [Spec; 22] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -231,6 +238,17 @@ const SPECS: [Spec; 21] = [
         surface: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Join,
+        shader: PARTICLES,
+        entry: "join",
+        particles: &[0, 1, 2, 3, 9, 12, 14],
+        vessel: true,
+        bodies: &[],
+        surface: &[],
+        read_only: PARTICLE_READS,
+        workgroup: JOIN_THREADS,
     },
     Spec {
         kernel: Kernel::Lambda,
@@ -411,6 +429,7 @@ struct BindGroups {
     empty: BindGroup,
     thin_offset: Option<u32>,
     inject_offset: u32,
+    join_offset: u32,
     surface_offset: u32,
     params_offsets: Vec<u32>,
     bodies_offsets: Vec<u32>,
@@ -544,6 +563,7 @@ fn prepare(
             &buffers.pending,
             &buffers.key,
             &buffers.run_total,
+            &buffers.sites,
         ]),
         all(&[
             &buffers.samples,
@@ -561,6 +581,9 @@ fn prepare(
     if !frame.pending.is_empty() {
         queue.write_buffer(&particles[10], 0, bytemuck::cast_slice(&frame.pending));
     }
+    if !frame.sites.is_empty() {
+        queue.write_buffer(&particles[13], 0, bytemuck::cast_slice(&frame.sites));
+    }
     queue.write_buffer(
         &bodies[3],
         (STAMP_SLOT * 4) as u64,
@@ -571,6 +594,7 @@ fn prepare(
     uniforms.bodies.clear();
     let thin_offset = frame.thin.as_ref().map(|thin| uniforms.params.push(thin));
     let inject_offset = uniforms.params.push(&frame.inject);
+    let join_offset = uniforms.params.push(&frame.join);
     let surface_offset = uniforms.params.push(&frame.surface);
     let params_offsets: Vec<u32> = frame
         .substeps
@@ -646,6 +670,7 @@ fn prepare(
         empty,
         thin_offset,
         inject_offset,
+        join_offset,
         surface_offset,
         params_offsets,
         bodies_offsets,
@@ -792,6 +817,12 @@ fn dispatch(
             vessel_now,
             joining,
         );
+    }
+    if frame.join.pending > 0 {
+        let jo = groups.join_offset;
+        bin(encoder, jo, vessel_now, frame.join.count);
+        let weighers = Threads::Count(JOIN_THREADS);
+        d.run(encoder, Kernel::Join, 0, jo, 0, vessel_now, weighers);
     }
     if frame.coupling {
         let first = accumulators_of(frame.ticket) as u64 * 4;

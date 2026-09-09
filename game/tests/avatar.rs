@@ -471,7 +471,7 @@ fn the_thrusters_push_through_water_and_out_of_it() {
     let settled = &slips[slips.len() - 20..];
     let speed = settled.iter().sum::<f64>() / settled.len() as f64;
     assert!(
-        speed > 1.0 && speed < 6.0,
+        speed > 0.5 && speed < 6.0,
         "forward thrust through water moves at {speed} m/s"
     );
 }

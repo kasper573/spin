@@ -25,6 +25,7 @@
 @group(0) @binding(10) var<storage, read_write> slot: array<vec4<u32>>;
 @group(0) @binding(11) var<storage, read> pending: array<vec4<f32>>;
 @group(0) @binding(12) var<storage, read_write> key: array<u32>;
+@group(0) @binding(14) var<storage, read> sites: array<vec4<f32>>;
 
 @group(2) @binding(0) var<uniform> bodies: Bodies;
 @group(2) @binding(2) var<storage, read> boundary: array<Boundary>;
@@ -127,6 +128,59 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
     let dest = params.count + i;
     position[dest] = pending[2u * i];
     velocity[dest] = pending[2u * i + 1u];
+}
+
+// how many lattice sites one placement may offer, and how near an existing particle makes a
+// site taken
+const SITES: u32 = 4096u;
+const TAKEN: f32 = 0.85;
+var<workgroup> site_free: array<u32, SITES>;
+
+/// Whether no particle of the sorted water is on a site.
+fn site_is_free(q: vec3<f32>) -> bool {
+    let c = coords_of(q);
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            if (key[j] != k) {
+                continue;
+            }
+            let r = q - position_sorted[j].xyz;
+            if (dot(r, r) < TAKEN * TAKEN) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Settle the water joining at rest onto the free sites nearest where it was placed, and only
+/// once those run out onto taken ones: the water is put down as gently as it can be, at its
+/// rest spacing, pushing nothing aside that it need not.
+@compute @workgroup_size(256)
+fn join(@builtin(local_invocation_id) local: vec3<u32>) {
+    let offered = min(params.candidates, SITES);
+    for (var i = local.x; i < offered; i += 256u) {
+        site_free[i] = u32(site_is_free(sites[i].xyz));
+    }
+    workgroupBarrier();
+    if (local.x != 0u) {
+        return;
+    }
+    var placed = 0u;
+    for (var round = 0u; round < 2u; round++) {
+        let wanted = 1u - round;
+        for (var i = 0u; i < offered && placed < params.pending; i++) {
+            if (site_free[i] == wanted) {
+                position[params.count + placed] = vec4(sites[i].xyz, 0.0);
+                velocity[params.count + placed] = vec4(0.0);
+                placed++;
+            }
+        }
+    }
 }
 
 fn poly(r2: f32) -> f32 {

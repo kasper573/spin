@@ -18,7 +18,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 
 use super::landscape::ROWS;
-use super::{Drum, DrumFrame, DrumUniform, Ring, Site};
+use super::{Drum, DrumFrame, DrumUniform, PANE, Ring, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::systems::scene::{SUN_DIRECTION, Sky, Viewpoint};
@@ -27,11 +27,7 @@ use crate::systems::sim::{SimSet, Simulation};
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f64 = 0.02;
 const STRUTS: usize = 24;
-/// The ground is tiled in squares about this size, alternately tinted.
-const TILE: f64 = 2.0;
-/// The glass is made of square panes about this size, gridded together round the ring, with
-/// seams this wide between them.
-const PANE: f64 = 1.0;
+/// The seams between the glass panes are this wide.
 const SEAM: f32 = 0.03;
 /// A chord's sagitta over its distance from the viewer, as a fraction: a tenth of a pixel or so.
 const CHORD: f64 = 0.03;
@@ -142,25 +138,6 @@ struct Structure;
 #[derive(Component)]
 struct Terrain;
 
-/// Where the site is in the patterns fixed to the wheel: its arc round the ring, its place
-/// along the axis and its turn, as the viewpoint keeps them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Phase {
-    arc: f64,
-    axial: f64,
-    turn: f64,
-}
-
-impl Phase {
-    fn of(viewpoint: &Viewpoint) -> Phase {
-        Phase {
-            arc: viewpoint.arc,
-            axial: viewpoint.axial,
-            turn: viewpoint.turn,
-        }
-    }
-}
-
 /// What the wheel's meshes were last built for.
 #[derive(Resource, Default)]
 struct Built {
@@ -226,7 +203,7 @@ fn rebuild(
 ) {
     let drum = &sim.drum;
     let (ring, site, standoff) = (drum.ring, drum.site, viewpoint.standoff);
-    let phase = Phase::of(&viewpoint);
+    let phase = site;
     if built.structure != Some((ring, site, standoff)) {
         built.structure = Some((ring, site, standoff));
         for entity in &structures {
@@ -370,7 +347,7 @@ fn cells(along: f64, phase: f64, size: f64) -> f32 {
 
 /// The glass: its wall over the columns and spans, and a cap at each end over the columns and
 /// the depths in from the wall.
-fn glass_mesh(drum: &Drum, phase: Phase, columns: &[f64], spans: &[f64], depths: &[f64]) -> Mesh {
+fn glass_mesh(drum: &Drum, phase: Site, columns: &[f64], spans: &[f64], depths: &[f64]) -> Mesh {
     let ring = drum.ring;
     let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
     let pane = pane_round(ring);
@@ -386,12 +363,12 @@ fn glass_mesh(drum: &Drum, phase: Phase, columns: &[f64], spans: &[f64], depths:
             normals.push(single(outward));
             uvs.push([
                 cells(turn * radius, phase.arc, pane),
-                cells(y, phase.axial, PANE),
+                cells(y, phase.y, PANE),
             ]);
         }
     }
     grid_indices(&mut indices, columns.len(), spans.len(), 0, |_, _| true);
-    let (sin_turn, cos_turn) = phase.turn.sin_cos();
+    let (sin_turn, cos_turn) = phase.phi.sin_cos();
     for (side, y) in [(-1.0f32, -half_width), (1.0, half_width)] {
         let first = positions.len() as u32;
         let y = y - drum.site.y;
@@ -403,10 +380,11 @@ fn glass_mesh(drum: &Drum, phase: Phase, columns: &[f64], spans: &[f64], depths:
                 let z = at[2] - outward[2] * depth;
                 positions.push(single([x, y, z]));
                 normals.push([0.0, side, 0.0]);
-                // the cap's grid is fixed to the wheel: the site's turn in it, and its arc
+                // the cap's grid is fixed to the wheel: turned by the site's angle and offset
+                // by where the site is in it
                 uvs.push([
-                    cells(x * cos_turn - z * sin_turn, phase.arc, PANE),
-                    cells(x * sin_turn + z * cos_turn, 0.0, PANE),
+                    cells(x * cos_turn - z * sin_turn, phase.cap[0], PANE),
+                    cells(x * sin_turn + z * cos_turn, phase.cap[1], PANE),
                 ]);
             }
         }
@@ -538,7 +516,7 @@ fn rim_mesh(drum: &Drum, columns: &[f64], side: f64) -> Mesh {
 /// along both caps so raised ground reads as solid from the side. Bare glass gets no
 /// triangles, and nothing is placed on the glass itself, which would fight it for depth. The
 /// tiles round and along and the height above the glass ride along as attributes.
-fn terrain_mesh(drum: &Drum, phase: Phase, columns: &[f64], rows: &[f64]) -> Mesh {
+fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh {
     let landscape = &drum.landscape;
     let ring = drum.ring;
     let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
@@ -565,7 +543,7 @@ fn terrain_mesh(drum: &Drum, phase: Phase, columns: &[f64], rows: &[f64]) -> Mes
             ]));
             uvs.push([
                 cells(turn * radius, phase.arc, tile),
-                cells(y, phase.axial, TILE),
+                cells(y, phase.y, TILE),
             ]);
             heights.push([height as f32, 0.0]);
             raised.push(height > 0.0);

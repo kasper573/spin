@@ -10,7 +10,6 @@ use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotInput, Player};
-use crate::systems::scene::Viewpoint;
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -18,10 +17,9 @@ use crate::systems::sim::{SimSet, Simulation};
 const INJECT_DEPTH: Metres = Metres(1.0);
 /// Mouse speed (pixels per second) at which a turning thruster is asked for full.
 const MOUSE_FULL_SPEED: PixelsPerSecond = PixelsPerSecond(800.0);
-const MARKER_RADIUS: Metres = Metres(0.3);
 /// The sculpting brush: how wide it is and how fast it raises the ground.
-const BRUSH_SIZE: Metres = Metres(2.0);
-const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
+pub const BRUSH_SIZE: Metres = Metres(2.0);
+pub const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
 
 /// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,21 +83,18 @@ pub struct Controls {
     pub held_dial: Option<Dial>,
     /// Litres requested but not yet turned into whole particles.
     inject_carry: f32,
-    sculpting: bool,
 }
 
 pub struct ControlsPlugin;
 
 impl Plugin for ControlsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Controls>()
-            .add_systems(
-                Update,
-                (pointer_lock, pilot, keys, mouse)
-                    .chain()
-                    .in_set(SimSet::Command),
-            )
-            .add_systems(Update, marker.in_set(SimSet::Observe));
+        app.init_resource::<Controls>().add_systems(
+            Update,
+            (pointer_lock, pilot, keys, mouse)
+                .chain()
+                .in_set(SimSet::Command),
+        );
     }
 }
 
@@ -207,17 +202,18 @@ fn mouse(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    aim: Res<Aim>,
+    mut aim: ResMut<Aim>,
     settings: Res<Settings>,
     mut sim: ResMut<Simulation>,
     mut fluid: ResMut<Fluid>,
 ) {
-    controls.sculpting = false;
+    aim.engaged = controls.active;
+    aim.brush = None;
     if !controls.active {
         controls.inject_carry = 0.0;
         return;
     }
-    let Some(target) = aim.0 else {
+    let Some(target) = aim.target else {
         return;
     };
     let dt = time.delta_secs();
@@ -231,39 +227,9 @@ fn mouse(
         controls.inject_carry = 0.0;
     }
     if mouse.pressed(MouseButton::Middle) {
-        controls.sculpting = true;
+        aim.brush = Some(BRUSH_SIZE);
         let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
-        let phi = sim.drum.wheel_angle_of(target.point.to_array());
-        let y = sim.drum.axial(target.point.to_array());
-        sim.drum
-            .landscape
-            .sculpt(phi, y, BRUSH_SIZE.0 as f64, amount as f64);
+        sim.sculpt(target.point.to_array(), BRUSH_SIZE.0 as f64, amount as f64);
     }
-}
-
-fn marker(controls: Res<Controls>, aim: Res<Aim>, viewpoint: Res<Viewpoint>, mut gizmos: Gizmos) {
-    let Some(target) = aim.0 else {
-        return;
-    };
-    let radius = if controls.sculpting {
-        BRUSH_SIZE.0
-    } else {
-        MARKER_RADIUS.0
-    };
-    let normal = target.normal.as_vec3();
-    let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
-    let colour = if controls.active {
-        Color::srgba(1.0, 1.0, 1.0, 0.9)
-    } else {
-        Color::srgba(1.0, 1.0, 1.0, 0.35)
-    };
-    gizmos.circle(
-        Isometry3d::new(
-            viewpoint.local(target.point.to_array()) + normal * 0.01,
-            rotation,
-        ),
-        radius,
-        colour,
-    );
 }

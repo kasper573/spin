@@ -35,7 +35,7 @@ fn heights_are_clamped_on_load() {
 #[test]
 fn raised_ground_is_a_wall_where_it_is_raised_only() {
     let mut drum = Drum {
-        site: Site { phi: 0.7, y: 0.0 },
+        site: Site::at(0.7, 0.0, Drum::default().ring),
         ..Drum::default()
     };
     for _ in 0..20 {

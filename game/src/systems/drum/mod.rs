@@ -63,11 +63,44 @@ impl Ring {
     }
 }
 
-/// A point of the drum's wall: its wheel angle round the ring and its place along the axis.
+/// The patterns fixed to the wheel: the glass is gridded into panes this size and the ground
+/// tiled in squares this size, both fixed to the wheel and closing on themselves round it.
+pub const PANE: f64 = 1.0;
+pub const TILE: f64 = 2.0;
+
+/// A point of the drum's wall: its wheel angle round the ring and its place along the axis,
+/// and where it lies in the patterns fixed to the wheel, kept exactly as the site moves so
+/// that the patterns never shift however large the ring: its arc round the ring within one
+/// circumference, and the cap grid's offset from it along the frame's outward and spinward
+/// axes, within one pane.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Site {
     pub phi: f64,
     pub y: f64,
+    #[serde(skip)]
+    pub arc: f64,
+    #[serde(skip)]
+    pub cap: [f64; 2],
+}
+
+impl Site {
+    /// The site at a wheel angle and axial place, with its place in the patterns worked out
+    /// from the angle: exact enough to lay the patterns unless the ring is astronomically
+    /// large, when the patterns are laid afresh from here.
+    pub fn at(phi: f64, y: f64, ring: Ring) -> Site {
+        let radius = ring.radius.0 as f64;
+        let phi = phi.rem_euclid(std::f64::consts::TAU);
+        let (sin, cos) = phi.sin_cos();
+        Site {
+            phi,
+            y,
+            arc: (phi * radius).rem_euclid(std::f64::consts::TAU * radius),
+            cap: [
+                (radius * cos).rem_euclid(PANE),
+                (radius * sin).rem_euclid(PANE),
+            ],
+        }
+    }
 }
 
 /// How the site moved: the arc it went round the ring, spinward, and how far along the axis.
@@ -106,7 +139,7 @@ impl Drum {
             target_spin: RadiansPerSecond(0.0),
             spin_rate: RadiansPerSecondSquared(0.0),
             angle: Radians(0.0),
-            site: Site::default(),
+            site: Site::at(0.0, 0.0, ring),
             landscape: Landscape::flat(ring, GROUND_DEPTH),
         }
     }
@@ -116,7 +149,11 @@ impl Drum {
     pub fn resize(&mut self, ring: Ring) {
         self.ring = ring;
         let half_width = ring.half_width.0 as f64;
-        self.site.y = self.site.y.clamp(-half_width, half_width);
+        self.site = Site::at(
+            self.site.phi,
+            self.site.y.clamp(-half_width, half_width),
+            ring,
+        );
         self.landscape.resize(ring);
     }
 
@@ -143,8 +180,17 @@ impl Drum {
             arc: turn * radius,
             axial: y - self.site.y,
         };
-        self.site.phi = (self.site.phi + turn).rem_euclid(std::f64::consts::TAU);
-        self.site.y = y;
+        let site = &mut self.site;
+        // the site's chord moves the cap grid by the chord turned to the middle of the turn
+        let chord = 2.0 * radius * (turn / 2.0).sin();
+        let (sin_mid, cos_mid) = (site.phi + turn / 2.0).sin_cos();
+        site.cap = [
+            (site.cap[0] - chord * sin_mid).rem_euclid(PANE),
+            (site.cap[1] + chord * cos_mid).rem_euclid(PANE),
+        ];
+        site.arc = (site.arc + shift.arc).rem_euclid(std::f64::consts::TAU * radius);
+        site.phi = (site.phi + turn).rem_euclid(std::f64::consts::TAU);
+        site.y = y;
         shift
     }
 

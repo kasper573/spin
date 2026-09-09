@@ -24,6 +24,112 @@ fn set_spin(app: &mut App, spin: f32) {
     app.world_mut().resource_mut::<Simulation>().drum.spin = RadiansPerSecond(spin);
 }
 
+/// Where the water is: its centroid and the root mean square distance from it, in spacings,
+/// and its mean speed in metres per second.
+fn spread(app: &mut App) -> ([f64; 3], f64, f64) {
+    let particles = testing::particles(app);
+    let spacing = app.world().resource::<Fluid>().resolution().spacing.0 as f64;
+    let n = particles.len() as f64;
+    let mut centre = [0.0; 3];
+    for p in &particles {
+        for (c, x) in centre.iter_mut().zip(p.position) {
+            *c += x / n;
+        }
+    }
+    let rms = (particles
+        .iter()
+        .map(|p| {
+            (0..3)
+                .map(|a| (p.position[a] - centre[a]).powi(2))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / n)
+        .sqrt()
+        / spacing;
+    let speed = particles.iter().map(|p| norm(&p.velocity)).sum::<f64>() / n;
+    (centre, rms, speed)
+}
+
+fn still(app: &mut App) {
+    set_spin(app, 0.0);
+    app.world_mut()
+        .resource_mut::<Simulation>()
+        .drum
+        .target_spin = RadiansPerSecond(0.0);
+}
+
+/// Water put down in the air of a ring that is not spinning has nothing to fall toward: it
+/// stays where it was put, at rest, as a blob at its rest spacing.
+#[test]
+fn water_placed_in_the_air_of_a_still_ring_stays_where_it_is_put() {
+    let mut app = testing::headless();
+    still(&mut app);
+    testing::run(&mut app, Seconds(0.5));
+    let at = [5.0, 0.0, 0.0];
+    assert_eq!(inject(&mut app, at, 300), 300);
+    testing::run(&mut app, Seconds(3.0));
+    let (centre, rms, speed) = spread(&mut app);
+    let moved = norm(&[centre[0] - at[0], centre[1] - at[1], centre[2] - at[2]]);
+    assert!(
+        moved < 0.3 && rms < 5.0 && speed < 0.3,
+        "the water moved {moved} m, spread {rms} spacings and moves at {speed} m/s"
+    );
+}
+
+/// Water put down onto water takes the free room around it rather than bursting out of it.
+#[test]
+fn water_placed_onto_water_settles_around_it() {
+    let mut app = testing::headless();
+    still(&mut app);
+    testing::run(&mut app, Seconds(0.5));
+    let at = [5.0, 0.0, 0.0];
+    for _ in 0..10 {
+        assert_eq!(inject(&mut app, at, 40), 40);
+        testing::run(&mut app, Seconds(0.1));
+    }
+    testing::run(&mut app, Seconds(2.0));
+    let (centre, rms, speed) = spread(&mut app);
+    let moved = norm(&[centre[0] - at[0], centre[1] - at[1], centre[2] - at[2]]);
+    assert_eq!(app.world().resource::<Fluid>().len(), 400);
+    assert!(
+        moved < 0.3 && rms < 6.0 && speed < 0.3,
+        "the water moved {moved} m, spread {rms} spacings and moves at {speed} m/s"
+    );
+}
+
+/// Spinning the ring up under water hanging still in it brings the water down onto the
+/// floor: the ring's gravity is nothing but its spin.
+#[test]
+fn spinning_up_a_still_ring_brings_placed_water_down_to_the_floor() {
+    let mut app = testing::headless();
+    still(&mut app);
+    testing::run(&mut app, Seconds(0.5));
+    assert_eq!(inject(&mut app, [5.0, 0.0, 0.0], 300), 300);
+    testing::run(&mut app, Seconds(1.0));
+    {
+        let spin = game::systems::sim::standing_spin(DEFAULT_RING);
+        app.world_mut().resource_mut::<Settings>().spin = spin;
+        app.world_mut()
+            .resource_mut::<Simulation>()
+            .drum
+            .target_spin = spin;
+    }
+    testing::run(&mut app, Seconds(30.0));
+    let particles = testing::particles(&mut app);
+    let spacing = app.world().resource::<Fluid>().resolution().spacing.0 as f64;
+    let floor = DEFAULT_RING.floor_radius().0 as f64;
+    let down = particles
+        .iter()
+        .filter(|p| (p.position[0].powi(2) + p.position[2].powi(2)).sqrt() > floor - 2.5 * spacing)
+        .count();
+    assert!(
+        down * 10 >= particles.len() * 9,
+        "only {down} of {} particles came down to the floor",
+        particles.len()
+    );
+}
+
 #[test]
 fn injection_counts_litres() {
     let mut app = testing::headless();
