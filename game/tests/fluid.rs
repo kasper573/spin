@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use game::core::fluid::{Fluid, Particle, Resolution};
+use game::core::fluid::{Fluid, MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, Particle, Resolution};
 use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::systems::drum::DEFAULT_RING;
@@ -200,4 +200,51 @@ fn settled_water_holds_still_in_the_drums_frame() {
         typical < 0.005,
         "the surface moved {typical} m in the drum's frame between two steps"
     );
+}
+
+/// A ring a few hundred metres across with tens of thousands of cubic metres of water in it,
+/// which is more particles than the water keeps, so it has coarsened a few times.
+fn big_ring(width: f32) -> App {
+    let mut app = testing::headless();
+    testing::run(&mut app, Seconds(0.5));
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, 490.0);
+        Dial::Width.set(&mut settings, width);
+    }
+    set_spin(&mut app, 0.2);
+    testing::run(&mut app, Seconds(1.0));
+    let r = app.world().resource::<Simulation>().drum.ring.radius.0 - 2.0;
+    let mut left = 61_359_000.0f32;
+    for k in 0..400 {
+        let a = k as f32 * std::f32::consts::TAU / 200.0;
+        let per = app
+            .world()
+            .resource::<Fluid>()
+            .resolution()
+            .litres_per_particle()
+            .0;
+        let count = (left / (400 - k) as f32 / per).max(1.0) as u32;
+        left -= count as f32 * per;
+        let y = (k % 7) as f32 * width / 8.0 - width / 2.0;
+        inject(&mut app, [a.cos() * r, y, a.sin() * r], count);
+        testing::run(&mut app, Seconds(0.1));
+    }
+    testing::run(&mut app, Seconds(20.0));
+    app
+}
+
+#[test]
+fn a_big_ring_of_water_keeps_its_whole_surface() {
+    for width in [12.0, 60.0] {
+        let mut app = big_ring(width);
+        let demand = testing::surface_demand(&mut app);
+        assert!(
+            demand.vertices <= MAX_VERTICES as u32
+                && demand.indices <= MAX_INDICES as u32
+                && demand.blocks <= MAX_BLOCKS as u32,
+            "the surface of a ring {width} m wide does not fit its buffers: {demand:?}"
+        );
+        assert!(demand.indices > 0, "no surface at all");
+    }
 }

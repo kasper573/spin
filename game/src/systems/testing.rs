@@ -443,13 +443,31 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
 
 /// How many triangles the water's surface currently has, read back from the GPU.
 pub fn surface_triangles(app: &mut App) -> u32 {
+    surface_demand(app).indices / 3
+}
+
+/// What the last extraction of the water's surface asked for, whether or not it fit.
+#[derive(Clone, Copy, Debug)]
+pub struct SurfaceDemand {
+    pub vertices: u32,
+    pub indices: u32,
+    pub blocks: u32,
+}
+
+pub fn surface_demand(app: &mut App) -> SurfaceDemand {
     let counters = app
         .world()
         .resource::<FluidBuffers>()
         .surface
         .counters
         .clone();
-    read_u32s(app, counters).get(1).copied().unwrap_or(0) / 3
+    let counts = read_u32s(app, counters);
+    let at = |i: usize| counts.get(i).copied().unwrap_or(0);
+    SurfaceDemand {
+        vertices: at(0),
+        indices: at(1),
+        blocks: at(2),
+    }
 }
 
 #[derive(Resource, Default)]

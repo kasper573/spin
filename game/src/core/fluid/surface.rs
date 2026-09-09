@@ -8,17 +8,22 @@ use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{Buffer, ShaderType};
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 
-use super::Resolution;
+use super::{MAX_PARTICLES, Resolution};
 
 /// Cells per block edge; a block has this many cubed cells and one more cubed corners.
 pub const BLOCK: usize = 4;
 pub const CELLS_PER_BLOCK: usize = BLOCK * BLOCK * BLOCK;
 pub const CORNERS_PER_BLOCK: usize = (BLOCK + 1) * (BLOCK + 1) * (BLOCK + 1);
-/// Blocks the water may touch at once, and the slots of the table that finds them.
-pub const MAX_BLOCKS: usize = 32768;
-pub const TABLE_SLOTS: usize = 65536;
-pub const MAX_VERTICES: usize = 200_000;
-pub const MAX_INDICES: usize = 600_000;
+/// Blocks the water may touch at once, and the slots of the table that finds them. Water in one
+/// piece touches a block per thirty-odd particles and a sheet one per five; only spray, every
+/// drop marking the eight blocks round it, can ask for more, and its blocks past these go
+/// unmeshed.
+pub const MAX_BLOCKS: usize = 65536;
+pub const TABLE_SLOTS: usize = 2 * MAX_BLOCKS;
+/// A drop on its own crosses the eight cells round one corner and the six edges leaving it,
+/// and the mesh is sized for every particle to be one: sheets and bulk stay well under it.
+pub const MAX_VERTICES: usize = 8 * MAX_PARTICLES;
+pub const MAX_INDICES: usize = 6 * 6 * MAX_PARTICLES;
 const ISO: f32 = 0.9;
 
 #[derive(Resource, Clone, Default, PartialEq, ExtractResource, ShaderType)]
