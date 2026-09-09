@@ -38,7 +38,8 @@
     <canvas id="glcanvas" tabindex="0"></canvas>
     <pre id="error-log" hidden></pre>
     <script>
-      // A browser keeps an AudioContext made before the first click silent; wake every one up on it.
+      // A browser keeps an AudioContext made before the first click silent; wake every one up on
+      // the first click or key, then stop listening.
       (function () {
         const contexts = [];
         const Native = window.AudioContext;
@@ -48,7 +49,13 @@
           return context;
         };
         window.AudioContext.prototype = Native.prototype;
-        const wake = () => contexts.forEach((context) => context.resume());
+        const wake = () => {
+          contexts.forEach((context) => context.resume());
+          if (contexts.every((context) => context.state === "running")) {
+            window.removeEventListener("pointerdown", wake);
+            window.removeEventListener("keydown", wake);
+          }
+        };
         window.addEventListener("pointerdown", wake);
         window.addEventListener("keydown", wake);
       })();
@@ -68,6 +75,59 @@
         };
       })();
     </script>
+      // With ?probe, time what the page's listeners and timers do outside the frames, and what the
+      // browser reports for each input event, before the app installs its own listeners.
+    <script>
+      (function () {
+        if (!new URLSearchParams(location.search).has("probe")) return;
+        const probe = (window.__probe = { timers: [], handlers: [], audio: [], resumes: [], events: {}, since: { audio: 0, key: 0, mouse: 0, save: 0 } });
+        const timed = (into, fn) =>
+          function (...args) {
+            const start = performance.now();
+            try {
+              return fn.apply(this, args);
+            } finally {
+              into.push(performance.now() - start);
+            }
+          };
+        const setTimeoutRaw = window.setTimeout.bind(window);
+        window.setTimeout = (fn, ms, ...args) =>
+          setTimeoutRaw(typeof fn === "function" ? timed(probe.timers, fn) : fn, ms, ...args);
+        const resume = AudioContext.prototype.resume;
+        AudioContext.prototype.resume = timed(probe.resumes, resume);
+        // The audio is rendered in the "ended" handlers of the buffers it plays.
+        const listen = EventTarget.prototype.addEventListener;
+        EventTarget.prototype.addEventListener = function (type, fn, ...rest) {
+          let wrapped = fn;
+          if (typeof fn === "function" && type === "ended") {
+            wrapped = timed(probe.audio, function (...args) {
+              probe.since.audio++;
+              return fn.apply(this, args);
+            });
+          } else if (typeof fn === "function" && /mouse|pointer|key|wheel/.test(type)) {
+            wrapped = timed(probe.handlers, fn);
+          }
+          return listen.call(this, type, wrapped, ...rest);
+        };
+        const setItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (...args) {
+          probe.since.save++;
+          return setItem.apply(this, args);
+        };
+        // The browser's own account of each input event: how long it waited, how long the
+        // handlers took, and how long until the next paint.
+        new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) {
+            const bucket = (probe.events[e.name] ??= { n: 0, delay: 0, processing: 0, duration: 0, max: 0 });
+            bucket.n++;
+            bucket.delay += e.processingStart - e.startTime;
+            bucket.processing += e.processingEnd - e.processingStart;
+            bucket.duration += e.duration;
+            bucket.max = Math.max(bucket.max, e.duration);
+          }
+        }).observe({ type: "event", durationThreshold: 0, buffered: true });
+      })();
+    </script>
     <script type="module">
       import init from "./spin.js";
       try {
@@ -81,11 +141,55 @@
         }
         await init();
         // Automation without DevTools (a browser on its own profile refuses them): with ?probe the
-        // status is mirrored into the window title and the commands given as cmd= are run once
-        // the app is up.
+        // status is mirrored into the window title, the commands given as cmd= are run once the
+        // app is up, and once a second the status plus how long the frames' callbacks kept the
+        // main thread busy is posted to the report= URL.
         const params = new URLSearchParams(location.search);
         if (params.has("probe")) {
           const commands = params.getAll("cmd");
+          const late = params.getAll("late").map((entry) => {
+            const colon = entry.indexOf(":");
+            return { at: Number(entry.slice(0, colon)) * 1000, command: entry.slice(colon + 1) };
+          });
+          const report = params.get("report");
+          const started = performance.now();
+          const frames = { busy: [], gaps: [], mouse: 0, keys: 0, last: 0, long: { audio: 0, key: 0, mouse: 0, save: 0, nothing: 0 } };
+          // What ran since the last frame, to say what a skipped frame coincided with.
+          const since = window.__probe.since;
+          const raf = window.requestAnimationFrame.bind(window);
+          window.requestAnimationFrame = (callback) =>
+            raf((t) => {
+              const start = performance.now();
+              if (frames.last) {
+                const gap = start - frames.last;
+                frames.gaps.push(gap);
+                if (gap > 25) {
+                  if (since.audio) frames.long.audio++;
+                  if (since.key) frames.long.key++;
+                  if (since.mouse) frames.long.mouse++;
+                  if (since.save) frames.long.save++;
+                  if (!since.audio && !since.key && !since.mouse && !since.save) frames.long.nothing++;
+                }
+              }
+              since.audio = since.key = since.mouse = since.save = 0;
+              frames.last = start;
+              callback(t);
+              frames.busy.push(performance.now() - start);
+            });
+          window.addEventListener("mousemove", () => { frames.mouse++; since.mouse++; }, true);
+          window.addEventListener("keydown", () => { frames.keys++; since.key++; }, true);
+          const stats = (values) => {
+            if (!values.length) return null;
+            const sorted = [...values].sort((a, b) => a - b);
+            return {
+              n: values.length,
+              mean: values.reduce((a, b) => a + b, 0) / values.length,
+              median: sorted[sorted.length >> 1],
+              p90: sorted[Math.floor(sorted.length * 0.9)],
+              max: sorted[sorted.length - 1],
+            };
+          };
+          let tick = 0;
           setInterval(() => {
             let status = "";
             try {
@@ -96,7 +200,35 @@
             if (commands.length && JSON.parse(status).frame > 5) {
               commands.splice(0).forEach((command) => spin_command(command));
             }
+            for (const entry of late.filter((entry) => performance.now() - started >= entry.at)) {
+              spin_command(entry.command);
+              late.splice(late.indexOf(entry), 1);
+            }
             document.title = status;
+            if (report && ++tick % 4 === 0) {
+              const body = JSON.stringify({
+                status: JSON.parse(status),
+                busy: stats(frames.busy),
+                gap: stats(frames.gaps),
+                mouse: frames.mouse,
+                keys: frames.keys,
+                long: frames.long,
+                timers: stats(window.__probe.timers.splice(0)),
+                audio: stats(window.__probe.audio.splice(0)),
+                resumes: stats(window.__probe.resumes.splice(0)),
+                handlers: stats(window.__probe.handlers.splice(0)),
+                events: Object.fromEntries(Object.entries(window.__probe.events).map(([k, v]) => [k, { n: v.n, delay: v.delay / v.n, processing: v.processing / v.n, duration: v.duration / v.n, max: v.max }])),
+                size: [innerWidth, innerHeight, devicePixelRatio],
+                canvas: [document.querySelector("canvas").width, document.querySelector("canvas").height],
+              });
+              frames.busy = [];
+              frames.gaps = [];
+              frames.mouse = 0;
+              frames.keys = 0;
+              frames.long = { audio: 0, key: 0, mouse: 0, save: 0, nothing: 0 };
+              window.__probe.events = {};
+              fetch(report, { method: "POST", mode: "no-cors", body }).catch(() => {});
+            }
           }, 250);
         }
       } catch (e) {

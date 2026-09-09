@@ -1,6 +1,7 @@
 //! The whole application: bevy's defaults plus every plugin of ours, on the browser page or
 //! headless for the bench and the tests.
 use bevy::prelude::*;
+use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
@@ -21,8 +22,14 @@ pub fn build() -> App {
         ..default()
     }));
     simulation(&mut app);
-    app.add_plugins((ControlsPlugin, HudPlugin, PersistencePlugin, TestingPlugin))
-        .add_systems(PreUpdate, sync_window);
+    app.add_plugins((
+        ControlsPlugin,
+        HudPlugin,
+        PersistencePlugin,
+        TestingPlugin,
+        RenderDiagnosticsPlugin,
+    ))
+    .add_systems(PreUpdate, sync_window);
     app
 }
 

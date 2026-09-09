@@ -2,7 +2,7 @@
 //! plus the headless app the bench and the tests drive frame by frame.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
-use bevy::diagnostic::FrameCount;
+use bevy::diagnostic::{DiagnosticsStore, FrameCount};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
@@ -128,6 +128,9 @@ pub struct ScriptStatus {
     pub avatar: [f32; 3],
     /// Frames whose water coupling the GPU has yet to report.
     pub outstanding: u32,
+    /// The render passes' smoothed times in ms, on the GPU and the CPU, where the device can
+    /// time them.
+    pub render: Vec<(String, f32)>,
 }
 
 /// Thruster keys a script holds down until a simulated time.
@@ -270,6 +273,7 @@ fn publish(
     saves: Res<Saves>,
     fps: Res<FrameRate>,
     frame: Res<FrameCount>,
+    diagnostics: Option<Res<DiagnosticsStore>>,
 ) {
     let footing = sim.footing();
     let status = ScriptStatus {
@@ -302,6 +306,12 @@ fn publish(
         width: sim.drum.ring.half_width.0 * 2.0,
         avatar: sim.avatar().p.map(|c| c as f32),
         outstanding: fluid.outstanding(),
+        render: diagnostics
+            .iter()
+            .flat_map(|store| store.iter())
+            .filter(|d| d.path().as_str().starts_with("render/"))
+            .filter_map(|d| Some((d.path().as_str().to_owned(), d.smoothed()? as f32)))
+            .collect(),
     };
     if let Ok(text) = serde_json::to_string(&status) {
         web::publish_status(&text);
