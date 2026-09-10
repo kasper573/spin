@@ -11,7 +11,7 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import bevy_pbr::pbr_functions::apply_fog
 #endif
-#import ripples::{carried, waves_carried}
+#import ripples::{carried, crossing_length, waves_carried}
 
 struct Terrain {
     dirt: vec4<f32>,
@@ -126,7 +126,11 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
     let down = refract(-l, up, 1.0 / IOR);
     let entry = p - down * path;
     let run = carried(entry, water.flow, terrain.clock.x);
-    let w = waves_carried(run, terrain.clock.x, footprint);
+    // waves whose caustics have crossed before the light reaches the bed draw no pattern on
+    // it, and neither do those too small to resolve: a wave is left out once the footprint
+    // reaches half its length
+    let crossed = crossing_length(path, 1.0 - 1.0 / IOR);
+    let w = waves_carried(run, terrain.clock.x, max(footprint, 0.5 * crossed));
     // rays bent by the ripples' slopes converge or spread by the time they reach the bed
     let spread = (1.0 - 1.0 / IOR) * path;
     let e1 = vec3(0.0, 1.0, 0.0);

@@ -330,6 +330,8 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
     let axis = ([0.0, 0.0, 9.0], [-4.0, 1.0, 0.0]);
     let out_the_end = ([0.0, 0.0, 4.0], [0.0, -20.0, 4.0]);
     let through_floor = ([0.0, 0.0, -3.5], [0.0, 0.0, 1.5]);
+    // under the water, facing the glass disc that closes the ring's end
+    let at_the_end = ([0.0, -5.0, 0.8], [0.0, -20.0, 0.8]);
     let end_on_axis = ([0.0, -10.0, 2.0], [0.0, 0.0, 2.0]);
     let end_off_axis = ([0.0, -10.0, 9.0], [0.0, 0.0, 5.0]);
     let from_35m = ([0.0, 25.0, -25.0], [0.0, 0.0, 0.0]);
@@ -345,6 +347,10 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
     sight
         .view("out_the_end", out_the_end.0, out_the_end.1, true)
         .seen(0.05);
+    sight
+        .view("at_the_end", at_the_end.0, at_the_end.1, true)
+        .seen(0.3)
+        .blue();
     sight
         .view("through_floor", through_floor.0, through_floor.1, true)
         .unseen();

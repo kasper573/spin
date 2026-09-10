@@ -33,6 +33,14 @@ fn noise3(p: vec3<f32>) -> f32 {
     return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
 
+/// The shortest wave whose light has not yet crossed after `path` metres of water, whose
+/// slopes were bent by `bend`. A wave of length L focuses at about L / (bend * 4 pi^2 *
+/// STEEPNESS); past that its rays have crossed and spread again, so the caustic it draws on
+/// the bed has washed out into an even glow rather than the pattern a paraxial focus gives.
+fn crossing_length(path: f32, bend: f32) -> f32 {
+    return path * bend * 4.0 * PI * PI * STEEPNESS;
+}
+
 /// A point of the water's frame carried back along the flow, in two runs that overlap, and
 /// the weight the first run has now.
 struct Carried {
