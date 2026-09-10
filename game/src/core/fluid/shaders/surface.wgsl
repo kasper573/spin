@@ -11,7 +11,7 @@
 // own units, relative to an anchor cell, so they stay small near the viewer however far the
 // vessel reaches, and the mesh turns with the vessel between extractions.
 #import fluid_common::{params, coords_of, cell_key, cell_slot, neighbour_cell}
-#import vessel::vessel_confine
+#import vessel::{landscape_penetration, vessel_confine}
 
 struct SurfaceParams {
     cell: f32,
@@ -31,7 +31,8 @@ struct Vertex {
     position: vec4<f32>,
     // xyz: normal, w: the key of the cell the vertex sits in, as bits
     normal: vec4<f32>,
-    // xyz: the water's velocity at the vertex, in the vessel's frame
+    // xyz: the water's velocity at the vertex, in the vessel's frame, w: how far the vertex
+    // stands clear of the ground under it, in cells
     velocity: vec4<f32>,
 }
 
@@ -68,6 +69,8 @@ const BLOCK: i32 = 4;
 const POLISH: f32 = 0.7;
 // the surface is kept this far inside the vessel, in cells, so it never shows through its walls
 const CLEARANCE: f32 = 0.125;
+// thick enough that nothing takes water this deep for a film
+const DEEP: f32 = 64.0;
 const CORNERS_PER_BLOCK: u32 = 125u;
 const CELLS_PER_BLOCK: u32 = 64u;
 const COUNTER_VERTICES: u32 = 0u;
@@ -347,6 +350,17 @@ fn inside(p: vec3<f32>) -> vec3<f32> {
     return vessel_confine(p, CLEARANCE * surface.cell).p;
 }
 
+/// How thick the water lies at a point of its surface, in cells, as far as the surface itself
+/// can tell: a point of the water's top stands as far clear of the ground as the water under it
+/// is deep, and where that is under a cell the water is a film whose edge the grid cannot make
+/// out. The water's underside rests on the ground however deep the water over it stands, so it
+/// says nothing about the thickness and is taken as deep.
+fn sheet_at(p: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let up = -normalize(vec3(p.x, 0.0, p.z));
+    let clear = max(-landscape_penetration(p, 0.0).depth, 0.0) / surface.cell;
+    return mix(DEEP, clear, clamp(dot(normal, up), 0.0, 1.0));
+}
+
 fn corner_at(c: vec3<i32>) -> f32 {
     return field[u32((c.x * 5 + c.y) * 5 + c.z)];
 }
@@ -421,7 +435,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     }
     let normal = -gradient / max(length(gradient), 1e-9);
     let key = cell_key_of(block, t);
-    vertices[slot] = Vertex(vec4(p, at.foam), vec4(normal, bitcast<f32>(key)), vec4(at.velocity, 0.0));
+    vertices[slot] = Vertex(vec4(p, at.foam), vec4(normal, bitcast<f32>(key)), vec4(at.velocity, sheet_at(within * surface.cell, normal)));
     insert_cell(key, (slot << 8u) | mask);
 }
 

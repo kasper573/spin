@@ -6,10 +6,6 @@
 #import bevy_pbr::view_transformations::position_world_to_clip
 #import bevy_pbr::mesh_view_bindings::view
 #import space::space_colour
-#ifdef DISTANCE_FOG
-#import bevy_pbr::mesh_view_bindings::fog
-#import bevy_pbr::pbr_functions::apply_fog
-#endif
 
 struct Sky {
     background: vec4<f32>,
@@ -36,11 +32,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(in.world_normal);
-    let out = vec4(space_colour(dir, normalize(sky.sun.xyz), sky.background.rgb), 1.0);
-#ifdef DISTANCE_FOG
-    // with the eye under water, space is seen through the water round the eye
-    return apply_fog(fog, out, in.world_position.xyz, view.world_position, in.position.xy);
-#else
-    return out;
-#endif
+    // space stands in no water, whatever the eye stands in: from under water it is only ever
+    // seen through the glass, which is what puts what it shows through the water in between
+    return vec4(space_colour(dir, normalize(sky.sun.xyz), sky.background.rgb), 1.0);
 }

@@ -26,24 +26,26 @@ use bevy::render::render_resource::{
 use bevy::shader::{Shader, ShaderRef};
 
 use crate::core::avatar;
+use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::core::rigid::Body;
-use crate::systems::drum::{Ring, slack};
+use crate::systems::drum::{Ring, bed_albedo, slack};
 use crate::systems::player::PlayerCamera;
 use crate::systems::sim::{SimSet, Simulation};
+use crate::systems::water;
 
 /// Where the sun is among the stars.
 pub const SUN_DIRECTION: Vec3 = Vec3::new(0.5145, 0.7717, 0.3430);
 pub const SPACE: Color = Color::srgb(0.02, 0.027, 0.05);
 /// There is no sky in space: what light falls on the shaded side of anything is the sun's,
-/// bounced off the sunlit ground across the ring, dimmed and greened by it.
+/// bounced off the sunlit ground across the ring, dimmed and coloured by whatever covers it.
 const BOUNCE: Color = Color::srgb(0.62, 0.7, 0.55);
 const BOUNCE_BRIGHTNESS: f32 = 15000.0;
 const SUN: Color = Color::srgb(1.0, 0.98, 0.95);
 /// The light bounced round the ring as a lit surface shows it, at the exposure the sun is
 /// seen at.
-pub fn bounce_light() -> Vec3 {
-    BOUNCE.to_linear().to_vec3() * BOUNCE_BRIGHTNESS * Exposure::SUNLIGHT.exposure()
+pub fn bounce_light(ambient: &GlobalAmbientLight) -> Vec3 {
+    ambient.color.to_linear().to_vec3() * ambient.brightness * Exposure::SUNLIGHT.exposure()
 }
 
 /// The sun's light as a surface facing it shows it, at that same exposure.
@@ -143,8 +145,34 @@ impl Plugin for ScenePlugin {
         .insert_resource(DirectionalLightShadowMap { size: SHADOW_MAP })
         .add_systems(Startup, (load_shared, spawn))
         .add_systems(Update, locate.before(SimSet::Command))
-        .add_systems(Update, (turn_sky, shade).in_set(SimSet::Observe));
+        .add_systems(Update, (turn_sky, shade, bounce).in_set(SimSet::Observe));
     }
+}
+
+/// What the ring bounces round to itself is the sunlit ground across it, so it takes the
+/// colour of whatever covers that ground: the grass where the ring is dry, and where a sea
+/// stands over it the share of a ray that the water turns back rather than swallows, which is
+/// the colour deep water settles at.
+fn bounce(
+    sim: Res<Simulation>,
+    fluid: Res<Fluid>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut last: Local<Option<(u64, f32)>>,
+) {
+    let litres = fluid.litres().0;
+    let asked = (sim.drum.landscape.version(), litres);
+    if *last == Some(asked) {
+        return;
+    }
+    *last = Some(asked);
+    let flood = sim.drum.landscape.flooded(litres as f64 / 1000.0);
+    // what comes back off flooded ground is its bed through the water, which the water has
+    // crossed twice, and the water's own colour in place of what it swallowed
+    let left = (-2.0 * water::extinction() * flood.depth.0).exp();
+    let sea = bed_albedo().to_vec3() * left
+        + water::SCATTERING / water::extinction() * (Vec3::ONE - left);
+    let colour = BOUNCE.to_linear().to_vec3().lerp(sea, flood.covered);
+    ambient.color = Color::linear_rgb(colour.x, colour.y, colour.z);
 }
 
 /// Follow the avatar, and move the site when the viewer has gone far enough from it, come
@@ -252,15 +280,17 @@ fn metering_mask() -> Image {
 struct StarSphere;
 
 /// The shader modules the materials share, kept loaded: space, for the stars and whatever
-/// reflects them; the optics of smooth surfaces, for the water and the glass; and the
-/// ripples, for the water and the ground they cast their light on.
+/// reflects them; the optics of smooth surfaces, for the water and the glass; the air between
+/// the eye and everything in the ring; and the ripples, for the water and the ground they cast
+/// their light on.
 #[derive(Resource)]
-struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 3]);
+struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 4]);
 
 fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SharedShaders([
         assets.load("embedded://game/systems/shaders/space.wgsl"),
         assets.load("embedded://game/systems/shaders/optics.wgsl"),
+        assets.load("embedded://game/systems/shaders/air.wgsl"),
         assets.load("embedded://game/systems/shaders/ripples.wgsl"),
     ]));
 }

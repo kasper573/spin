@@ -6,12 +6,15 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_directional_shadow
-#import optics::{bounce, sunlight}
+#import optics::{bounce, ring_up, sunlight, through_ring_air}
 #ifdef DISTANCE_FOG
+// with the eye under water the fog carries the water round it: its colour just under the
+// surface, and what a metre of it takes out of light crossing it
 #import bevy_pbr::mesh_view_bindings::fog
-#import bevy_pbr::pbr_functions::apply_fog
+#import optics::through_water
 #endif
 #import ripples::{carried, crossing_length, noise3, waves_carried}
+#import air::AIR_IOR
 
 struct Terrain {
     dirt: vec4<f32>,
@@ -37,7 +40,8 @@ struct Terrain {
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> columns: array<vec4<u32>>;
 
 const PI: f32 = 3.14159265;
-const IOR: f32 = 1.333;
+// water's index against the air it is seen through rather than against vacuum
+const IOR: f32 = 1.333 / AIR_IOR;
 const F0: f32 = 0.02;
 // the tightest the sun's disc can be focused, as a share of the light it started with
 const SHARPEST: f32 = 0.4;
@@ -237,7 +241,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // the water lying over this ground, looked up about the site
     let at = p + terrain.origin.xyz;
-    let up = -normalize(vec3(terrain.site.z + at.x, 0.0, at.z));
+    let up = ring_up(at, terrain.site.z);
     var water = column_over(at);
     // How deep the water lies over this ground: the height its top reaches above the ground,
     // which is what light crossing it has to cross. The particles counted over a column say how
@@ -312,10 +316,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // the light bounced round the ring comes down through the water too
     colour += bounce() * albedo * dimmed;
+    let away = p - view.world_position;
+    let reach = length(away);
+    let toward = -away / max(reach, 1e-6);
 #ifdef DISTANCE_FOG
-    // with the eye under water, everything is seen through it
-    return apply_fog(fog, vec4(colour, 1.0), p, view.world_position, in.position.xy);
+    // with the eye under water, everything is seen through it rather than through the air
+    let rise = -dot(toward, ring_up(view.world_position + terrain.origin.xyz, terrain.site.z));
+    return vec4(through_water(colour, fog.base_color.rgb, fog.be, rise, reach), 1.0);
 #else
-    return vec4(colour, 1.0);
+    return vec4(through_ring_air(colour, at, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
 #endif
 }

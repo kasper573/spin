@@ -8,6 +8,8 @@ pub const ROWS: usize = 64;
 
 const TWO_PI: f64 = PI * 2.0;
 const DPHI: f64 = TWO_PI / SEGMENTS as f64;
+/// How many times the search for the level a body of water stands at is halved.
+const FINDING_THE_LEVEL: u32 = 40;
 
 /// Angle of a world point in the wheel's own frame.
 #[inline]
@@ -18,6 +20,14 @@ pub fn wheel_angle(x: f64, z: f64, theta: f64) -> f64 {
 /// Sculptable terrain on the inside of the drum floor: a periodic heightfield in the wheel's frame,
 /// measured inward from the glass, with a fixed number of segments round and rows across whatever
 /// size the ring is. Height zero means bare glass.
+/// How a body of water lies on a landscape: see [`Landscape::flooded`].
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Flood {
+    pub level: Metres,
+    pub covered: f32,
+    pub depth: Metres,
+}
+
 pub struct Landscape {
     ring: Ring,
     heights: Vec<f32>,
@@ -85,6 +95,48 @@ impl Landscape {
 
     pub fn max_height(&self) -> f32 {
         self.heights.iter().copied().fold(0.0, f32::max)
+    }
+
+    /// How a body of water this big lies on the landscape once it has found its level: how
+    /// high it stands over the glass, the share of the ground under it, and how deep it stands
+    /// over that ground on average. Water settles into the hollows first, so what it hides is
+    /// not its volume spread evenly: a little of it covers the whole of a flat ring and none
+    /// of a steep one.
+    pub fn flooded(&self, cubic_metres: f64) -> Flood {
+        let cells = self.heights.len();
+        if cubic_metres <= 0.0 || cells == 0 {
+            return Flood::default();
+        }
+        let width = 2.0 * self.ring.half_width.0 as f64;
+        let per_cell = TWO_PI * self.ring.radius.0 as f64 * width / cells as f64;
+        let held = |level: f64| -> f64 {
+            self.heights
+                .iter()
+                .map(|h| (level - *h as f64).max(0.0))
+                .sum::<f64>()
+                * per_cell
+        };
+        let mut under = 0.0;
+        let mut over = self.max_height() as f64 + cubic_metres / (per_cell * cells as f64);
+        for _ in 0..FINDING_THE_LEVEL {
+            let level = 0.5 * (under + over);
+            if held(level) < cubic_metres {
+                under = level;
+            } else {
+                over = level;
+            }
+        }
+        let level = 0.5 * (under + over);
+        let wet = self.heights.iter().filter(|h| (**h as f64) < level).count();
+        Flood {
+            level: Metres(level as f32),
+            covered: wet as f32 / cells as f32,
+            depth: Metres(if wet > 0 {
+                (held(level) / (per_cell * wet as f64)) as f32
+            } else {
+                0.0
+            }),
+        }
     }
 
     pub fn load(&mut self, data: &[f32]) {

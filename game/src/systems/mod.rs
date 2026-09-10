@@ -25,6 +25,7 @@ pub fn embed_shaders(app: &mut App) {
     embedded_asset!(app, "shaders/stars_prepass.wgsl");
     embedded_asset!(app, "shaders/ripples.wgsl");
     embedded_asset!(app, "shaders/optics.wgsl");
+    embedded_asset!(app, "shaders/air.wgsl");
     embedded_asset!(app, "drum/shaders/drum.wgsl");
     embedded_asset!(app, "drum/shaders/columns.wgsl");
 }

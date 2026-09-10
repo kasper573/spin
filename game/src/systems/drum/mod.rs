@@ -13,7 +13,7 @@ mod landscape;
 mod render;
 
 pub use gpu::{DrumFrame, DrumUniform};
-pub use landscape::{Landscape, wheel_angle};
+pub use landscape::{Flood, Landscape, wheel_angle};
 pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 
 use serde::{Deserialize, Serialize};

@@ -44,8 +44,10 @@ pub fn extinction() -> Vec3 {
     ABSORPTION + SCATTERING
 }
 
-/// Water's refractive index, which what is seen through water from within it bends by.
-pub const WATER_IOR: f32 = 1.333;
+/// Air's refractive index, and water's against it rather than against vacuum, which is what
+/// anything seen through water from within it bends by.
+pub const AIR_IOR: f32 = 1.000293;
+pub const WATER_IOR: f32 = 1.333 / AIR_IOR;
 
 pub struct WaterPlugin;
 
@@ -262,6 +264,7 @@ fn submerge(
     mut commands: Commands,
     sim: Res<Simulation>,
     sky: Res<Sky>,
+    ambient: Res<GlobalAmbientLight>,
     mut cameras: Query<(Entity, Option<&mut DistanceFog>), With<PlayerCamera>>,
 ) {
     let under = sim.submerged();
@@ -270,7 +273,7 @@ fn submerge(
     // water settles at the share of a ray that scattering rather than absorption takes.
     let (_, outward) = sim.drum.depth_and_outward(sim.avatar().p);
     let up = Vec3::new(-outward[0] as f32, -outward[1] as f32, -outward[2] as f32);
-    let downwelling = scene::bounce_light() + scene::sunlight() * sky.sun.dot(up).max(0.0);
+    let downwelling = scene::bounce_light(&ambient) + scene::sunlight() * sky.sun.dot(up).max(0.0);
     let glow = SCATTERING / extinction() * downwelling;
     let colour = Color::linear_rgb(glow.x, glow.y, glow.z);
     for (camera, fog) in &mut cameras {

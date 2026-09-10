@@ -5,10 +5,13 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #ifdef DISTANCE_FOG
+// with the eye under water the fog carries the water round it: its colour just under the
+// surface, and what a metre of it takes out of light crossing it
 #import bevy_pbr::mesh_view_bindings::fog
-#import bevy_pbr::pbr_functions::apply_fog
+#import optics::through_water
 #endif
-#import optics::{mirrored, ring_seen, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated}
+#import optics::{mirrored, ring_seen, ring_up, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
+#import air::AIR_IOR
 
 struct Glass {
     // how much of each colour a pane lets through
@@ -25,7 +28,8 @@ struct Glass {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> glass: Glass;
 
-const IOR: f32 = 1.52;
+// the glass's index against the air it is seen through rather than against vacuum
+const IOR: f32 = 1.52 / AIR_IOR;
 // glass mirrors this much face on
 const ROUGHNESS: f32 = 0.04;
 // the grooves' sides fall this steeply: depth over half their width
@@ -153,10 +157,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 #endif
     let out = vec4(saturated(colour), 1.0);
+    let away = p - view.world_position;
+    let reach = length(away);
+    let toward = -away / max(reach, 1e-6);
 #ifdef DISTANCE_FOG
-    // with the eye under water, the glass is seen through it
-    return apply_fog(fog, out, p, view.world_position, in.position.xy);
+    // with the eye under water, the glass is seen through it rather than through the air
+    let rise = -dot(toward, ring_up(view.world_position + glass.origin.xyz, glass.ring.x));
+    return vec4(through_water(out.rgb, fog.base_color.rgb, fog.be, rise, reach), out.a);
 #else
-    return out;
+    return vec4(through_ring_air(out.rgb, p + glass.origin.xyz, toward, reach, glass.ring.xy), out.a);
 #endif
 }

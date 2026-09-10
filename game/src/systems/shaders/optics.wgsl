@@ -9,6 +9,7 @@
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
 #import space::stars
+#import air::{air_lit_all_round, air_turned, through_air}
 
 const PI: f32 = 3.14159265;
 const MARCH_STEPS: i32 = 28;
@@ -17,6 +18,8 @@ const REFINE_STEPS: i32 = 5;
 // the brightest the eye tells from white: the sun's mirror image is thousands of times
 // brighter than that, and saturates the eye rather than flooding the view
 const SATURATION: f32 = 4.0;
+// how far through water anything can be seen at all
+const FARTHEST: f32 = 200.0;
 
 /// A colour as the eye takes it in, saturating at the brightest it can tell apart.
 fn saturated(colour: vec3<f32>) -> vec3<f32> {
@@ -107,6 +110,25 @@ fn space_seen(dir: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec
     return background + stars(rotate(to_stars, dir));
 }
 
+/// What the air between a point of the ring and the eye does to what the eye sees of it: only
+/// the stretch inside the ring holds any air, and the sun is taken to reach the whole of that
+/// stretch, or none of it, as it reaches the point itself.
+fn through_ring_air(colour: vec3<f32>, at: vec3<f32>, to_eye: vec3<f32>, distance: f32, ring: vec2<f32>) -> vec3<f32> {
+    let held = min(distance, ring_run(at, to_eye, ring).distance);
+    if (held <= 0.0) {
+        return colour;
+    }
+    let up = ring_up(at, ring.x);
+    var turned = air_lit_all_round(bounce());
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let l = lights.directional_lights[i].direction_to_light;
+        if (sun_reaches(at, up, l, ring)) {
+            turned += air_turned(-to_eye, l, sunlight(i));
+        }
+    }
+    return through_air(colour, turned, held);
+}
+
 /// Whether the sun reaches a point of the ground: its light must come in through a cap, so
 /// the way toward the sun from there must leave the ring's width before it crosses the ring.
 fn sun_reaches(q: vec3<f32>, up: vec3<f32>, l: vec3<f32>, ring: vec2<f32>) -> bool {
@@ -157,6 +179,30 @@ fn ring_run(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>) -> RingRun {
     return RingRun(max(t, 0.0), true);
 }
 
+/// Which way is up at a point of the ring's frame, which is away from the axis the spin
+/// presses everything from.
+fn ring_up(at: vec3<f32>, radius: f32) -> vec3<f32> {
+    return -normalize(vec3(radius + at.x, 0.0, at.z));
+}
+
+/// What a stretch of water `distance` long does to the light that set out across it: what is
+/// left of that light, and the water's own colour gathered along the way.
+///
+/// Absorption and scattering both take light out of a ray and the share scattering takes is
+/// the share that comes back, so water deep enough to hide whatever lies beyond it settles at
+/// that share of the light falling on it. The light falling on it comes down from the surface,
+/// so a stretch lit that way shows its colour the brighter the shallower it lies: `rise` is
+/// how fast the ray climbs toward the surface as it runs away from the eye, one straight up
+/// and minus one straight down, and `glow` is the colour the water shows where the ray sets
+/// out. Looking straight up the water brightens exactly as fast as the ray dims, so the two
+/// cancel and the colour gathers evenly the whole way; looking down it falls away twice as
+/// fast as it would level.
+fn through_water(colour: vec3<f32>, glow: vec3<f32>, extinction: vec3<f32>, rise: f32, distance: f32) -> vec3<f32> {
+    let d = min(distance, FARTHEST);
+    let climb = max(1.0 - rise, 1e-3);
+    return colour * exp(-extinction * d) + glow * (1.0 - exp(-extinction * climb * d)) / climb;
+}
+
 /// What a ray meets once it has left the screen, inside the ring: the ground where it strikes
 /// the ring, lit by the sun where the sun reaches it and by the bounce light everywhere, or
 /// space where it leaves through a cap.
@@ -166,7 +212,7 @@ fn ring_seen(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, 
         return space_seen(dir, to_stars, background);
     }
     let hit = at + dir * run.distance;
-    let up = -normalize(vec3(ring.x + hit.x, 0.0, hit.z));
+    let up = ring_up(hit, ring.x);
     var light = bounce();
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;

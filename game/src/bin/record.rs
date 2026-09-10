@@ -70,6 +70,9 @@ struct View {
     eye: [f64; 3],
     at: [f64; 3],
     daylight: bool,
+    /// Whether the places round the ring are measured from the water's edge rather than from
+    /// the pool: a shot of a shore wants to stand where the shore turns out to be.
+    ashore: bool,
 }
 
 /// Where the pool was laid in: its wheel angle and its place along the axis, which the site
@@ -78,6 +81,8 @@ struct View {
 struct Pool {
     phi: f64,
     y: f64,
+    /// How far round the ring from `phi` the water's edge lies, once a sea stands in the ring.
+    shore: f64,
 }
 
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
@@ -399,6 +404,7 @@ fn water_script() -> Vec<Phase> {
                 eye: [-2.0, -10.0, 2.0],
                 at: [-2.0, 0.0, 1.0],
                 daylight: true,
+                ashore: false,
             };
             Phase {
                 cue: Cue::Look(view),
@@ -416,6 +422,7 @@ fn water_script() -> Vec<Phase> {
                 eye: [-2.0, 25.0, -25.0],
                 at: [-2.0, 0.0, 0.0],
                 daylight: true,
+                ashore: false,
             };
             Phase {
                 cue: Cue::Look(view),
@@ -452,10 +459,18 @@ fn sea_script() -> Vec<Phase> {
             hold: None,
         }
     };
-    let held = |cue, seconds, eye, at, daylight, caption| {
-        let view = View { eye, at, daylight };
+    // every held shot waits for its own sun: the ring turns once in about six seconds, so a
+    // place on it sees three of daylight and three of night, and a shot that does not wait for
+    // the turn of the day runs into the dark halfway through
+    let held = |ashore, seconds, eye, at, daylight, caption| {
+        let view = View {
+            eye,
+            at,
+            daylight,
+            ashore,
+        };
         Phase {
-            cue: if cue { Cue::Look(view) } else { Cue::None },
+            cue: Cue::Look(view),
             hold: Some(view),
             ..phase(seconds, &[], 0.0, caption)
         }
@@ -472,8 +487,8 @@ fn sea_script() -> Vec<Phase> {
     // the pool: shallow water over pale sand, which is what a lagoon is
     script.extend([
         held(
-            true,
-            4.0,
+            false,
+            DAY,
             [8.0, 0.0, 1.7],
             [-6.0, 0.0, 1.0],
             true,
@@ -481,7 +496,7 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            3.5,
+            DAY,
             [-2.0, 0.0, 0.6],
             [-8.0, 0.0, 0.6],
             true,
@@ -489,7 +504,7 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            3.5,
+            DAY,
             [-2.0, 0.0, 0.6],
             [-4.0, 0.5, 3.0],
             true,
@@ -497,7 +512,7 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            3.5,
+            DAY,
             [-2.0, 0.0, 8.5],
             [-6.0, 1.0, 0.0],
             true,
@@ -505,15 +520,15 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            3.5,
+            DAY,
             [-2.0, 0.0, -3.5],
             [-2.0, 0.0, 1.5],
             true,
             "from outside, in through the glass floor: the pool from underneath, lit through its own surface",
         ),
         held(
-            true,
-            3.0,
+            false,
+            DAY,
             [8.0, 0.0, 1.7],
             [-6.0, 0.0, 1.0],
             false,
@@ -532,20 +547,28 @@ fn sea_script() -> Vec<Phase> {
     });
     script.extend([
         held(
-            true,
-            4.0,
+            false,
+            DAY,
             [0.0, 0.0, 1.7],
-            [26.0, 0.0, 4.0],
+            [15.0, 6.0, -1.0],
             true,
-            "from the headland, along the ring: the shallows over the shelf, then blue where the bed drops away and the sand no longer answers",
+            "from the headland: the shallows over the terrace round its foot, then blue where the bed drops away and the sand no longer answers",
         ),
         held(
-            false,
-            3.5,
-            [11.0, 0.0, 1.2],
-            [26.0, 0.0, -0.5],
             true,
-            "at the water's edge: sand, then the shelf under a metre of water, then the deep",
+            DAY,
+            [-2.0, 0.0, 1.6],
+            [6.0, 7.0, -1.0],
+            true,
+            "at the water's edge: grass to the line the water reaches, then the pale bed the water laid down under itself, and past it the deep",
+        ),
+        held(
+            true,
+            DAY,
+            [-0.5, 0.0, 0.3],
+            [3.0, 6.0, -0.3],
+            true,
+            "along the water's edge from a hand's height: the sheet giving out over the bank rather than ending at a rim the grid cut for it",
         ),
     ]);
     // down through the surface and back out of it, carried by the thrusters rather than cut to
@@ -577,8 +600,8 @@ fn sea_script() -> Vec<Phase> {
     ]);
     script.extend([
         held(
-            true,
-            4.0,
+            false,
+            DAY,
             [0.0, 0.0, 14.0],
             [16.0, 3.0, 0.0],
             true,
@@ -586,7 +609,7 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            4.0,
+            DAY,
             [20.0, 0.0, -5.0],
             [20.0, 0.0, 2.0],
             true,
@@ -594,7 +617,7 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            4.0,
+            DAY,
             [0.0, -16.0, 4.0],
             [0.0, 0.0, 3.0],
             true,
@@ -602,15 +625,15 @@ fn sea_script() -> Vec<Phase> {
         ),
         held(
             false,
-            4.0,
+            DAY,
             [0.0, 34.0, -34.0],
             [0.0, 0.0, 0.0],
             true,
             "the whole ring from off its axis: a band of water closed on itself, lit from within",
         ),
         held(
-            true,
-            3.5,
+            false,
+            DAY,
             [0.0, 0.0, 1.7],
             [26.0, 0.0, 4.0],
             false,
@@ -701,7 +724,12 @@ fn survey_script() -> Vec<Phase> {
                 seconds: 1.0 / FPS as f32,
                 pilot: PilotInput::default(),
                 caption,
-                cue: Cue::Look(View { eye, at, daylight }),
+                cue: Cue::Look(View {
+                    eye,
+                    at,
+                    daylight,
+                    ashore: false,
+                }),
                 sculpting: false,
                 pouring: false,
                 hold: None,
@@ -714,10 +742,11 @@ fn survey_script() -> Vec<Phase> {
 /// Hold the eye at a viewpoint about the pool, as a ghost.
 fn hold(app: &mut App, view: View) {
     let pool = *app.world().resource::<Pool>();
+    let shore = if view.ashore { pool.shore } else { 0.0 };
     let mut sim = app.world_mut().resource_mut::<Simulation>();
     sim.avatar_mut().solid = false;
-    let eye = spot(&sim, pool, view.eye);
-    let at = spot(&sim, pool, view.at);
+    let eye = spot(&sim, pool, [view.eye[0] + shore, view.eye[1], view.eye[2]]);
+    let at = spot(&sim, pool, [view.at[0] + shore, view.at[1], view.at[2]]);
     stand(&mut sim, eye, at);
 }
 
@@ -726,18 +755,37 @@ fn cue(app: &mut App, cue: Cue) {
         Cue::None => {}
         Cue::Look(view) => {
             app.world_mut().resource_mut::<Settings>().collisions = false;
-            // wait for the sun to stand over the pool, or to shine from behind the ring, held
-            // at the viewpoint all the while: a ghost let go falls out through the ring
-            let high = |app: &App| app.world().resource::<Sky>().sun.x < -0.55;
-            let low = |app: &App| app.world().resource::<Sky>().sun.x > 0.3;
+            // start the shot half its own length before the sun stands highest over the pool,
+            // or lowest behind the ring, so that it is as bright at both its ends as it is at
+            // its start: the ring turns once in about six seconds, so a place on it sees three
+            // of daylight, and a shot that starts anywhere in that turn ends in the dark. The
+            // sun keeps its place among the stars while the wheel turns under it, so how far
+            // over the pool it ever gets is set by how far along the axis it stands.
+            let over = |app: &App| -app.world().resource::<Sky>().sun.x as f64;
+            let highest = {
+                let sun = app.world().resource::<Sky>().sun;
+                (1.0 - (sun.y * sun.y) as f64).sqrt()
+            };
+            let spin = app.world().resource::<Simulation>().drum.spin.0 as f64;
+            let half = (spin * DAY as f64 / 2.0).min(std::f64::consts::FRAC_PI_2);
+            let wanted = highest * half.cos() * if view.daylight { 1.0 } else { -1.0 };
+            let mut before = over(app);
             let mut waited = 0.0;
             loop {
                 hold(app, view);
-                if if view.daylight { high(app) } else { low(app) } {
+                let now = over(app);
+                let climbing = now > before;
+                before = now;
+                let ready = if view.daylight {
+                    climbing && now >= wanted
+                } else {
+                    !climbing && now <= wanted
+                };
+                if ready {
                     break;
                 }
-                testing::watch(app, Seconds(1.0 / 30.0));
-                waited += 1.0 / 30.0;
+                testing::watch(app, Seconds(1.0 / FPS as f32));
+                waited += 1.0 / FPS as f32;
                 assert!(
                     waited < 60.0,
                     "the sun never came round: it stands at {:?} with the ring spinning at {} rad/s",
@@ -745,6 +793,7 @@ fn cue(app: &mut App, cue: Cue) {
                     app.world().resource::<Simulation>().drum.spin.0
                 );
             }
+            hold(app, view);
         }
         Cue::Flood => {
             for k in 0..30 {
@@ -790,6 +839,7 @@ fn cue(app: &mut App, cue: Cue) {
                 Pool {
                     phi: site.phi,
                     y: site.y,
+                    shore: 0.0,
                 }
             };
             app.world_mut().insert_resource(pool);
@@ -825,8 +875,11 @@ fn cue(app: &mut App, cue: Cue) {
             let pool = {
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 let site = sim.drum.site;
-                // one island of a headland, raised in one place so that it comes up as a dome
-                // standing clear of the water, its sides shelving away under it into the shallows
+                // a headland: a dome standing clear of the water, on a terrace laid under it
+                // wide enough to hold a stretch of shallows round its foot. The ring is thirty
+                // metres across and the sea in it four deep, so the terrace can only be so
+                // wide before it is the ring: a shore here is steep, as a shore on a small
+                // island is.
                 for _ in 0..20 {
                     sim.drum.landscape.sculpt(
                         site.phi,
@@ -834,10 +887,17 @@ fn cue(app: &mut App, cue: Cue) {
                         HEADLAND_SPREAD,
                         HEADLAND_HEIGHT / 20.0,
                     );
+                    sim.drum.landscape.sculpt(
+                        site.phi,
+                        site.y,
+                        TERRACE_SPREAD,
+                        TERRACE_HEIGHT / 20.0,
+                    );
                 }
                 Pool {
                     phi: site.phi,
                     y: site.y,
+                    shore: 0.0,
                 }
             };
             app.world_mut().insert_resource(pool);
@@ -871,6 +931,22 @@ fn cue(app: &mut App, cue: Cue) {
                 testing::run(app, Seconds(0.4));
             }
             testing::run(app, Seconds(60.0));
+            // where the water's edge lies on the headland's flank: the first place going out
+            // from its top where the ground no longer stands above the level the sea found
+            let shore = {
+                let litres = app.world().resource::<Fluid>().litres().0 as f64;
+                let sim = app.world().resource::<Simulation>();
+                let level = sim.drum.landscape.flooded(litres / 1000.0).level.0 as f64;
+                let radius = sim.drum.ring.radius.0 as f64;
+                let mut arc = 0.0;
+                while arc < TERRACE_SPREAD * 2.0
+                    && sim.drum.landscape.sample(pool.phi + arc / radius, pool.y).0 > level
+                {
+                    arc += SHORE_STEP;
+                }
+                arc
+            };
+            app.world_mut().insert_resource(Pool { shore, ..pool });
             app.world_mut().resource_mut::<Settings>().collisions = true;
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             sim.avatar_mut().solid = true;
@@ -928,12 +1004,20 @@ const SEA_DIAMETER: f32 = 30.0;
 const SEA_WIDTH: f32 = 16.0;
 const HEADLAND_HEIGHT: f64 = 8.0;
 const HEADLAND_SPREAD: f64 = 11.0;
+/// The terrace the headland stands on, which holds the shallows round its foot.
+const TERRACE_HEIGHT: f64 = 3.2;
+const TERRACE_SPREAD: f64 = 17.0;
 const SEA_DEPTH: f64 = 5.0;
 const SEA_HEAPS: usize = 64;
 /// Where the avatar is let go over the sea, clear of the headland's shelf, and how far over the
 /// ground it starts: high enough to be over the water rather than in it.
 const DIVE_ARC: f64 = 24.0;
 const DIVE_HEIGHT: f64 = 6.0;
+/// How finely the headland's flank is walked to find where the water's edge falls on it.
+const SHORE_STEP: f64 = 0.1;
+/// How long a held shot lasts. A place on the ring sees about three seconds of daylight in
+/// every turn, and a shot held longer than that ends in the dark whatever it was of.
+const DAY: f32 = 2.5;
 
 /// A place about the pool, in the frame: `arc` metres round the ring from it, `y` along the
 /// axis and `height` over the ground there, which is under the ground, and out through the

@@ -9,8 +9,9 @@
 // what hits takes the sphere's depth and is shaded as the water is.
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
-#import optics::{rotate, mirrored, ring_run, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated}
+#import optics::{rotate, mirrored, ring_run, ring_seen, ring_up, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
 #import ripples::{Carried, carried, waves_carried, noise3}
+#import air::AIR_IOR
 
 struct Water {
     to_stars: vec4<f32>,
@@ -40,14 +41,17 @@ struct SurfaceVertex {
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<storage, read> droplets: array<vec4<f32>>;
 
 const PI: f32 = 3.14159265;
-const IOR: f32 = 1.333;
+// water's index against the air it is seen through rather than against vacuum
+const IOR: f32 = 1.333 / AIR_IOR;
 // air to water, so the mirror is faint face on
 const F0: f32 = 0.02;
-// how far through water anything can be seen at all
-const FARTHEST: f32 = 200.0;
 const DROP_ROUGHNESS: f32 = 0.05;
 // how far beyond a drop what is seen through it is taken from
 const DROP_REACH: f32 = 1.0;
+// water thinner than this many cells of the extraction grid is a film whose edge the grid
+// cannot make out: it is drawn the fainter the thinner it is, rather than ending at a rim the
+// grid's own shape gave it
+const FILM: f32 = 1.5;
 
 struct Fragment {
     @builtin(position) clip: vec4<f32>,
@@ -60,6 +64,9 @@ struct Fragment {
     @location(4) wheel_velocity: vec3<f32>,
     // on a droplet's square: the drop's centre and radius, otherwise zero
     @location(5) drop: vec4<f32>,
+    // how far the surface here stands clear of the ground under it, in cells of the grid it
+    // was extracted on
+    @location(6) sheet: f32,
 }
 
 struct Shaded {
@@ -71,6 +78,7 @@ struct Shaded {
 fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32) -> Fragment {
     var out: Fragment;
     out.drop = vec4(0.0);
+    out.sheet = 0.0;
     let world_from_local = get_world_from_local(instance);
     if (i < counters[1]) {
         let v = vertices[indices[i]];
@@ -81,6 +89,7 @@ fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32)
         out.foam = v.position.w;
         out.wheel_position = (v.position.xyz + water.anchor.xyz) * water.anchor.w;
         out.wheel_velocity = v.velocity.xyz * water.clock.y;
+        out.sheet = v.velocity.w;
         return out;
     }
     let square = i - counters[1];
@@ -113,15 +122,14 @@ fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32)
     return out;
 }
 
-/// Light dimmed by crossing this much water, and the water's own colour gathered over it.
-/// Absorption and scattering both take light out of a ray, and the share scattering takes is
-/// the share that comes back, so a stretch of water long enough to hide whatever lies beyond
-/// it settles at that share of the light falling on it, and nothing deeper changes it.
-fn through_water(colour: vec3<f32>, distance: f32, light: vec3<f32>) -> vec3<f32> {
-    let d = min(distance, FARTHEST);
-    let extinction = water.absorption.rgb + water.scatter.rgb;
-    let left = exp(-extinction * d);
-    return colour * left + water.scatter.rgb / extinction * light * (1.0 - left);
+/// What a ray loses to a metre of water, and the colour the water shows of its own where light
+/// `light` falls on it, being the share of a ray that scattering rather than absorption takes.
+fn extinction() -> vec3<f32> {
+    return water.absorption.rgb + water.scatter.rgb;
+}
+
+fn glow(light: vec3<f32>) -> vec3<f32> {
+    return water.scatter.rgb / extinction() * light;
 }
 
 /// A pixel of a droplet's square: the drop's sphere where the pixel's ray hits it.
@@ -159,7 +167,7 @@ fn droplet(in: Fragment) -> Shaded {
     if (dot(n, v) < 0.0) {
         // from within, the drop is water all round: only what is behind shows, through it
         let seen = seen_through(uv, depth_here, hit + dir * DROP_REACH);
-        out.colour = vec4(saturated(through_water(seen, t, light)), 1.0);
+        out.colour = vec4(saturated(through_water(seen, glow(light), extinction(), 0.0, t)), 1.0);
         return out;
     }
     let reflected = reflect(dir, n);
@@ -172,13 +180,13 @@ fn droplet(in: Fragment) -> Shaded {
     let chord = -2.0 * dot(entered, n) * radius;
     let exit = hit + entered * chord;
     let left = refract(entered, -normalize(exit - centre), IOR);
-    let seen = through_water(seen_through(uv, depth_here, exit + left * DROP_REACH), chord, light);
+    let seen = through_water(seen_through(uv, depth_here, exit + left * DROP_REACH), glow(light), extinction(), 0.0, chord);
     var colour = mix(seen, mirror, fresnel(dot(n, v), F0));
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
         colour += sunlight(i) * glint(n, v, l, DROP_ROUGHNESS, F0) * sun_shadow(i, hit, n, pixel);
     }
-    out.colour = vec4(saturated(colour), 1.0);
+    out.colour = vec4(saturated(through_ring_air(colour, hit + water.origin.xyz, -dir, t, water.ring.xy)), 1.0);
     return out;
 }
 
@@ -268,12 +276,13 @@ fn surface(in: Fragment) -> vec4<f32> {
     // the light falling on the water here, which whatever it scatters is lit by
     let pixel = in.clip.xy;
     let light = diffuse_light_at(in.world_position, n, pixel) / PI;
+    let up = ring_up(site, water.ring.x);
     let reflected = reflect(-v, n);
     // beyond the scene the mirror shows the ring, or from under water the bed, lit by the
     // light coming down through the surface and about as far off as the surface is
     var beyond = ring_seen(site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
     if (submerged) {
-        beyond = through_water(water.ground.rgb * light, distance, light);
+        beyond = through_water(water.ground.rgb * light, glow(light), extinction(), dot(reflected, up), distance);
     }
     // from outside the drum the screen shows the far sides of everything the mirror would
     // show the near sides of, so only the ring itself is mirrored there
@@ -293,7 +302,7 @@ fn surface(in: Fragment) -> vec4<f32> {
         // shows over a patch of the scene rather than a point of it
         let bend = length(waves.curve[0]) + length(waves.curve[1]) + length(waves.curve[2]);
         let spread = reach * (1.0 - 1.0 / IOR) * bend * footprint * amplitude;
-        seen = through_water(spread_over(uv, depth_here, in.world_position + r * reach, r, spread), column, light);
+        seen = through_water(spread_over(uv, depth_here, in.world_position + r * reach, r, spread), glow(light), extinction(), dot(r, up), column);
         f = fresnel(dot(n, v), F0);
     } else {
         let r = refract(-v, n, IOR);
@@ -306,7 +315,7 @@ fn surface(in: Fragment) -> vec4<f32> {
             f = fresnel(dot(n, v), F0);
         }
         // the mirror of the bed is seen through water too
-        mirror = through_water(mirror, column, light);
+        mirror = through_water(mirror, glow(light), extinction(), dot(reflected, up), column);
     }
 
     var colour = mix(seen, mirror, f);
@@ -326,7 +335,14 @@ fn surface(in: Fragment) -> vec4<f32> {
     colour = mix(colour, foam_colour, foam);
 
     if (submerged) {
-        colour = through_water(colour, distance, light);
+        colour = through_water(colour, glow(light), extinction(), dot(-v, up), distance);
+    }
+    // at the shore the sheet thins away to nothing over a stretch the grid cannot resolve, so
+    // it is given up rather than ended on the grid's own staircase
+    colour = mix(seen_through(uv, depth_here, in.world_position), colour, smoothstep(0.0, FILM, in.sheet));
+    if (!submerged) {
+        // with the eye out of the water, the air between it and the surface stands in the way
+        colour = through_ring_air(colour, site, v, distance, water.ring.xy);
     }
     return vec4(saturated(colour), 1.0);
 }
