@@ -10,7 +10,7 @@
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
 #import optics::{rotate, mirrored, ring_run, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated}
-#import ripples::{carried, waves_carried, noise3}
+#import ripples::{Carried, carried, waves_carried, noise3}
 
 struct Water {
     to_stars: vec4<f32>,
@@ -160,8 +160,10 @@ fn droplet(in: Fragment) -> Shaded {
         return out;
     }
     let reflected = reflect(dir, n);
-    let beyond = ring_seen(hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
-    let mirror = mirrored(hit, reflected, beyond);
+    var mirror = ring_seen(hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    if (water.ring.z > 0.5) {
+        mirror = mirrored(hit, reflected, mirror);
+    }
     // in through the near face, across the drop and out through the far one
     let entered = refract(dir, n, 1.0 / IOR);
     let chord = -2.0 * dot(entered, n) * radius;
@@ -188,6 +190,36 @@ fn fragment(in: Fragment) -> Shaded {
     return out;
 }
 
+/// What is seen through the surface at a point, averaged over a patch `spread` wide across
+/// the way `r` bends, so that the detail a pixel's own spread of slopes scrambles evens out
+/// instead of showing as a pattern.
+fn spread_over(uv: vec2<f32>, depth_here: f32, exit: vec3<f32>, r: vec3<f32>, spread: f32) -> vec3<f32> {
+    if (spread < 1e-4) {
+        return seen_through(uv, depth_here, exit);
+    }
+    var e1 = cross(r, vec3(0.0, 1.0, 0.0));
+    if (dot(e1, e1) < 1e-6) {
+        e1 = cross(r, vec3(1.0, 0.0, 0.0));
+    }
+    e1 = normalize(e1) * spread;
+    let e2 = normalize(cross(r, e1)) * spread;
+    return 0.25 * (seen_through(uv, depth_here, exit + e1)
+        + seen_through(uv, depth_here, exit - e1)
+        + seen_through(uv, depth_here, exit + e2)
+        + seen_through(uv, depth_here, exit - e2));
+}
+
+/// The bubbles of the foam at a scale, carried on the flow: those too small to resolve at a
+/// pixel this wide are left at their mean, so far foam is even rather than speckled.
+fn bubble_grain(run: Carried, scale: f32, footprint: f32) -> f32 {
+    let resolved = smoothstep(0.5 / scale, 0.1 / scale, footprint);
+    if (resolved <= 0.0) {
+        return 0.5;
+    }
+    let grain = noise3(run.a * scale) * run.weight_a + noise3(run.b * scale) * (1.0 - run.weight_a);
+    return mix(0.5, grain, resolved);
+}
+
 /// A pixel of the water's surface.
 fn surface(in: Fragment) -> vec4<f32> {
     let eye = view.world_position;
@@ -206,10 +238,12 @@ fn surface(in: Fragment) -> vec4<f32> {
     let flow = in.wheel_velocity;
     let churn = clamp(length(flow) * 1.5 + in.foam * 2.0, 0.0, 1.0);
     let run = carried(in.wheel_position, flow, t);
-    // the width of a pixel at this distance, for a 60 degree view
-    let footprint = distance * 1.15 / view.viewport.w;
-    let slope = waves_carried(run, t, footprint).slope;
-    let amplitude = 1.0 + 4.0 * churn;
+    // how wide a pixel is on the water here, for a 60 degree view: at a grazing angle a pixel
+    // covers a long stretch of it, so the detail that stretch would average out is left out
+    let footprint = distance * 1.15 / view.viewport.w / max(abs(dot(n, v)), 0.02);
+    let waves = waves_carried(run, t, footprint);
+    let slope = waves.slope;
+    let amplitude = 1.0 + churn;
     let g = rotate(water.from_water, slope) * amplitude;
     n = normalize(n + g - n * dot(n, g));
     if (dot(n, v) < 0.0) {
@@ -238,13 +272,25 @@ fn surface(in: Fragment) -> vec4<f32> {
     if (submerged) {
         beyond = through_water(water.ground.rgb * light, distance, light);
     }
-    var mirror = mirrored(in.world_position, reflected, beyond);
+    // from outside the drum the screen shows the far sides of everything the mirror would
+    // show the near sides of, so only the ring itself is mirrored there
+    // from outside the drum the screen shows the far sides of everything the mirror would
+    // show the near sides of, and from under water the bed the surface mirrors lies behind
+    // the surface itself, so the mirror is only marched across the screen from inside the air
+    var mirror = beyond;
+    if (water.ring.z > 0.5 && !submerged) {
+        mirror = mirrored(in.world_position, reflected, beyond);
+    }
     var seen: vec3<f32>;
     var f: f32;
     if (!submerged) {
         let r = refract(-v, n, 1.0 / IOR);
         let reach = min(column, 6.0) * 0.5;
-        seen = through_water(seen_through(uv, depth_here, in.world_position + r * reach), column, light);
+        // a pixel covers a stretch of the surface with a spread of slopes, which bends what it
+        // shows over a patch of the scene rather than a point of it
+        let bend = length(waves.curve[0]) + length(waves.curve[1]) + length(waves.curve[2]);
+        let spread = reach * (1.0 - 1.0 / IOR) * bend * footprint * amplitude;
+        seen = through_water(spread_over(uv, depth_here, in.world_position + r * reach, r, spread), column, light);
         f = fresnel(dot(n, v), F0);
     } else {
         let r = refract(-v, n, IOR);
@@ -267,8 +313,8 @@ fn surface(in: Fragment) -> vec4<f32> {
     }
 
     // foam: bubbles ride on the flow like the ripples
-    let grain = noise3(run.a * 24.0) * run.weight_a + noise3(run.b * 24.0) * (1.0 - run.weight_a);
-    let grain2 = noise3(run.a * 7.0) * run.weight_a + noise3(run.b * 7.0) * (1.0 - run.weight_a);
+    let grain = bubble_grain(run, 24.0, footprint);
+    let grain2 = bubble_grain(run, 7.0, footprint);
     let lace = in.foam + (grain - 0.5) * 0.5 + (grain2 - 0.5) * 0.35;
     let foam = smoothstep(0.42, 0.7, lace);
     // bubbles: brighter where the lace is thick, with dark water showing between them

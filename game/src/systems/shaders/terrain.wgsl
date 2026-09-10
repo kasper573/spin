@@ -112,7 +112,9 @@ fn column_over(p: vec3<f32>) -> Column {
 
 /// How much of the sun's light reaches the bed through this much water, by way of the surface
 /// above: what crossing the water leaves of it, and how the ripples it came through gather it.
-fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column) -> f32 {
+/// Ripples too small to resolve at a pixel `footprint` wide are left out, since their caustics
+/// even out over the pixel rather than showing as a pattern in it.
+fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, footprint: f32) -> f32 {
     let cos_in = dot(l, up);
     if (cos_in <= 0.02) {
         return 0.0;
@@ -124,7 +126,7 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column) ->
     let down = refract(-l, up, 1.0 / IOR);
     let entry = p - down * path;
     let run = carried(entry, water.flow, terrain.clock.x);
-    let w = waves_carried(run, terrain.clock.x, 0.0);
+    let w = waves_carried(run, terrain.clock.x, footprint);
     // rays bent by the ripples' slopes converge or spread by the time they reach the bed
     let spread = (1.0 - 1.0 / IOR) * path;
     let e1 = vec3(0.0, 1.0, 0.0);
@@ -144,10 +146,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // the ground has a face toward the eye whichever way it was wound; seen from below,
     // through the glass, it is the dirt pressed against the glass
     var n = normalize(in.world_normal);
-    let underside = dot(n, view.world_position - p) < 0.0;
+    let to_eye = view.world_position - p;
+    let underside = dot(n, to_eye) < 0.0;
     if (underside) {
         n = -n;
     }
+    // how wide a pixel is on the ground here, for a 60 degree view: at a grazing angle a pixel
+    // covers a long stretch of it
+    let range = length(to_eye);
+    let footprint = range * 1.15 / view.viewport.w / max(dot(n, to_eye / range), 0.02);
     var light = 0.0;
     var height = 0.0;
 #ifdef VERTEX_UVS_A
@@ -190,7 +197,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             let cos_in = dot(l, up);
             let sin_r2 = (1.0 - cos_in * cos_in) / (IOR * IOR);
             let path = water.depth / sqrt(max(1.0 - sin_r2, 1e-3));
-            through = exp(-terrain.absorption.rgb * path) * sunlight_through(at, up, l, water);
+            through = exp(-terrain.absorption.rgb * path) * sunlight_through(at, up, l, water, footprint);
         }
         colour += sunlight(i) * albedo / PI * ndl * shadow * through;
     }

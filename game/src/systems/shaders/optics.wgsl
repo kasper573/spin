@@ -12,6 +12,8 @@
 
 const PI: f32 = 3.14159265;
 const MARCH_STEPS: i32 = 28;
+// how many times the stretch of the march that met the scene is halved to find where
+const REFINE_STEPS: i32 = 5;
 // the brightest the eye tells from white: the sun's mirror image is thousands of times
 // brighter than that, and saturates the eye rather than flooding the view
 const SATURATION: f32 = 4.0;
@@ -61,6 +63,7 @@ fn depth_of(world: vec3<f32>) -> f32 {
 /// it against the depth of the scene, or else what lies `beyond` the scene.
 fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
     var t = 0.02;
+    var last = 0.0;
     for (var i = 0; i < MARCH_STEPS; i++) {
         let q = origin + dir * t;
         let s = screen_uv(q);
@@ -70,13 +73,27 @@ fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
         let gap = s.z - scene_depth(s.xy);
         if (gap > 0.0) {
             if (gap < t * 0.6 + 0.05) {
+                // the scene was met somewhere over the last stretch: narrow it down
+                var near = last;
+                var far = t;
+                for (var k = 0; k < REFINE_STEPS; k++) {
+                    let mid = 0.5 * (near + far);
+                    let m = screen_uv(origin + dir * mid);
+                    if (m.z - scene_depth(m.xy) > 0.0) {
+                        far = mid;
+                    } else {
+                        near = mid;
+                    }
+                }
+                let hit = screen_uv(origin + dir * far);
                 // fade out toward the edges of the screen, where the view runs out
-                let edge = s.xy * (1.0 - s.xy);
+                let edge = hit.xy * (1.0 - hit.xy);
                 let fade = smoothstep(0.0, 0.02, min(edge.x, edge.y));
-                return mix(beyond, behind(s.xy), fade);
+                return mix(beyond, behind(hit.xy), fade);
             }
             break;
         }
+        last = t;
         t *= 1.28;
     }
     return beyond;
@@ -100,9 +117,9 @@ fn sun_reaches(q: vec3<f32>, up: vec3<f32>, l: vec3<f32>, ring: vec2<f32>) -> bo
 }
 
 /// How far a ray from inside the ring runs before it meets the ring's wall, or leaves through
-/// a cap, whichever comes first, and whether it was the wall. `at` and `dir` are in the site's
+/// a cap, whichever comes first, and whether it was the wall. `at` and `dir` are in the ring's
 /// frame, whose origin lies on the wall with the axis `ring.x` in along -x, and whose caps lie
-/// `ring.y` out along y. The far root is found without the near one's cancellation, so it
+/// `ring.y` out along y from the ring's middle. The far root is found without the near one's cancellation, so it
 /// holds for any ring. A ray starting outside the ring runs nowhere in it.
 struct RingRun {
     distance: f32,
@@ -131,10 +148,10 @@ fn ring_run(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>) -> RingRun {
     if (abs(dir.y) > 1e-6) {
         let cap = (select(-ring.y, ring.y, dir.y > 0.0) - at.y) / dir.y;
         if (cap < t) {
-            return RingRun(cap, false);
+            return RingRun(max(cap, 0.0), false);
         }
     }
-    return RingRun(t, true);
+    return RingRun(max(t, 0.0), true);
 }
 
 /// What a ray meets once it has left the screen, inside the ring: the ground where it strikes

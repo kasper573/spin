@@ -36,8 +36,8 @@ const SHADER: &str = "embedded://game/systems/shaders/water.wgsl";
 pub const ABSORPTION: Vec3 = Vec3::new(0.24, 0.04, 0.012);
 pub const SCATTER: Vec3 = Vec3::new(0.012, 0.11, 0.15);
 pub const SCATTER_PER_METRE: f32 = 0.14;
-/// The hull is this wet when the eye is under water.
-const SUBMERGED: f64 = 0.9;
+/// Water's refractive index, which what is seen through water from within it bends by.
+pub const WATER_IOR: f32 = 1.333;
 
 pub struct WaterPlugin;
 
@@ -62,9 +62,11 @@ struct WaterUniform {
     to_stars: Vec4,
     /// Turns a vector of the water's frame into the drum's.
     from_water: Vec4,
-    /// Where the viewpoint lies in the site's frame, in metres.
+    /// Where the viewpoint lies in the ring's frame, in metres: round the ring from the site,
+    /// and along the axis from the ring's middle.
     origin: Vec4,
-    /// The ring's radius and half width, in metres.
+    /// The ring's radius and half width, in metres, and whether the eye is inside the drum,
+    /// where what the screen shows can be mirrored.
     ring: Vec4,
     /// The ground's colour as seen from across the ring.
     ground: Vec4,
@@ -83,6 +85,12 @@ struct WaterUniform {
 struct WaterMaterial {
     #[uniform(0)]
     water: WaterUniform,
+    /// Where the water is drawn among what else lets the scene through: the glass and the
+    /// water each show what was drawn before them, so what lies beyond the other must be
+    /// drawn first: the water when the eye is outside the drum, the glass when it is inside.
+    /// Added to the water's sorting distance, which grows toward the eye, so positive puts
+    /// it last.
+    order: f32,
     #[storage(1, read_only)]
     vertices: Handle<ShaderBuffer>,
     #[storage(2, read_only)]
@@ -106,6 +114,10 @@ impl Material for WaterMaterial {
         true
     }
 
+    fn depth_bias(&self) -> f32 {
+        self.order
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -122,7 +134,11 @@ struct Water(Handle<WaterMaterial>);
 
 /// The mesh the water is drawn through, turned with the drum.
 #[derive(Component)]
-struct WaterMesh;
+pub struct WaterMesh;
+
+/// Far enough along the sorting distance to put the water before or after anything else in
+/// the scene that lets it through.
+const ORDER: f32 = 1.0e6;
 
 /// The surface is extracted about the site, so its vertices stay small near the viewer.
 fn anchor(sim: Res<Simulation>, mut fluid: ResMut<Fluid>) {
@@ -149,6 +165,7 @@ fn spawn(
     };
     let material = materials.add(WaterMaterial {
         water,
+        order: ORDER,
         vertices: buffers.surface.polished.clone(),
         indices: buffers.surface.indices.clone(),
         counters: buffers.surface.counters.clone(),
@@ -192,14 +209,21 @@ fn tick(
         Quat::from_xyzw(x as f32, y as f32, z as f32, w as f32).inverse()
     };
     if let Some(mut material) = materials.get_mut(&water.0) {
+        let enclosed = sim.drum.encloses(sim.avatar().p);
+        material.order = if enclosed { ORDER } else { -ORDER };
         let uniform = &mut material.water;
         let stars = sky.rotation.inverse();
         uniform.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
         uniform.from_water = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);
         let [x, y, z] = viewpoint.origin;
-        uniform.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        uniform.origin = Vec4::new(x as f32, (y + sim.drum.site.y) as f32, z as f32, 0.0);
         let ring = sim.drum.ring;
-        uniform.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
+        uniform.ring = Vec4::new(
+            ring.radius.0,
+            ring.half_width.0,
+            if enclosed { 1.0 } else { 0.0 },
+            0.0,
+        );
         let anchor = fluid.surface().anchor.as_vec3() * fluid.surface().cell;
         uniform.anchor = anchor.extend(metres_per_unit as f32);
         uniform.clock = Vec4::new(
@@ -231,7 +255,7 @@ fn submerge(
     sim: Res<Simulation>,
     cameras: Query<(Entity, Has<DistanceFog>), With<PlayerCamera>>,
 ) {
-    let under = sim.avatar().wet > SUBMERGED;
+    let under = sim.submerged();
     // what the water scatters is lit by the light bounced round the ring, as the eye sees it
     let glow = SCATTER * scene::bounce_light();
     for (camera, fogged) in &cameras {

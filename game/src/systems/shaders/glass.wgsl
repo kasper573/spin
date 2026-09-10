@@ -27,7 +27,6 @@ struct Glass {
 
 const IOR: f32 = 1.52;
 // glass mirrors this much face on
-const F0: f32 = 0.04;
 const ROUGHNESS: f32 = 0.04;
 // the grooves' sides fall this steeply: depth over half their width
 const SLANT: f32 = 1.0;
@@ -98,10 +97,13 @@ fn bevel(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> Facet {
 /// what the face mirrors, with the sun glinting off it.
 fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let cos_theta = max(dot(face, v), 0.0);
+    // the glass against what the eye is in, air or water
+    let eta = IOR / glass.ring.w;
+    let f0 = (eta - 1.0) * (eta - 1.0) / ((eta + 1.0) * (eta + 1.0));
     // a pane has two faces: what the first passes, the second mirrors back in part
-    let f = fresnel(cos_theta, F0);
+    let f = fresnel(cos_theta, f0);
     let mirrored_share = f + (1.0 - f) * (1.0 - f) * f / (1.0 - f * f);
-    var inside = refract(-v, face, 1.0 / IOR);
+    var inside = refract(-v, face, 1.0 / eta);
     if (all(inside == vec3(0.0))) {
         inside = -v;
     }
@@ -112,12 +114,17 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     }
     let passed = seen_through(uv, depth_of(p), exit + beyond * REACH) * glass.tint.rgb;
     let reflected = reflect(-v, face);
-    let mirror = mirrored(p, reflected, ring_seen(p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb));
+    // from outside the drum the screen shows the far sides of everything the mirror would
+    // show the near sides of, so only the ring itself is mirrored there
+    var mirror = ring_seen(p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb);
+    if (glass.ring.z > 0.5) {
+        mirror = mirrored(p, reflected, mirror);
+    }
     var colour = mix(passed, mirror, mirrored_share);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
         let pixel = view.viewport.xy + uv * view.viewport.zw;
-        colour += sunlight(i) * glint(face, v, l, ROUGHNESS, F0) * sun_shadow(i, p, face, pixel);
+        colour += sunlight(i) * glint(face, v, l, ROUGHNESS, f0) * sun_shadow(i, p, face, pixel);
     }
     return colour;
 }

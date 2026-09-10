@@ -33,6 +33,8 @@ use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, Shift};
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
+/// The hull is this wet when the eye is under water.
+const SUBMERGED: f64 = 0.9;
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -332,6 +334,11 @@ impl Simulation {
 
     pub fn shapes(&self) -> &[BodyShape] {
         &self.shapes
+    }
+
+    /// Whether the eye is under water: the avatar wet over its head.
+    pub fn submerged(&self) -> bool {
+        self.avatar().wet > SUBMERGED
     }
 
     pub fn avatar(&self) -> &Body {

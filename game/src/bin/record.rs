@@ -79,6 +79,9 @@ struct Phase {
     sculpting: bool,
     /// Whether water is poured at the crosshair throughout.
     pouring: bool,
+    /// A viewpoint the eye is held at for the whole stretch: a ghost let go of falls out
+    /// through the ring within a second, taking the view with it.
+    hold: Option<View>,
 }
 
 /// The time the turning thrusters at `level` take to turn the body by `radians`.
@@ -96,6 +99,7 @@ fn script() -> Vec<Phase> {
         cue: Cue::None,
         sculpting: false,
         pouring: false,
+        hold: None,
     };
     let eased = |seconds, held: &[Thruster], level: f32, caption| {
         let mut pilot = PilotInput::default();
@@ -218,6 +222,7 @@ fn marker_script() -> Vec<Phase> {
             cue: Cue::None,
             sculpting,
             pouring: false,
+            hold: None,
         }
     };
     let (pan, sweep) = (0.3, 0.55);
@@ -318,6 +323,7 @@ fn water_script() -> Vec<Phase> {
             cue: Cue::None,
             sculpting: false,
             pouring: false,
+            hold: None,
         }
     };
     let glance = 0.5;
@@ -377,6 +383,40 @@ fn water_script() -> Vec<Phase> {
             )
         },
         phase(4.0, &[], 0.0, "the pour settling"),
+        {
+            let view = View {
+                eye: [-2.0, -10.0, 2.0],
+                at: [-2.0, 0.0, 1.0],
+                daylight: true,
+            };
+            Phase {
+                cue: Cue::Look(view),
+                hold: Some(view),
+                ..phase(
+                    4.0,
+                    &[],
+                    0.0,
+                    "from outside the ring's end: the water seen in through the glass disc",
+                )
+            }
+        },
+        {
+            let view = View {
+                eye: [-2.0, 25.0, -25.0],
+                at: [-2.0, 0.0, 0.0],
+                daylight: true,
+            };
+            Phase {
+                cue: Cue::Look(view),
+                hold: Some(view),
+                ..phase(
+                    4.0,
+                    &[],
+                    0.0,
+                    "the whole ring from 35 m out, the water lying in it",
+                )
+            }
+        },
     ]
 }
 
@@ -453,6 +493,7 @@ fn survey_script() -> Vec<Phase> {
         cue: Cue::Basin,
         sculpting: false,
         pouring: false,
+        hold: None,
     }];
     for daylight in [false, true] {
         for (eye, at, caption) in views {
@@ -463,10 +504,21 @@ fn survey_script() -> Vec<Phase> {
                 cue: Cue::Look(View { eye, at, daylight }),
                 sculpting: false,
                 pouring: false,
+                hold: None,
             });
         }
     }
     script
+}
+
+/// Hold the eye at a viewpoint about the pool, as a ghost.
+fn hold(app: &mut App, view: View) {
+    let pool = *app.world().resource::<Pool>();
+    let mut sim = app.world_mut().resource_mut::<Simulation>();
+    sim.avatar_mut().solid = false;
+    let eye = spot(&sim, pool, view.eye);
+    let at = spot(&sim, pool, view.at);
+    stand(&mut sim, eye, at);
 }
 
 fn cue(app: &mut App, cue: Cue) {
@@ -474,18 +526,13 @@ fn cue(app: &mut App, cue: Cue) {
         Cue::None => {}
         Cue::Look(view) => {
             app.world_mut().resource_mut::<Settings>().collisions = false;
-            let pool = *app.world().resource::<Pool>();
             // wait for the sun to stand over the pool, or to shine from behind the ring, held
             // at the viewpoint all the while: a ghost let go falls out through the ring
             let high = |app: &App| app.world().resource::<Sky>().sun.x < -0.55;
             let low = |app: &App| app.world().resource::<Sky>().sun.x > 0.3;
             let mut waited = 0.0;
             loop {
-                let mut sim = app.world_mut().resource_mut::<Simulation>();
-                sim.avatar_mut().solid = false;
-                let eye = spot(&sim, pool, view.eye);
-                let at = spot(&sim, pool, view.at);
-                stand(&mut sim, eye, at);
+                hold(app, view);
                 if if view.daylight { high(app) } else { low(app) } {
                     break;
                 }
@@ -695,6 +742,9 @@ fn main() {
                         let sim = world.resource::<Simulation>();
                         sim.inject(&mut fluid, at.to_array(), count.round() as u32)
                     });
+            }
+            if let Some(view) = phase.hold {
+                hold(&mut app, view);
             }
             testing::run(&mut app, frame_time);
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());

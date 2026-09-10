@@ -27,6 +27,7 @@ use crate::core::math::Vec3d;
 use crate::systems::scene::{SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
+use crate::systems::water::WATER_IOR;
 
 /// The two tints the grass is tiled in, and the dirt under it.
 const GRASS: Color = Color::srgb(0.36, 0.62, 0.24);
@@ -111,10 +112,13 @@ struct GlassMaterial {
     /// The pane size round the wall and along it, the groove width and the glass thickness.
     #[uniform(0)]
     panes: Vec4,
-    /// Where the viewpoint lies in the site's frame, in metres.
+    /// Where the viewpoint lies in the ring's frame, in metres: round the ring from the site,
+    /// and along the axis from the ring's middle.
     #[uniform(0)]
     origin: Vec4,
-    /// The ring's radius and half width, in metres.
+    /// The ring's radius and half width, in metres; whether the eye is inside the drum,
+    /// where what the screen shows can be mirrored; and the refractive index of what the
+    /// eye is in, air or water.
     #[uniform(0)]
     ring: Vec4,
     /// The ground's colour as seen from across the ring.
@@ -231,7 +235,7 @@ fn spawn(
             background: SPACE.to_linear(),
             panes: Vec4::ZERO,
             origin: Vec4::ZERO,
-            ring: Vec4::ZERO,
+            ring: Vec4::new(0.0, 0.0, 1.0, 1.0),
             ground: ground_albedo(),
         }),
         metal: standard.add(StandardMaterial {
@@ -350,9 +354,16 @@ fn light(
         let stars = sky.rotation.inverse();
         material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
         let [x, y, z] = viewpoint.origin;
-        material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        material.origin = Vec4::new(x as f32, (y + sim.drum.site.y) as f32, z as f32, 0.0);
         let ring = sim.drum.ring;
-        material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
+        let enclosed = sim.drum.encloses(sim.avatar().p);
+        let medium = if sim.submerged() { WATER_IOR } else { 1.0 };
+        material.ring = Vec4::new(
+            ring.radius.0,
+            ring.half_width.0,
+            if enclosed { 1.0 } else { 0.0 },
+            medium,
+        );
     }
 }
 

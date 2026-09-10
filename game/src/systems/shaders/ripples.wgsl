@@ -1,7 +1,9 @@
 // The ripples on the water: a field of small waves of different lengths crossing at odd
-// angles, each running at its own pace and coming in patches, over a drift of noise that
-// breaks their regularity, carried along by the flow. The same field bends what is seen through the surface and focuses
-// the sunlight that falls through it onto the bed, so both are drawn from here.
+// angles, each running at its own pace and coming in patches, carried along by the flow. The
+// waves' phases are left alone by the patches, so that the slope this gives back stays the
+// gradient of the height it gives back, and the surface shades as the water it stands for.
+// The same field bends what is seen through the surface and focuses the sunlight that falls
+// through it onto the bed, so both are drawn from here.
 #define_import_path ripples
 
 const PI: f32 = 3.14159265;
@@ -79,8 +81,7 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
         }
         let k = normalize(wave.xyz) * (2.0 * PI / length);
         let pace = 2.0 * PI * 0.25 / length;
-        let wander = noise3(x * 1.7 + f32(i) * 7.3) - 0.5;
-        let phase = dot(k, x) - pace * t * (1.0 + 0.3 * f32(i % 2)) + wander * 2.5;
+        let phase = dot(k, x) - pace * t * (1.0 + 0.3 * f32(i % 2));
         // each kind of wave comes in drifting patches rather than everywhere at once
         let swell = noise3(x * (0.5 / length) + vec3(f32(i) * 3.1, t * 0.08, -t * 0.05));
         let height = STEEPNESS * length * resolved * (0.25 + 1.5 * swell * swell);
