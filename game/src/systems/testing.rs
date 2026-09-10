@@ -368,6 +368,25 @@ pub fn run(app: &mut App, seconds: Seconds) {
     }
 }
 
+/// Run the simulation for this long without drawing it: a test that only needs the water to
+/// settle should not pay to look at every frame of it on the way. The water's kernels run
+/// before any camera in the render graph, so it steps exactly as it would with the eye open.
+pub fn run_unseen(app: &mut App, seconds: Seconds) {
+    watching(app, false);
+    run(app, seconds);
+    watching(app, true);
+}
+
+/// Whether the player's camera draws what it sees.
+fn watching(app: &mut App, drawing: bool) {
+    let mut cameras = app
+        .world_mut()
+        .query_filtered::<&mut Camera, With<PlayerCamera>>();
+    for mut camera in cameras.iter_mut(app.world_mut()) {
+        camera.is_active = drawing;
+    }
+}
+
 /// Run one frame of this much simulated time without waiting for the water's report on it.
 pub fn frame(app: &mut App, seconds: Seconds) {
     app.world_mut()
@@ -430,6 +449,16 @@ pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
 }
 
 /// Point the player's camera at an offscreen image of this size, for reading frames back.
+/// Draw what the player's camera sees into this image from now on.
+pub fn draw_into(app: &mut App, image: &Handle<Image>) {
+    let mut cameras = app
+        .world_mut()
+        .query_filtered::<&mut RenderTarget, With<PlayerCamera>>();
+    for mut target in cameras.iter_mut(app.world_mut()) {
+        *target = RenderTarget::from(image.clone());
+    }
+}
+
 pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> {
     app.update();
     let mut image = Image::new_fill(
@@ -446,12 +475,7 @@ pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> 
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
     let handle = app.world_mut().resource_mut::<Assets<Image>>().add(image);
-    let mut cameras = app
-        .world_mut()
-        .query_filtered::<&mut RenderTarget, With<PlayerCamera>>();
-    for mut target in cameras.iter_mut(app.world_mut()) {
-        *target = RenderTarget::from(handle.clone());
-    }
+    draw_into(app, &handle);
     handle
 }
 

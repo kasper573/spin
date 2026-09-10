@@ -15,39 +15,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # The page is built and tried in the browser while the simulation's own tests run beside it:
+  # the tests are the long pole, and nothing in them is needed to build the page.
+  page:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - name: Install the pinned toolchain
-        run: rustup show
-      - name: Install wasm-bindgen-cli matching the lockfile
-        # `just wasm` post-processes the client with `wasm-bindgen`, whose version must match the
-        # `wasm-bindgen` crate exactly; grab that prebuilt release rather than compiling the CLI.
-        run: |
-          version=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = "|"/, ""); print}' Cargo.lock)
-          curl -sSfL "https://github.com/rustwasm/wasm-bindgen/releases/download/${version}/wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp
-          sudo install "/tmp/wasm-bindgen-${version}-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/wasm-bindgen
-          wasm-bindgen --version
-      - name: Install Linux system libraries
-        # `-sys` crates link system C libraries cargo can't supply: the x11 and gl libs the native
-        # desktop, bench and lint binaries need to compile.
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft* /etc/apt/sources.list.d/azure*
-          sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev \
-            libxrender-dev libxfixes-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libudev-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust
         with:
-          cache-on-failure: "true"
-      - name: Lint and test
-        run: |
-          just lint
-          just test
+          cache: page
+      - name: Lint
+        run: just lint
       - name: Build the page
         run: just dist
       - name: End-to-end test
@@ -63,8 +44,21 @@ jobs:
         with:
           path: dist
 
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust
+        with:
+          cache: test
+      - name: Test
+        run: just test
+
   deploy:
-    needs: build
+    needs: [page, test]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

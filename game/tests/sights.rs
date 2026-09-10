@@ -10,9 +10,9 @@ use bevy::prelude::*;
 use game::core::avatar::{self, Gyros};
 use game::core::fluid::Fluid;
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
-use game::core::units::{Metres, Seconds};
+use game::core::units::{Metres, Radians, Seconds};
 use game::systems::drum::{DEFAULT_RING, Ring};
-use game::systems::scene::Sky;
+use game::systems::scene::SUN_DIRECTION;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing::{self, Headless};
@@ -20,8 +20,16 @@ use game::systems::water::WaterMesh;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+/// The eye adapts to the light of a sight before it is drawn, and light is the same however
+/// big the picture is, so it adapts on a small one: drawing is dear where there is no GPU.
+const ADAPTING_WIDTH: u32 = WIDTH / 8;
+const ADAPTING_HEIGHT: u32 = HEIGHT / 8;
 /// A pixel counts as changed when a channel moves by this much, out of 255.
 const CHANGED: i32 = 20;
+/// How long the eye is given to adapt to the light of a sight before it is drawn, and in how
+/// many steps: the eye adapts several stops a second, so a second of it is plenty.
+const ADAPTING: f32 = 1.0;
+const ADAPTING_STEPS: usize = 15;
 
 /// A place about the ring, in the frame: `arc` metres round the ring from wheel angle zero,
 /// `y` along the axis and `height` over the ground there, out through the glass when negative.
@@ -65,19 +73,33 @@ fn look(app: &mut App, eye: [f64; 3], at: [f64; 3]) {
     sim.gyros = Gyros::holding(sim.avatar());
 }
 
-/// Wait, held at the viewpoint, for the sun to stand over it or to shine from behind the ring.
-fn wait_for_sun(app: &mut App, eye: [f64; 3], at: [f64; 3], daylight: bool) {
-    let mut waited = 0.0;
-    loop {
+/// Turn the wheel so the sun stands over the site, or behind the ring from it. The sun keeps
+/// its place among the stars and the wheel turns under it, so a sight sets the turn it wants
+/// rather than running the ring round to it.
+fn face_the_sun(app: &mut App, daylight: bool) {
+    let mut sim = app.world_mut().resource_mut::<Simulation>();
+    // the sun stands over the site where its reach along the site's own up is greatest, and
+    // the site's up is -x in the drum's frame
+    let over = (SUN_DIRECTION.z as f64).atan2(SUN_DIRECTION.x as f64) + std::f64::consts::PI;
+    let turn = if daylight {
+        over
+    } else {
+        over + std::f64::consts::PI
+    };
+    sim.drum.angle = Radians(sim.drum.site.phi - turn);
+}
+
+/// Hold the eye at the viewpoint, under the sun it asked for, while the eye adapts to the
+/// light there: a ghost let go of falls out through the ring, so it is stood up again at every
+/// step of the while, and the wheel is turned back under the sun with it.
+fn settle_the_eye(app: &mut App, eye: [f64; 3], at: [f64; 3], daylight: bool) {
+    for _ in 0..ADAPTING_STEPS {
         look(app, eye, at);
-        let sun = app.world().resource::<Sky>().sun.x;
-        if (daylight && sun < -0.55) || (!daylight && sun > 0.3) {
-            return;
-        }
-        testing::run(app, Seconds(1.0 / 30.0));
-        waited += 1.0 / 30.0;
-        assert!(waited < 30.0, "the sun never came round");
+        face_the_sun(app, daylight);
+        testing::run(app, Seconds(ADAPTING / ADAPTING_STEPS as f32));
     }
+    look(app, eye, at);
+    face_the_sun(app, daylight);
 }
 
 fn inject(app: &mut App, at: [f64; 3], count: u32) {
@@ -94,9 +116,9 @@ fn fill_half(app: &mut App) {
         let arc = k as f64 * 1.5;
         let y = ((k % 4) as f64 - 1.5) * 2.5;
         inject(app, [arc, y, 1.8], 1500);
-        testing::run(app, Seconds(0.5));
+        testing::run_unseen(app, Seconds(0.5));
     }
-    testing::run(app, Seconds(40.0));
+    testing::run_unseen(app, Seconds(40.0));
 }
 
 /// Two ridges across the ring with a pool laid in the valley between them, and left to settle.
@@ -118,9 +140,9 @@ fn pool(app: &mut App) {
         let arc = -1.5 - (k % 3) as f64 * 2.5;
         let y = (k / 3) as f64 * 1.5 - 3.0;
         inject(app, [arc, y, 1.8], 500);
-        testing::run(app, Seconds(1.0));
+        testing::run_unseen(app, Seconds(1.0));
     }
-    testing::run(app, Seconds(20.0));
+    testing::run_unseen(app, Seconds(20.0));
 }
 
 /// The ring spun up by half, so the water is left behind and churns as it catches up.
@@ -131,18 +153,20 @@ fn churn(app: &mut App) {
         let spin = settings.spin.0 * 1.5;
         Dial::Spin.set(&mut settings, spin);
     }
-    testing::run(app, Seconds(7.0));
+    testing::run_unseen(app, Seconds(7.0));
 }
 
 /// A heap of water let go high over the pool, caught as it breaks on the surface.
 fn spray(app: &mut App) {
     inject(app, [-2.0, 0.0, 4.5], 300);
-    testing::run(app, Seconds(1.25));
+    testing::run_unseen(app, Seconds(1.25));
 }
 
 struct Sight {
     app: Headless,
     image: Handle<Image>,
+    /// The picture the eye adapts on, which is never looked at.
+    glimpse: Handle<Image>,
     dir: PathBuf,
 }
 
@@ -163,13 +187,19 @@ impl Sight {
             app.insert_resource(Simulation::new(ring));
         }
         testing::run(&mut app, Seconds(0.5));
+        let glimpse = testing::render_to_image(&mut app, ADAPTING_WIDTH, ADAPTING_HEIGHT);
         let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
         build(&mut app);
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("sights")
             .join(scene);
         fs::create_dir_all(&dir).expect("create the sights folder");
-        Sight { app, image, dir }
+        Sight {
+            app,
+            image,
+            glimpse,
+            dir,
+        }
     }
 
     fn shown(&mut self, shown: bool) {
@@ -203,8 +233,9 @@ impl Sight {
     /// The view from `eye` toward `at`, with the water and without, once the sun stands as
     /// asked; the frame without the water is drawn from the very same moment.
     fn view(&mut self, name: &str, eye: [f64; 3], at: [f64; 3], daylight: bool) -> View {
-        wait_for_sun(&mut self.app, eye, at, daylight);
-        testing::run(&mut self.app, Seconds(1.0 / 30.0));
+        testing::draw_into(&mut self.app, &self.glimpse);
+        settle_the_eye(&mut self.app, eye, at, daylight);
+        testing::draw_into(&mut self.app, &self.image);
         self.held(name, eye, at, daylight)
     }
 
@@ -435,7 +466,9 @@ fn a_splash_is_seen_in_flight() {
     let end = ([-2.0, -10.0, 3.0], [-2.0, 0.0, 2.5]);
     let mut sight = Sight::new("spray", pool);
     for (name, (eye, at), least) in [("splash", shore, 0.05), ("splash_from_the_end", end, 0.02)] {
-        wait_for_sun(&mut sight.app, eye, at, true);
+        testing::draw_into(&mut sight.app, &sight.glimpse.clone());
+        settle_the_eye(&mut sight.app, eye, at, true);
+        testing::draw_into(&mut sight.app, &sight.image.clone());
         let still = sight.held(&format!("{name}_still"), eye, at, true);
         spray(&mut sight.app);
         let drops = testing::surface_demand(&mut sight.app).droplets;
