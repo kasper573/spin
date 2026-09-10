@@ -13,7 +13,7 @@ use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::{Metres, Seconds};
 use game::systems::drum::{DEFAULT_RING, Ring};
 use game::systems::scene::Sky;
-use game::systems::settings::Settings;
+use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing::{self, Headless};
 use game::systems::water::WaterMesh;
@@ -121,6 +121,17 @@ fn pool(app: &mut App) {
         testing::run(app, Seconds(1.0));
     }
     testing::run(app, Seconds(20.0));
+}
+
+/// The ring spun up by half, so the water is left behind and churns as it catches up.
+fn churn(app: &mut App) {
+    fill_half(app);
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        let spin = settings.spin.0 * 1.5;
+        Dial::Spin.set(&mut settings, spin);
+    }
+    testing::run(app, Seconds(7.0));
 }
 
 /// A heap of water let go high over the pool, caught as it breaks on the surface.
@@ -459,4 +470,23 @@ fn a_pool_on_a_large_ring_is_seen_from_everywhere() {
     sight
         .view("through_floor", through_floor.0, through_floor.1, true)
         .unseen();
+}
+
+/// Churning water, thrown about by the ring spinning up: it must still read as water from
+/// just over it and from under it, not as a pattern painted on the ground.
+#[test]
+fn churning_water_is_seen_from_everywhere() {
+    let mut sight = Sight::new("churn", churn);
+    let over = ([0.0, 0.0, 3.4], [-14.0, 0.0, 2.9]);
+    let under = ([0.0, 0.0, 0.8], [-8.0, 0.0, 0.8]);
+    let end_on_axis = ([0.0, -10.0, 2.0], [0.0, 0.0, 2.0]);
+    // deep under the water, looking down at the bed through all of it
+    let down = ([0.0, 0.0, 2.4], [-1.5, 0.0, 0.0]);
+
+    sight.view("over", over.0, over.1, true).seen(0.3);
+    sight.view("down", down.0, down.1, true).seen(0.3);
+    sight.view("under", under.0, under.1, true).seen(0.3);
+    sight
+        .view("end_on_axis", end_on_axis.0, end_on_axis.1, true)
+        .seen(0.1);
 }

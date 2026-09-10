@@ -139,8 +139,12 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
         1.0 + spread * dot(e1, w.curve * e1), spread * dot(e2, w.curve * e1),
         spread * dot(e1, w.curve * e2), 1.0 + spread * dot(e2, w.curve * e2),
     );
-    let focus = 1.0 / max(abs(determinant(m)), 0.4);
-    let caustic = mix(1.0, focus, smoothstep(0.0, 0.15, water.depth));
+    // where several waves' bending adds up to cross the rays anyway, the paraxial brightness
+    // runs away: the light there has folded over itself, so it is taken as an even glow
+    let det = abs(determinant(m));
+    let focus = 1.0 / max(det, 0.4);
+    let standing = smoothstep(0.2, 0.6, det);
+    let caustic = mix(1.0, mix(1.0, focus, standing), smoothstep(0.0, 0.15, water.depth));
     return (1.0 - fresnel(cos_in)) * caustic;
 }
 

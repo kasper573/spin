@@ -15,6 +15,10 @@ const FLOW_PERIOD: f32 = 2.0;
 const CARRY: f32 = 1.0;
 // the height of each wave, as a fraction of its length
 const STEEPNESS: f32 = 0.006;
+// each kind of wave comes in patches: how tall it stands where it is faintest and fullest,
+// as a share of that height
+const SWELL_LEAST: f32 = 0.25;
+const SWELL_MOST: f32 = 1.75;
 
 fn hash3(p: vec3<f32>) -> f32 {
     let q = fract(p * vec3(0.1031, 0.1030, 0.0973));
@@ -34,11 +38,12 @@ fn noise3(p: vec3<f32>) -> f32 {
 }
 
 /// The shortest wave whose light has not yet crossed after `path` metres of water, whose
-/// slopes were bent by `bend`. A wave of length L focuses at about L / (bend * 4 pi^2 *
-/// STEEPNESS); past that its rays have crossed and spread again, so the caustic it draws on
+/// slopes were bent by `bend`. A wave of length L curves its rays by 4 pi^2 * STEEPNESS / L
+/// where it stands fullest, so they cross after about L / (bend * 4 pi^2 * STEEPNESS * the
+/// fullest swell); past that they have crossed and spread again, so the caustic it draws on
 /// the bed has washed out into an even glow rather than the pattern a paraxial focus gives.
 fn crossing_length(path: f32, bend: f32) -> f32 {
-    return path * bend * 4.0 * PI * PI * STEEPNESS;
+    return path * bend * 4.0 * PI * PI * STEEPNESS * SWELL_MOST;
 }
 
 /// A point of the water's frame carried back along the flow, in two runs that overlap, and
@@ -92,7 +97,7 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
         let phase = dot(k, x) - pace * t * (1.0 + 0.3 * f32(i % 2));
         // each kind of wave comes in drifting patches rather than everywhere at once
         let swell = noise3(x * (0.5 / length) + vec3(f32(i) * 3.1, t * 0.08, -t * 0.05));
-        let height = STEEPNESS * length * resolved * (0.25 + 1.5 * swell * swell);
+        let height = STEEPNESS * length * resolved * mix(SWELL_LEAST, SWELL_MOST, swell * swell);
         out.slope += k * cos(phase) * height;
         let bend = -sin(phase) * height;
         out.curve += mat3x3<f32>(k * k.x * bend, k * k.y * bend, k * k.z * bend);
