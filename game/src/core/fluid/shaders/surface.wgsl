@@ -4,12 +4,14 @@
 // corners into workgroup memory and places one vertex in every cell the surface crosses. The
 // crossed cells go into a second hash table, and one quad is laid per crossing edge, joining the
 // vertices of the four cells round it through that table. Nothing is kept per block, so what
-// the tables hold grows only with the particles, however scattered they are. Every kernel binds
-// at most eight storage buffers, the least a WebGPU device promises. Vertices come out in the
-// vessel's frame, in the water's own units, relative to an anchor cell, so they stay small near
-// the viewer however far the vessel reaches, and the mesh turns with the vessel between
-// extractions.
+// the tables hold grows only with the particles, however scattered they are. A particle on its
+// own, or with only a couple of others, is a droplet rather than a body of water: the grid is
+// too coarse to draw the blob its splat makes, so it is left out of the field and listed to
+// be drawn as the drop of water it is. Vertices come out in the vessel's frame, in the water's
+// own units, relative to an anchor cell, so they stay small near the viewer however far the
+// vessel reaches, and the mesh turns with the vessel between extractions.
 #import fluid_common::{params, coords_of, cell_key, cell_slot, neighbour_cell}
+#import vessel::vessel_confine
 
 struct SurfaceParams {
     cell: f32,
@@ -57,15 +59,23 @@ struct Probe {
 @group(3) @binding(8) var<storage, read_write> cell_table: array<atomic<u32>>;
 @group(3) @binding(9) var<storage, read_write> cell_value: array<u32>;
 @group(3) @binding(10) var<storage, read_write> polished: array<Vertex>;
+// whether each particle is a droplet, and the droplets: xyz position like a vertex's, w foam
+@group(3) @binding(11) var<storage, read_write> lone: array<u32>;
+@group(3) @binding(12) var<storage, read_write> droplets: array<vec4<f32>>;
 
 const BLOCK: i32 = 4;
 // how far each vertex is drawn toward the middle of its neighbours when the surface is polished
 const POLISH: f32 = 0.7;
+// the surface is kept this far inside the vessel, in cells, so it never shows through its walls
+const CLEARANCE: f32 = 0.125;
 const CORNERS_PER_BLOCK: u32 = 125u;
 const CELLS_PER_BLOCK: u32 = 64u;
 const COUNTER_VERTICES: u32 = 0u;
 const COUNTER_INDICES: u32 = 1u;
 const COUNTER_BLOCKS: u32 = 2u;
+const COUNTER_DROPLETS: u32 = 3u;
+// a particle with this many others within its splat's reach, or fewer, is a droplet
+const LONE: u32 = 2u;
 // the second indirect dispatch, for the kernel that runs per crossed cell
 const DISPATCH_CELLS: u32 = 4u;
 const NO_VERTEX: u32 = 0xffffffffu;
@@ -173,15 +183,51 @@ fn find_cell(key: u32) -> u32 {
     return NO_CELL;
 }
 
+/// Whether a particle is a droplet: whether it has no more than LONE others within its
+/// splat's reach, itself among those counted.
+fn is_lone(i: u32) -> bool {
+    let p = position[i].xyz;
+    var count = 0u;
+    let c = coords_of(p);
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            if (key[j] != k) {
+                continue;
+            }
+            let r = p - position[j].xyz;
+            if (dot(r, r) * surface.inv_r2 < 1.0) {
+                count++;
+                if (count > LONE + 1u) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 /// Every particle marks the blocks whose corners its splat reaches. The splat is zero at its
 /// radius, so only corners strictly inside it count, which keeps it to two blocks per axis.
+/// A droplet marks nothing and is listed instead.
 @compute @workgroup_size(64)
 fn mark(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.count) {
         return;
     }
-    let p = position[i].xyz / surface.cell;
+    let s = position[i];
+    if (is_lone(i)) {
+        lone[i] = 1u;
+        let slot = atomicAdd(&counters[COUNTER_DROPLETS], 1u);
+        droplets[slot] = vec4(s.xyz - vec3<f32>(surface.anchor) * surface.cell, s.w);
+        return;
+    }
+    lone[i] = 0u;
+    let p = s.xyz / surface.cell;
     let reach = 2.0;
     let lo = vec3<i32>(floor(p - reach)) + vec3(1);
     let hi = vec3<i32>(ceil(p + reach)) - vec3(1);
@@ -242,7 +288,7 @@ fn splat(b: vec3<i32>, corner: vec3<i32>) -> f32 {
         for (var j = cell_start[ci]; j < end; j++) {
             let kj = key[j];
             let s = position[j];
-            if (kj != k) {
+            if (kj != k || lone[j] != 0u) {
                 continue;
             }
             let r = p - s.xyz;
@@ -274,7 +320,7 @@ fn probe(p: vec3<f32>) -> Probe {
         for (var j = cell_start[ci]; j < end; j++) {
             let kj = key[j];
             let s = position[j];
-            if (kj != k) {
+            if (kj != k || lone[j] != 0u) {
                 continue;
             }
             let r = p - s.xyz;
@@ -293,6 +339,12 @@ fn probe(p: vec3<f32>) -> Probe {
         out.foam /= weight;
     }
     return out;
+}
+
+/// A point of the vessel's frame kept inside the vessel and out of its landscape, in the
+/// water's units.
+fn inside(p: vec3<f32>) -> vec3<f32> {
+    return vessel_confine(p, CLEARANCE * surface.cell).p;
 }
 
 fn corner_at(c: vec3<i32>) -> f32 {
@@ -357,7 +409,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
         return;
     }
     let within = vec3<f32>(b * BLOCK + cell) + sum / crossings;
-    let p = (within - vec3<f32>(surface.anchor)) * surface.cell;
+    let p = inside(within * surface.cell) - vec3<f32>(surface.anchor) * surface.cell;
     let at = probe(within * surface.cell);
     var gradient = at.gradient;
     if (dot(gradient, gradient) < 1e-12) {
@@ -501,7 +553,9 @@ fn smoothed(i: u32, from_polished: bool) -> Vertex {
     }
     var out = vertex;
     if (count > 0.0) {
-        out.position = vec4(mix(vertex.position.xyz, sum / count, POLISH), vertex.position.w);
+        let anchor = vec3<f32>(surface.anchor) * surface.cell;
+        let drawn = mix(vertex.position.xyz, sum / count, POLISH);
+        out.position = vec4(inside(drawn + anchor) - anchor, vertex.position.w);
         let n = normalize(mix(vertex.normal.xyz, normal / count, POLISH));
         out.normal = vec4(n, vertex.normal.w);
     }

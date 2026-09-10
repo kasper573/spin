@@ -502,6 +502,8 @@ pub struct SurfaceDemand {
     pub vertices: u32,
     pub indices: u32,
     pub blocks: u32,
+    /// The particles left out of the surface to be drawn as drops.
+    pub droplets: u32,
 }
 
 pub fn surface_demand(app: &mut App) -> SurfaceDemand {
@@ -517,6 +519,7 @@ pub fn surface_demand(app: &mut App) -> SurfaceDemand {
         vertices: at(0),
         indices: at(1),
         blocks: at(2),
+        droplets: at(3),
     }
 }
 

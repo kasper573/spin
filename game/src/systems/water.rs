@@ -3,9 +3,11 @@
 //! behind it seen through it, bent by refraction and dimmed by the depth of water the light
 //! crossed; what is around it mirrored in it, the ring found by marching the reflected ray
 //! across the screen and space beyond that; the sun glinting off it; foam where the water
-//! churns; and ripples riding on the flow. The surface comes out in the water's frame, about
-//! the drum's centre, relative to an anchor cell near the viewer and in the water's own units,
-//! so the mesh is scaled to metres, turned and placed into the bodies' frame about the viewer.
+//! churns; and ripples riding on the flow. The droplets the extraction leaves out of the
+//! surface are drawn the same way from their own list, each as a sphere of its volume. Both
+//! come out in the water's frame, about the drum's centre, relative to an anchor cell near the
+//! viewer and in the water's own units, so the meshes are scaled to metres, turned and placed
+//! into the bodies' frame about the viewer.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
@@ -14,13 +16,13 @@ use bevy::pbr::{DistanceFog, FogFalloff, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
-use crate::core::fluid::Fluid;
-use crate::core::fluid::{FluidBuffers, MAX_INDICES};
+use crate::core::fluid::{Fluid, Resolution};
+use crate::core::fluid::{FluidBuffers, MAX_DROPLETS, MAX_INDICES};
 use crate::core::vessel::Vessel;
 use crate::systems::drum::ground_albedo;
 use crate::systems::player::PlayerCamera;
@@ -53,42 +55,42 @@ impl Plugin for WaterPlugin {
     }
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Clone)]
-struct WaterMaterial {
+/// What the water is like and where it is drawn, shared by the surface and the droplets.
+#[derive(ShaderType, Clone)]
+struct WaterUniform {
     /// Turns a direction of the drum's frame into one among the stars.
-    #[uniform(0)]
     to_stars: Vec4,
     /// Turns a vector of the water's frame into the drum's.
-    #[uniform(0)]
     from_water: Vec4,
     /// Where the viewpoint lies in the site's frame, in metres.
-    #[uniform(0)]
     origin: Vec4,
     /// The ring's radius and half width, in metres.
-    #[uniform(0)]
     ring: Vec4,
     /// The ground's colour as seen from across the ring.
-    #[uniform(0)]
-    ground: LinearRgba,
-    #[uniform(0)]
-    background: LinearRgba,
+    ground: Vec4,
+    background: Vec4,
     /// xyz: the anchor cell the vertices are relative to, in the water's units; w: metres per
     /// unit.
-    #[uniform(0)]
     anchor: Vec4,
-    /// x: simulated seconds; y: metres per second per unit of the water's velocity.
-    #[uniform(0)]
+    /// x: simulated seconds; y: metres per second per unit of the water's velocity; z: a
+    /// droplet's radius in metres.
     clock: Vec4,
-    #[uniform(0)]
     absorption: Vec4,
-    #[uniform(0)]
     scatter: Vec4,
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct WaterMaterial {
+    #[uniform(0)]
+    water: WaterUniform,
     #[storage(1, read_only)]
     vertices: Handle<ShaderBuffer>,
     #[storage(2, read_only)]
     indices: Handle<ShaderBuffer>,
     #[storage(3, read_only)]
     counters: Handle<ShaderBuffer>,
+    #[storage(4, read_only)]
+    droplets: Handle<ShaderBuffer>,
 }
 
 impl Material for WaterMaterial {
@@ -118,7 +120,7 @@ impl Material for WaterMaterial {
 #[derive(Resource)]
 struct Water(Handle<WaterMaterial>);
 
-/// The mesh the surface is drawn through, turned with the drum.
+/// The mesh the water is drawn through, turned with the drum.
 #[derive(Component)]
 struct WaterMesh;
 
@@ -133,27 +135,35 @@ fn spawn(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WaterMaterial>>,
 ) {
-    let material = materials.add(WaterMaterial {
+    let water = WaterUniform {
         to_stars: Vec4::new(0.0, 0.0, 0.0, 1.0),
         from_water: Vec4::new(0.0, 0.0, 0.0, 1.0),
         origin: Vec4::ZERO,
         ring: Vec4::ZERO,
-        ground: ground_albedo(),
-        background: SPACE.to_linear(),
+        ground: ground_albedo().to_vec4(),
+        background: SPACE.to_linear().to_vec4(),
         anchor: Vec4::new(0.0, 0.0, 0.0, 1.0),
         clock: Vec4::new(0.0, 1.0, 0.0, 0.0),
         absorption: ABSORPTION.extend(0.0),
         scatter: SCATTER.extend(SCATTER_PER_METRE),
+    };
+    let material = materials.add(WaterMaterial {
+        water,
         vertices: buffers.surface.polished.clone(),
         indices: buffers.surface.indices.clone(),
         counters: buffers.surface.counters.clone(),
+        droplets: buffers.surface.droplets.clone(),
     });
-    // the mesh only fixes how many vertices are drawn; the vertex shader fetches each one
+    // the mesh only fixes how many vertices are drawn, the surface's and then the droplets'
+    // squares; the vertex shader fetches each one
     let placeholder = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; MAX_INDICES]);
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[0.0f32; 3]; MAX_INDICES + MAX_DROPLETS * 6],
+    );
     commands.insert_resource(Water(material.clone()));
     commands.spawn((
         WaterMesh,
@@ -182,19 +192,20 @@ fn tick(
         Quat::from_xyzw(x as f32, y as f32, z as f32, w as f32).inverse()
     };
     if let Some(mut material) = materials.get_mut(&water.0) {
+        let uniform = &mut material.water;
         let stars = sky.rotation.inverse();
-        material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
-        material.from_water = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);
+        uniform.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
+        uniform.from_water = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);
         let [x, y, z] = viewpoint.origin;
-        material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        uniform.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
         let ring = sim.drum.ring;
-        material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
+        uniform.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
         let anchor = fluid.surface().anchor.as_vec3() * fluid.surface().cell;
-        material.anchor = anchor.extend(metres_per_unit as f32);
-        material.clock = Vec4::new(
+        uniform.anchor = anchor.extend(metres_per_unit as f32);
+        uniform.clock = Vec4::new(
             sim.time.0,
             (metres_per_unit / resolution.time()) as f32,
-            0.0,
+            droplet_radius(resolution) as f32,
             0.0,
         );
     }
@@ -205,6 +216,12 @@ fn tick(
             .with_rotation(rotation)
             .with_scale(Vec3::splat(metres_per_unit as f32));
     }
+}
+
+/// The radius of a drop of one particle's water.
+fn droplet_radius(resolution: Resolution) -> f64 {
+    let cubic_metres = resolution.litres_per_particle().0 as f64 / 1000.0;
+    (cubic_metres * 3.0 / (4.0 * std::f64::consts::PI)).cbrt()
 }
 
 /// With the eye under water, everything seen is seen through water: dimmed and coloured by

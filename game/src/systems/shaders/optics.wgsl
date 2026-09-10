@@ -6,6 +6,7 @@
 
 #import bevy_pbr::mesh_view_bindings::{view, lights, view_transmission_texture, view_transmission_sampler}
 #import bevy_pbr::prepass_utils::prepass_depth
+#import bevy_pbr::shadows::fetch_directional_shadow
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
 #import space::stars
 
@@ -98,32 +99,53 @@ fn sun_reaches(q: vec3<f32>, up: vec3<f32>, l: vec3<f32>, ring: vec2<f32>) -> bo
     return (cap - q.y) / l.y < across;
 }
 
-/// What a ray meets once it has left the screen, inside the ring: the ground where it strikes
-/// the ring, lit by the sun where the sun reaches it and by the bounce light everywhere, or
-/// space where it leaves through a cap. `at` and `dir` are in the site's frame, whose origin
-/// lies on the wall with the axis `ring.x` in along -x, and whose caps lie `ring.y` out along
-/// y. The far root is found without the near one's cancellation, so it holds for any ring.
-fn ring_seen(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
-    let space = space_seen(dir, to_stars, background);
+/// How far a ray from inside the ring runs before it meets the ring's wall, or leaves through
+/// a cap, whichever comes first, and whether it was the wall. `at` and `dir` are in the site's
+/// frame, whose origin lies on the wall with the axis `ring.x` in along -x, and whose caps lie
+/// `ring.y` out along y. The far root is found without the near one's cancellation, so it
+/// holds for any ring. A ray starting outside the ring runs nowhere in it.
+struct RingRun {
+    distance: f32,
+    wall: bool,
+}
+
+fn ring_run(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>) -> RingRun {
     let a = dir.x * dir.x + dir.z * dir.z;
     let b = 2.0 * ((ring.x + at.x) * dir.x + at.z * dir.z);
     let c = 2.0 * ring.x * at.x + at.x * at.x + at.z * at.z;
-    if (c > 0.0 || a < 1e-12) {
-        return space;
+    if (c > 0.0) {
+        return RingRun(0.0, false);
     }
-    let root = sqrt(max(b * b - 4.0 * a * c, 0.0));
-    var q = -0.5 * (b + root);
-    if (b < 0.0) {
-        q = -0.5 * (b - root);
+    var t = 1e9;
+    if (a >= 1e-12) {
+        let root = sqrt(max(b * b - 4.0 * a * c, 0.0));
+        var q = -0.5 * (b + root);
+        if (b < 0.0) {
+            q = -0.5 * (b - root);
+        }
+        t = q / a;
+        if (q != 0.0) {
+            t = max(t, c / q);
+        }
     }
-    var t = q / a;
-    if (q != 0.0) {
-        t = max(t, c / q);
+    if (abs(dir.y) > 1e-6) {
+        let cap = (select(-ring.y, ring.y, dir.y > 0.0) - at.y) / dir.y;
+        if (cap < t) {
+            return RingRun(cap, false);
+        }
     }
-    if (abs(dir.y) > 1e-6 && (select(-ring.y, ring.y, dir.y > 0.0) - at.y) / dir.y < t) {
-        return space;
+    return RingRun(t, true);
+}
+
+/// What a ray meets once it has left the screen, inside the ring: the ground where it strikes
+/// the ring, lit by the sun where the sun reaches it and by the bounce light everywhere, or
+/// space where it leaves through a cap.
+fn ring_seen(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+    let run = ring_run(at, dir, ring);
+    if (!run.wall) {
+        return space_seen(dir, to_stars, background);
     }
-    let hit = at + dir * t;
+    let hit = at + dir * run.distance;
     let up = -normalize(vec3(ring.x + hit.x, 0.0, hit.z));
     var light = bounce();
     for (var i = 0u; i < lights.n_directional_lights; i++) {
@@ -178,13 +200,22 @@ fn sunlight(i: u32) -> vec3<f32> {
     return lights.directional_lights[i].color.rgb * view.exposure;
 }
 
-/// The light falling on a matte surface facing `n`: every sun over the horizon, and the light
-/// bounced round the ring.
-fn diffuse_light(n: vec3<f32>) -> vec3<f32> {
+/// How much of a sun's light reaches a point of the world, given the ring's shadow.
+fn sun_shadow(i: u32, world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> f32 {
+    let view_z = -(view.view_from_world * vec4(world, 1.0)).z;
+    return fetch_directional_shadow(i, vec4(world, 1.0), n, view_z, pixel);
+}
+
+/// The light falling on a matte surface at a point of the world, facing `n`, where the ring
+/// shades it from the suns.
+fn diffuse_light_at(world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
     var light = bounce();
     for (var i = 0u; i < lights.n_directional_lights; i++) {
-        let l = lights.directional_lights[i];
-        light += sunlight(i) * max(dot(n, l.direction_to_light), 0.0);
+        let l = lights.directional_lights[i].direction_to_light;
+        let ndl = dot(n, l);
+        if (ndl > 0.0) {
+            light += sunlight(i) * ndl * sun_shadow(i, world, n, pixel);
+        }
     }
     return light;
 }

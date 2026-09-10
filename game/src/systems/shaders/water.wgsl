@@ -3,10 +3,13 @@
 // found by marching the reflected ray across the depth of the scene and space beyond that; the
 // sun glinting off it; and foam where it churns. Ripples ride on the flow, so still water lies
 // like glass and moving water sparkles. Seen from under the surface the same rules give the
-// mirror of the bed beyond the critical angle and the world above within it.
+// mirror of the bed beyond the critical angle and the world above within it. After the
+// surface come the droplets the extraction left out of it, each a square facing the eye whose
+// every pixel casts a ray at the sphere of the drop's volume: what misses is discarded, and
+// what hits takes the sphere's depth and is shaded as the water is.
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
-#import optics::{rotate, mirrored, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light, sunlight, depth_of, saturated}
+#import optics::{rotate, mirrored, ring_run, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated}
 #import ripples::{carried, waves_carried, noise3}
 
 struct Water {
@@ -31,8 +34,10 @@ struct SurfaceVertex {
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> water: Water;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> vertices: array<SurfaceVertex>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> indices: array<u32>;
-// vertex count, then index count
+// vertex count, index count, block count, then droplet count
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> counters: array<u32>;
+// xyz: position like a surface vertex's; w: foam
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<storage, read> droplets: array<vec4<f32>>;
 
 const PI: f32 = 3.14159265;
 const IOR: f32 = 1.333;
@@ -40,6 +45,9 @@ const IOR: f32 = 1.333;
 const F0: f32 = 0.02;
 // how far through water anything can be seen at all
 const FARTHEST: f32 = 200.0;
+const DROP_ROUGHNESS: f32 = 0.05;
+// how far beyond a drop what is seen through it is taken from
+const DROP_REACH: f32 = 1.0;
 
 struct Fragment {
     @builtin(position) clip: vec4<f32>,
@@ -50,25 +58,58 @@ struct Fragment {
     @location(3) wheel_position: vec3<f32>,
     // the flow in the water's frame, metres per second
     @location(4) wheel_velocity: vec3<f32>,
+    // on a droplet's square: the drop's centre and radius, otherwise zero
+    @location(5) drop: vec4<f32>,
+}
+
+struct Shaded {
+    @location(0) colour: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
 }
 
 @vertex
 fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32) -> Fragment {
     var out: Fragment;
-    if (i >= counters[1]) {
-        // past the extracted surface: park the vertex outside the clip volume
+    out.drop = vec4(0.0);
+    let world_from_local = get_world_from_local(instance);
+    if (i < counters[1]) {
+        let v = vertices[indices[i]];
+        let world = mesh_position_local_to_world(world_from_local, vec4(v.position.xyz, 1.0));
+        out.clip = view.clip_from_world * world;
+        out.world_position = world.xyz;
+        out.world_normal = mesh_normal_local_to_world(v.normal.xyz, instance);
+        out.foam = v.position.w;
+        out.wheel_position = (v.position.xyz + water.anchor.xyz) * water.anchor.w;
+        out.wheel_velocity = v.velocity.xyz * water.clock.y;
+        return out;
+    }
+    let square = i - counters[1];
+    let drop = square / 6u;
+    if (drop >= counters[3]) {
+        // past the droplets: park the vertex outside the clip volume
         out.clip = vec4(2.0, 2.0, 2.0, 1.0);
         return out;
     }
-    let v = vertices[indices[i]];
-    let world_from_local = get_world_from_local(instance);
-    let world = mesh_position_local_to_world(world_from_local, vec4(v.position.xyz, 1.0));
-    out.clip = view.clip_from_world * world;
-    out.world_position = world.xyz;
-    out.world_normal = mesh_normal_local_to_world(v.normal.xyz, instance);
-    out.foam = v.position.w;
-    out.wheel_position = (v.position.xyz + water.anchor.xyz) * water.anchor.w;
-    out.wheel_velocity = v.velocity.xyz * water.clock.y;
+    let centre = mesh_position_local_to_world(world_from_local, vec4(droplets[drop].xyz, 1.0)).xyz;
+    let to_eye = view.world_position - centre;
+    let distance = length(to_eye);
+    let facing = to_eye / distance;
+    var right = cross(vec3(0.0, 1.0, 0.0), facing);
+    if (dot(right, right) < 1e-6) {
+        right = cross(vec3(1.0, 0.0, 0.0), facing);
+    }
+    right = normalize(right);
+    let up = cross(facing, right);
+    // the sphere's outline on a square through its centre widens as the eye comes close
+    let radius = water.clock.z;
+    let outline = radius / sqrt(max(1.0 - radius * radius / (distance * distance), 0.05));
+    let corner = square % 6u;
+    let x = select(-1.0, 1.0, corner == 1u || corner == 2u || corner == 4u);
+    let y = select(-1.0, 1.0, corner == 2u || corner == 4u || corner == 5u);
+    let world = centre + (right * x + up * y) * outline;
+    out.clip = view.clip_from_world * vec4(world, 1.0);
+    out.world_position = world;
+    out.drop = vec4(centre, radius);
     return out;
 }
 
@@ -80,8 +121,75 @@ fn through_water(colour: vec3<f32>, distance: f32, light: vec3<f32>) -> vec3<f32
     return colour * exp(-water.absorption.rgb * d) + glow;
 }
 
+/// A pixel of a droplet's square: the drop's sphere where the pixel's ray hits it.
+fn droplet(in: Fragment) -> Shaded {
+    let eye = view.world_position;
+    let dir = normalize(in.world_position - eye);
+    let centre = in.drop.xyz;
+    let radius = in.drop.w;
+    let oc = eye - centre;
+    let b = dot(oc, dir);
+    let h = b * b - (dot(oc, oc) - radius * radius);
+    if (h < 0.0) {
+        discard;
+    }
+    let root = sqrt(h);
+    var t = -b - root;
+    if (t < 0.0) {
+        // the eye is within the drop: see out through its far side
+        t = -b + root;
+    }
+    if (t < 0.0) {
+        discard;
+    }
+    let hit = eye + dir * t;
+    let clip = view.clip_from_world * vec4(hit, 1.0);
+    var out: Shaded;
+    out.depth = clip.z / clip.w;
+
+    let n = normalize(hit - centre);
+    let v = -dir;
+    let uv = (in.clip.xy - view.viewport.xy) / view.viewport.zw;
+    let pixel = in.clip.xy;
+    let depth_here = depth_of(hit);
+    let light = diffuse_light_at(hit, n, pixel) / PI;
+    if (dot(n, v) < 0.0) {
+        // from within, the drop is water all round: only what is behind shows, through it
+        let seen = seen_through(uv, depth_here, hit + dir * DROP_REACH);
+        out.colour = vec4(saturated(through_water(seen, t, light)), 1.0);
+        return out;
+    }
+    let reflected = reflect(dir, n);
+    let beyond = ring_seen(hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    let mirror = mirrored(hit, reflected, beyond);
+    // in through the near face, across the drop and out through the far one
+    let entered = refract(dir, n, 1.0 / IOR);
+    let chord = -2.0 * dot(entered, n) * radius;
+    let exit = hit + entered * chord;
+    let left = refract(entered, -normalize(exit - centre), IOR);
+    let seen = through_water(seen_through(uv, depth_here, exit + left * DROP_REACH), chord, light);
+    var colour = mix(seen, mirror, fresnel(dot(n, v), F0));
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let l = lights.directional_lights[i].direction_to_light;
+        colour += sunlight(i) * glint(n, v, l, DROP_ROUGHNESS, F0) * sun_shadow(i, hit, n, pixel);
+    }
+    out.colour = vec4(saturated(colour), 1.0);
+    return out;
+}
+
 @fragment
-fn fragment(in: Fragment) -> @location(0) vec4<f32> {
+fn fragment(in: Fragment) -> Shaded {
+    if (in.drop.w > 0.0) {
+        return droplet(in);
+    }
+    var out: Shaded;
+    out.depth = in.clip.z;
+    out.colour = surface(in);
+    return out;
+}
+
+/// A pixel of the water's surface.
+fn surface(in: Fragment) -> vec4<f32> {
     let eye = view.world_position;
     let to_eye = eye - in.world_position;
     let distance = length(to_eye);
@@ -112,17 +220,23 @@ fn fragment(in: Fragment) -> @location(0) vec4<f32> {
     let uv = (in.clip.xy - view.viewport.xy) / view.viewport.zw;
     let depth_here = depth_of(in.world_position);
     let scene = scene_depth(uv);
-    // how much water lies behind this point of the surface, along the line of sight
+    // how much water lies behind this point of the surface, along the line of sight: up to
+    // the scene behind it, and no further than the ring holds water, since the glass and
+    // space beyond it stand in no depth
     let along = distance / max(depth_here, 1e-4);
-    let column = max(scene - depth_here, 0.0) * along;
+    let site = in.world_position + water.origin.xyz;
+    let held = ring_run(site, -v, water.ring.xy).distance;
+    let column = min(max(scene - depth_here, 0.0) * along, held);
 
     // the light falling on the water here, which whatever it scatters is lit by
-    let light = diffuse_light(n) / PI;
+    let pixel = in.clip.xy;
+    let light = diffuse_light_at(in.world_position, n, pixel) / PI;
     let reflected = reflect(-v, n);
-    // beyond the scene the mirror shows the ring, or from under water the water's own glow
-    var beyond = ring_seen(in.world_position + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    // beyond the scene the mirror shows the ring, or from under water the bed, lit by the
+    // light coming down through the surface and about as far off as the surface is
+    var beyond = ring_seen(site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
     if (submerged) {
-        beyond = through_water(vec3(0.0), FARTHEST, light);
+        beyond = through_water(water.ground.rgb * light, distance, light);
     }
     var mirror = mirrored(in.world_position, reflected, beyond);
     var seen: vec3<f32>;
@@ -149,7 +263,7 @@ fn fragment(in: Fragment) -> @location(0) vec4<f32> {
     var colour = mix(seen, mirror, f);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
-        colour += sunlight(i) * glint(n, v, l, roughness, F0);
+        colour += sunlight(i) * glint(n, v, l, roughness, F0) * sun_shadow(i, in.world_position, n, pixel);
     }
 
     // foam: bubbles ride on the flow like the ripples
@@ -159,7 +273,7 @@ fn fragment(in: Fragment) -> @location(0) vec4<f32> {
     let foam = smoothstep(0.42, 0.7, lace);
     // bubbles: brighter where the lace is thick, with dark water showing between them
     let bubbles = 0.55 + 0.45 * smoothstep(0.55, 0.95, lace + (grain - 0.5) * 0.6);
-    let foam_colour = vec3(0.7, 0.74, 0.78) / PI * diffuse_light(n) * bubbles;
+    let foam_colour = vec3(0.7, 0.74, 0.78) / PI * diffuse_light_at(in.world_position, n, pixel) * bubbles;
     colour = mix(colour, foam_colour, foam);
 
     if (submerged) {

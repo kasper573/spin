@@ -266,6 +266,26 @@ fn water_grows_a_surface() {
     assert_eq!(testing::surface_triangles(&mut app), 0);
 }
 
+/// A particle flying on its own is a drop, not a surface: the grid cannot draw a blob that
+/// small, so it is listed to be drawn as a sphere instead, and it takes no part in the surface
+/// of the water it lands in until it joins it.
+#[test]
+fn a_particle_on_its_own_is_a_droplet_not_a_surface() {
+    let mut app = testing::headless();
+    inject(&mut app, [6.0, 0.0, 0.0], 400);
+    testing::run(&mut app, Seconds(0.5));
+    let body = testing::surface_demand(&mut app);
+    assert_eq!(body.droplets, 0, "{body:?}");
+    inject(&mut app, [-6.0, 0.0, 0.0], 1);
+    testing::run(&mut app, Seconds(0.1));
+    let with_drop = testing::surface_demand(&mut app);
+    assert_eq!(with_drop.droplets, 1, "{with_drop:?}");
+    assert!(
+        with_drop.vertices.abs_diff(body.vertices) < body.vertices / 10,
+        "the drop changed the surface: {body:?} then {with_drop:?}"
+    );
+}
+
 /// Water at rest in the turning drum is drawn holding still in it: its surface is extracted in
 /// the drum's own frame, so between two steps a vertex moves only as far as the water does,
 /// not by the grid sliding under it.

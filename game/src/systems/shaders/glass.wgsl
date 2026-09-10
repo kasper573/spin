@@ -8,7 +8,7 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import bevy_pbr::pbr_functions::apply_fog
 #endif
-#import optics::{mirrored, ring_seen, seen_through, fresnel, glint, sunlight, depth_of, saturated}
+#import optics::{mirrored, ring_seen, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated}
 
 struct Glass {
     // how much of each colour a pane lets through
@@ -116,7 +116,8 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     var colour = mix(passed, mirror, mirrored_share);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
-        colour += sunlight(i) * glint(face, v, l, ROUGHNESS, F0);
+        let pixel = view.viewport.xy + uv * view.viewport.zw;
+        colour += sunlight(i) * glint(face, v, l, ROUGHNESS, F0) * sun_shadow(i, p, face, pixel);
     }
     return colour;
 }

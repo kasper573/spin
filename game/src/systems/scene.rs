@@ -8,7 +8,7 @@ use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster,
-    NotShadowReceiver, light_consts,
+    NotShadowReceiver, ShadowFilteringMethod, light_consts,
 };
 use bevy::math::cubic_splines::LinearSpline;
 use bevy::pbr::ScreenSpaceTransmission;
@@ -334,6 +334,7 @@ fn spawn(
         },
         Msaa::Sample4,
         DepthPrepass,
+        ShadowFilteringMethod::Gaussian,
         PlayerCamera,
     ));
     commands.spawn((

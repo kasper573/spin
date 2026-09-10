@@ -38,8 +38,9 @@ struct Terrain {
 const PI: f32 = 3.14159265;
 const IOR: f32 = 1.333;
 const F0: f32 = 0.02;
-// wet ground is darker
+// wet ground is darker, once this many particles' worth of water lies over a column of it
 const WET: f32 = 0.35;
+const WET_BY: f32 = 4.0;
 
 /// 1 on a light tile, 0 on a dark one, blended over the width of a pixel so the edges stay
 /// crisp at any distance without shimmering.
@@ -132,7 +133,7 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column) ->
         1.0 + spread * dot(e1, w.curve * e1), spread * dot(e2, w.curve * e1),
         spread * dot(e1, w.curve * e2), 1.0 + spread * dot(e2, w.curve * e2),
     );
-    let focus = 1.0 / max(abs(determinant(m)), 0.25);
+    let focus = 1.0 / max(abs(determinant(m)), 0.4);
     let caustic = mix(1.0, focus, smoothstep(0.0, 0.15, water.depth));
     return (1.0 - fresnel(cos_in)) * caustic;
 }
@@ -140,9 +141,11 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column) ->
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let p = in.world_position.xyz;
-    // the ground has a face toward the eye whichever way it was wound
+    // the ground has a face toward the eye whichever way it was wound; seen from below,
+    // through the glass, it is the dirt pressed against the glass
     var n = normalize(in.world_normal);
-    if (dot(n, view.world_position - p) < 0.0) {
+    let underside = dot(n, view.world_position - p) < 0.0;
+    if (underside) {
         n = -n;
     }
     var light = 0.0;
@@ -163,7 +166,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // water flying over the ground, not lying on it, neither wets nor dims it
     let lying = 1.0 - smoothstep(0.3, 0.8, water.top - height - water.depth);
     water.depth *= lying;
-    let wet = smoothstep(0.0, 0.05, water.depth);
+    if (underside) {
+        albedo = terrain.dirt.rgb;
+        water.depth = 0.0;
+    }
+    // a stray drop dampens a patch, a body of water soaks it
+    let wet = smoothstep(0.0, WET_BY * terrain.grid.w, water.depth);
     albedo *= 1.0 - WET * wet;
     let dimmed = exp(-terrain.absorption.rgb * water.depth);
 

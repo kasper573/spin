@@ -1,13 +1,16 @@
 // The ripples on the water: a field of small waves of different lengths crossing at odd
-// angles, each running at its own pace, over a drift of noise that breaks their regularity,
-// carried along by the flow. The same field bends what is seen through the surface and focuses
+// angles, each running at its own pace and coming in patches, over a drift of noise that
+// breaks their regularity, carried along by the flow. The same field bends what is seen through the surface and focuses
 // the sunlight that falls through it onto the bed, so both are drawn from here.
 #define_import_path ripples
 
 const PI: f32 = 3.14159265;
 // the ripples are carried along by the flow in two overlapping runs of this length, each faded
-// in and out, so that neither is ever seen to reset
+// in and out, so that neither is ever seen to reset; no run carries them further than this,
+// since a run carried far is sheared into streaks wherever the flow varies, so in fast water
+// the ripples lag the flow
 const FLOW_PERIOD: f32 = 2.0;
+const CARRY: f32 = 1.0;
 // the height of each wave, as a fraction of its length
 const STEEPNESS: f32 = 0.006;
 
@@ -39,9 +42,10 @@ struct Carried {
 fn carried(x: vec3<f32>, flow: vec3<f32>, t: f32) -> Carried {
     let phase_a = fract(t / FLOW_PERIOD);
     let phase_b = fract(t / FLOW_PERIOD + 0.5);
+    let ride = flow * min(1.0, CARRY / (FLOW_PERIOD * max(length(flow), 1e-3)));
     var out: Carried;
-    out.a = x - flow * phase_a * FLOW_PERIOD;
-    out.b = x - flow * phase_b * FLOW_PERIOD;
+    out.a = x - ride * phase_a * FLOW_PERIOD;
+    out.b = x - ride * phase_b * FLOW_PERIOD;
     out.weight_a = 1.0 - abs(2.0 * phase_a - 1.0);
     return out;
 }
@@ -77,7 +81,9 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
         let pace = 2.0 * PI * 0.25 / length;
         let wander = noise3(x * 1.7 + f32(i) * 7.3) - 0.5;
         let phase = dot(k, x) - pace * t * (1.0 + 0.3 * f32(i % 2)) + wander * 2.5;
-        let height = STEEPNESS * length * resolved;
+        // each kind of wave comes in drifting patches rather than everywhere at once
+        let swell = noise3(x * (0.5 / length) + vec3(f32(i) * 3.1, t * 0.08, -t * 0.05));
+        let height = STEEPNESS * length * resolved * (0.25 + 1.5 * swell * swell);
         out.slope += k * cos(phase) * height;
         let bend = -sin(phase) * height;
         out.curve += mat3x3<f32>(k * k.x * bend, k * k.y * bend, k * k.z * bend);

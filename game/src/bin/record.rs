@@ -20,6 +20,7 @@ use game::core::units::Seconds;
 use game::systems::aim::Aim;
 use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
 use game::systems::player::{PilotInput, Player};
+use game::systems::scene::Sky;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
 use game::systems::testing;
@@ -45,6 +46,27 @@ enum Cue {
     /// Raise the ground under the avatar into a bank, hollow a basin out of the ground ahead,
     /// and pour water in all round the ring, enough to fill the basin over head height.
     Basin,
+    /// Put the avatar, as a ghost, at a viewpoint of the survey, by night or by day.
+    Look(View),
+}
+
+/// A viewpoint of the survey: where the eye is and what it looks at, each a place about the
+/// pool in metres round the ring, along the axis and over the ground (under it, and out
+/// through the glass, when negative), and whether the sun should stand over the pool or
+/// behind the ring first.
+#[derive(Clone, Copy, PartialEq)]
+struct View {
+    eye: [f64; 3],
+    at: [f64; 3],
+    daylight: bool,
+}
+
+/// Where the pool was laid in: its wheel angle and its place along the axis, which the site
+/// leaves behind as the avatar moves about.
+#[derive(Resource, Clone, Copy)]
+struct Pool {
+    phi: f64,
+    y: f64,
 }
 
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
@@ -321,8 +343,8 @@ fn water_script() -> Vec<Phase> {
             1.0,
             "the surface from below: the world above within the critical angle, the bed mirrored beyond it",
         ),
-        phase(2.4, &[Up], 1.0, "thrusting up out of the water (Space)"),
-        phase(1.0, &[], 0.0, "rising"),
+        phase(3.0, &[Up], 1.0, "thrusting up out of the water (Space)"),
+        phase(1.5, &[], 0.0, "rising"),
         phase(
             turn_time(1.5, glance),
             &[PitchDown],
@@ -358,9 +380,125 @@ fn water_script() -> Vec<Phase> {
     ]
 }
 
+/// One frame from each of many viewpoints about the pool, by night and then by day: under the
+/// water, at its surface, over it, out through the glass, in through the glass and the water
+/// from outside, and from far off.
+fn survey_script() -> Vec<Phase> {
+    let views: [([f64; 3], [f64; 3], &'static str); 12] = [
+        (
+            [-2.0, 0.0, 0.6],
+            [-8.0, 0.0, 0.6],
+            "under water on the bed, along the pool",
+        ),
+        (
+            [-2.0, 0.0, 0.6],
+            [-4.0, 0.5, 3.0],
+            "under water, up at the surface",
+        ),
+        (
+            [-2.0, -2.0, 0.6],
+            [-2.0, -8.0, 1.0],
+            "under water, at a cap through the water",
+        ),
+        (
+            [0.0, 0.0, 2.8],
+            [-7.0, 0.0, 1.5],
+            "at the surface, across the pool",
+        ),
+        (
+            [8.0, 0.0, 1.7],
+            [-6.0, 0.0, 1.0],
+            "from the near ridge, over the pool",
+        ),
+        (
+            [-2.0, 0.0, 8.5],
+            [-6.0, 1.0, 0.0],
+            "from up by the axis, down at the pool",
+        ),
+        (
+            [0.0, 0.0, 3.0],
+            [0.0, -20.0, 3.0],
+            "from inside, out through a cap into space",
+        ),
+        (
+            [0.0, 0.0, 3.0],
+            [25.0, 0.0, 1.7],
+            "from inside, along the ring",
+        ),
+        (
+            [-2.0, 0.0, -3.5],
+            [-2.0, 0.0, 1.5],
+            "from outside the glass, in through the wall at the pool",
+        ),
+        (
+            [-2.0, -9.0, 1.0],
+            [-2.0, 0.0, 1.0],
+            "from outside a cap, in through the glass and the water",
+        ),
+        (
+            [0.0, 40.0, -40.0],
+            [0.0, 0.0, 0.0],
+            "the ring from 60 m out",
+        ),
+        (
+            [0.0, 200.0, -200.0],
+            [0.0, 0.0, 0.0],
+            "the ring from 300 m out",
+        ),
+    ];
+    let mut script = vec![Phase {
+        seconds: 1.0 / FPS as f32,
+        pilot: PilotInput::default(),
+        caption: "the pool laid in",
+        cue: Cue::Basin,
+        sculpting: false,
+        pouring: false,
+    }];
+    for daylight in [false, true] {
+        for (eye, at, caption) in views {
+            script.push(Phase {
+                seconds: 1.0 / FPS as f32,
+                pilot: PilotInput::default(),
+                caption,
+                cue: Cue::Look(View { eye, at, daylight }),
+                sculpting: false,
+                pouring: false,
+            });
+        }
+    }
+    script
+}
+
 fn cue(app: &mut App, cue: Cue) {
     match cue {
         Cue::None => {}
+        Cue::Look(view) => {
+            app.world_mut().resource_mut::<Settings>().collisions = false;
+            let pool = *app.world().resource::<Pool>();
+            // wait for the sun to stand over the pool, or to shine from behind the ring, held
+            // at the viewpoint all the while: a ghost let go falls out through the ring
+            let high = |app: &App| app.world().resource::<Sky>().sun.x < -0.55;
+            let low = |app: &App| app.world().resource::<Sky>().sun.x > 0.3;
+            let mut waited = 0.0;
+            loop {
+                let mut sim = app.world_mut().resource_mut::<Simulation>();
+                sim.avatar_mut().solid = false;
+                let eye = spot(&sim, pool, view.eye);
+                let at = spot(&sim, pool, view.at);
+                stand(&mut sim, eye, at);
+                if if view.daylight { high(app) } else { low(app) } {
+                    break;
+                }
+                testing::run(app, Seconds(1.0 / 30.0));
+                waited += 1.0 / 30.0;
+                assert!(
+                    waited < 60.0,
+                    "the sun never came round: it stands at {:?} with the ring spinning at {} rad/s",
+                    app.world().resource::<Sky>().sun,
+                    app.world().resource::<Simulation>().drum.spin.0
+                );
+            }
+        }
         Cue::Flood => {
             for k in 0..30 {
                 app.world_mut()
@@ -387,7 +525,7 @@ fn cue(app: &mut App, cue: Cue) {
         }
         Cue::Equalize => app.world_mut().resource_mut::<Settings>().equalize_thrust(),
         Cue::Basin => {
-            {
+            let pool = {
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 let site = sim.drum.site;
                 let radius = sim.drum.ring.radius.0 as f64;
@@ -402,52 +540,31 @@ fn cue(app: &mut App, cue: Cue) {
                         }
                     }
                 }
-            }
+                Pool {
+                    phi: site.phi,
+                    y: site.y,
+                }
+            };
+            app.world_mut().insert_resource(pool);
             // the water is laid in low and in small heaps, since water dropped from a height in
             // a small ring lands with the spin it lacked and sloshes about
             for k in 0..15 {
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
                         let sim = world.resource::<Simulation>();
-                        let site = sim.drum.site;
-                        let radius = sim.drum.ring.radius.0 as f64;
                         let arc = -1.5 - (k % 3) as f64 * 2.5;
                         let y = (k / 3) as f64 * 1.5 - 3.0;
-                        let ground = sim
-                            .drum
-                            .landscape
-                            .sample(site.phi + arc / radius, site.y + y)
-                            .0;
-                        let on = sim.drum.wall_point(arc / radius, y);
-                        let (_, out) = sim.drum.depth_and_outward(on);
-                        let lift = ground + HEAP_CLEARANCE;
-                        let centre = [
-                            on[0] - out[0] * lift,
-                            on[1] - out[1] * lift,
-                            on[2] - out[2] * lift,
-                        ];
+                        let centre = spot(sim, pool, [arc, y, HEAP_CLEARANCE]);
                         sim.inject(&mut fluid, centre, POOL_PARTICLES / 15)
                     });
+                // each heap settles before the next lands beside it
+                testing::run(app, Seconds(HEAP_INTERVAL));
             }
             testing::run(app, Seconds(20.0));
-            // then the avatar takes its place on the pool's bed where it lies deepest, under
-            // the water, looking along the pool
+            // then the avatar takes its place on the pool's bed where it lies deepest, looking
+            // along the pool
             let mut sim = app.world_mut().resource_mut::<Simulation>();
-            let site = sim.drum.site;
-            let radius = sim.drum.ring.radius.0 as f64;
-            let ground = sim
-                .drum
-                .landscape
-                .sample(site.phi + POOL_DEEP / radius, site.y)
-                .0;
-            let on = sim.drum.wall_point(POOL_DEEP / radius, 0.0);
-            let (_, out) = sim.drum.depth_and_outward(on);
-            let lift = ground + avatar::EYE_HEIGHT.0 as f64;
-            let eye = [
-                on[0] - out[0] * lift,
-                on[1] - out[1] * lift,
-                on[2] - out[2] * lift,
-            ];
+            let eye = spot(&sim, pool, [POOL_DEEP, 0.0, avatar::EYE_HEIGHT.0 as f64]);
             stand(&mut sim, eye, [eye[0] + 0.3, eye[1], eye[2] + 6.0]);
         }
         Cue::SpinUp => {
@@ -481,8 +598,28 @@ const RIDGE_FAR: f64 = -12.0;
 const RIDGE_HEIGHT: f64 = 1.4;
 const POOL_PARTICLES: u32 = 7500;
 const HEAP_CLEARANCE: f64 = 1.8;
-/// Where the pool lies deepest once it has settled: on the far ridge's lower slope.
-const POOL_DEEP: f64 = -6.0;
+const HEAP_INTERVAL: f32 = 1.0;
+/// Where the pool lies deepest: the middle of the valley between the ridges.
+const POOL_DEEP: f64 = -2.0;
+
+/// A place about the pool, in the frame: `arc` metres round the ring from it, `y` along the
+/// axis and `height` over the ground there, which is under the ground, and out through the
+/// glass, when negative.
+fn spot(sim: &Simulation, pool: Pool, [arc, y, height]: [f64; 3]) -> [f64; 3] {
+    let drum = &sim.drum;
+    let radius = drum.ring.radius.0 as f64;
+    let phi = pool.phi + arc / radius;
+    let axial = pool.y + y;
+    let ground = drum.landscape.sample(phi, axial).0;
+    let on = drum.wall_point(phi - drum.site.phi, axial - drum.site.y);
+    let (_, out) = drum.depth_and_outward(on);
+    let lift = ground + height;
+    [
+        on[0] - out[0] * lift,
+        on[1] - out[1] * lift,
+        on[2] - out[2] * lift,
+    ]
+}
 
 /// Put the avatar at rest with its eye at `eye`, facing `target`, standing up on the ring.
 fn stand(sim: &mut Simulation, eye: [f64; 3], target: [f64; 3]) {
@@ -491,6 +628,10 @@ fn stand(sim: &mut Simulation, eye: [f64; 3], target: [f64; 3]) {
     let len = norm(&back);
     back = back.map(|c| c / len);
     let mut right = cross(&outward.map(|c| -c), &back);
+    if norm(&right) < 1e-6 {
+        // looking straight up or down, any way round is upright: face along the axis
+        right = cross(&[0.0, 1.0, 0.0], &back);
+    }
     let len = norm(&right);
     right = right.map(|c| c / len);
     let up = cross(&back, &right);
@@ -519,7 +660,10 @@ fn main() {
             marker_script()
         }
         Some("water") => water_script(),
-        Some(other) => panic!("unknown script {other:?}: the others are `marker` and `water`"),
+        Some("survey") => survey_script(),
+        Some(other) => {
+            panic!("unknown script {other:?}: the others are `marker`, `water` and `survey`")
+        }
     };
     let mut frame = 0u32;
     for phase in script {

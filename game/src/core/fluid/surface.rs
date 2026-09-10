@@ -24,6 +24,8 @@ pub const TABLE_SLOTS: usize = 2 * MAX_BLOCKS;
 pub const MAX_VERTICES: usize = 8 * MAX_PARTICLES;
 pub const CELL_SLOTS: usize = 2 * MAX_VERTICES;
 pub const MAX_INDICES: usize = 6 * 6 * MAX_PARTICLES;
+/// Every particle may be a droplet.
+pub const MAX_DROPLETS: usize = MAX_PARTICLES;
 const ISO: f32 = 0.9;
 /// The extraction grid's cell, and how far a particle's splat reaches, in spacings.
 const CELL: f32 = 0.8 * canonical::SPACING;
@@ -91,7 +93,7 @@ pub struct SurfaceBuffers {
     /// the water's velocity there.
     pub vertices: Handle<ShaderBuffer>,
     pub indices: Handle<ShaderBuffer>,
-    /// Vertex count, index count, block count.
+    /// Vertex count, index count, block count, droplet count.
     pub counters: Handle<ShaderBuffer>,
     /// The keys of the blocks the water touches, hashed, and the block each slot names.
     pub table: Handle<ShaderBuffer>,
@@ -105,10 +107,14 @@ pub struct SurfaceBuffers {
     pub cell_value: Handle<ShaderBuffer>,
     /// The vertices as drawn, smoothed.
     pub polished: Handle<ShaderBuffer>,
+    /// Whether each particle is a droplet, left out of the surface, and the droplets: each a
+    /// vec4 of position like a vertex's and foam.
+    pub lone: Handle<ShaderBuffer>,
+    pub droplets: Handle<ShaderBuffer>,
 }
 
 impl SurfaceBuffers {
-    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 10] {
+    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 12] {
         [
             &self.vertices,
             &self.indices,
@@ -120,6 +126,8 @@ impl SurfaceBuffers {
             &self.cell_table,
             &self.cell_value,
             &self.polished,
+            &self.lone,
+            &self.droplets,
         ]
     }
 
@@ -143,5 +151,7 @@ pub fn create_buffers(make: &mut impl FnMut(usize) -> Handle<ShaderBuffer>) -> S
         cell_table: make(CELL_SLOTS * 4),
         cell_value: make(CELL_SLOTS * 4),
         polished: make(MAX_VERTICES * 48),
+        lone: make(MAX_PARTICLES * 4),
+        droplets: make(MAX_DROPLETS * 16),
     }
 }
