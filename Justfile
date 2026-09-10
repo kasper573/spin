@@ -6,8 +6,17 @@ lint:
     cargo clippy --release --all-targets -- -D warnings
     cargo clippy --release -p game --lib --bin client --target wasm32-unknown-unknown -- -D warnings
 
+# The tests a machine without a GPU can afford: seconds each.
 test:
     cargo test --release -p game
+
+# The rest: stirring the water and looking at it costs minutes where the GPU is emulated on the
+# CPU, so these are run here, where there is a real one, rather than on a shared runner.
+gpu:
+    cargo test --release -p game -- --ignored
+
+# The whole gate before pushing: what the runners check, plus everything they cannot afford.
+verify: lint test gpu e2e
 
 # Fixed fluid workload; prints microseconds per particle-substep.
 bench:

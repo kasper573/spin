@@ -536,7 +536,7 @@ fn cue(app: &mut App, cue: Cue) {
                 if if view.daylight { high(app) } else { low(app) } {
                     break;
                 }
-                testing::run(app, Seconds(1.0 / 30.0));
+                testing::watch(app, Seconds(1.0 / 30.0));
                 waited += 1.0 / 30.0;
                 assert!(
                     waited < 60.0,
@@ -695,7 +695,7 @@ fn main() {
     fs::create_dir_all(out).expect("create target/record");
     let mut app = testing::headless();
     let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
-    testing::run(&mut app, Seconds(0.5));
+    testing::watch(&mut app, Seconds(0.5));
 
     let frame_time = Seconds(1.0 / FPS as f32);
     let mut srt = String::new();
@@ -746,7 +746,7 @@ fn main() {
             if let Some(view) = phase.hold {
                 hold(&mut app, view);
             }
-            testing::run(&mut app, frame_time);
+            testing::watch(&mut app, frame_time);
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());
             let readout = {
                 let sim = app.world().resource::<Simulation>();

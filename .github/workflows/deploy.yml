@@ -15,11 +15,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The page is built and tried in the browser while the simulation's own tests run beside it:
-  # the tests are the long pole, and nothing in them is needed to build the page.
+  # A runner has no GPU and four cores, so it is asked only for what it can do quickly: that the
+  # code is clean, that the simulation behaves, and that the page builds. What wants a GPU of its
+  # own — the sights and the browser test — is run by `just verify` before pushing.
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust
+        with:
+          cache: lint
+      - name: Lint
+        run: just lint
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust
+        with:
+          cache: test
+      - name: Test
+        run: just test
+
   page:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
     steps:
@@ -27,39 +54,15 @@ jobs:
       - uses: ./.github/actions/rust
         with:
           cache: page
-      - name: Lint
-        run: just lint
       - name: Build the page
         run: just dist
-      - name: End-to-end test
-        run: just e2e
-      - name: Save e2e screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-screenshots
-          path: target/e2e/*.png
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/rust
-        with:
-          # the cache the one old job left, which holds what the tests are built from
-          cache: build
-      - name: Test
-        run: just test
-
   deploy:
-    needs: [page, test]
+    needs: [lint, test, page]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

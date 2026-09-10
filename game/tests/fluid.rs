@@ -101,6 +101,7 @@ fn water_placed_onto_water_settles_around_it() {
 /// Spinning the ring up under water hanging still in it brings the water down onto the
 /// floor: the ring's gravity is nothing but its spin.
 #[test]
+#[ignore = "wants a GPU"]
 fn spinning_up_a_still_ring_brings_placed_water_down_to_the_floor() {
     let mut app = testing::headless();
     still(&mut app);
@@ -170,6 +171,7 @@ fn water_stays_inside_the_drum() {
 }
 
 #[test]
+#[ignore = "wants a GPU"]
 fn water_follows_the_ring_when_it_is_made_smaller() {
     let mut app = testing::headless();
     set_spin(&mut app, 1.0);
@@ -205,6 +207,7 @@ fn water_follows_the_ring_when_it_is_made_smaller() {
 /// Water dropped at the axis of the spinning drum ends up on the glass, riding round with it:
 /// at rest in the drum's own frame.
 #[test]
+#[ignore = "wants a GPU"]
 fn spinning_drum_throws_water_onto_the_glass() {
     let mut app = testing::headless();
     set_spin(&mut app, 1.0);
@@ -290,6 +293,7 @@ fn a_particle_on_its_own_is_a_droplet_not_a_surface() {
 /// the drum's own frame, so between two steps a vertex moves only as far as the water does,
 /// not by the grid sliding under it.
 #[test]
+#[ignore = "wants a GPU"]
 fn settled_water_holds_still_in_the_drums_frame() {
     let mut app = testing::headless();
     for k in 0..10 {
@@ -361,6 +365,7 @@ fn big_ring(width: f32) -> testing::Headless {
 }
 
 #[test]
+#[ignore = "wants a GPU"]
 fn a_big_ring_of_water_keeps_its_whole_surface() {
     for width in [12.0, 60.0] {
         let mut app = big_ring(width);

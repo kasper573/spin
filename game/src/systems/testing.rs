@@ -356,28 +356,50 @@ fn device() -> RenderResources {
 
 /// Run frames until this much simulated time has passed, a frame's worth at a time, each frame
 /// waiting for the water's report on the last: the bodies never run ahead of the water, however
-/// fast or slow the machine.
+/// fast or slow the machine. Nothing is drawn; the water's kernels run before any camera in the
+/// render graph, so it steps exactly as it would with the eye open.
 pub fn run(app: &mut App, seconds: Seconds) {
+    watching(app, false);
+    advance(app, seconds);
+}
+
+/// Run the simulation for this long with the eye open, so that everything which adapts to what
+/// is on screen — the exposure above all — sees every frame on the way.
+pub fn watch(app: &mut App, seconds: Seconds) {
+    watching(app, true);
+    advance(app, seconds);
+    watching(app, false);
+}
+
+/// Draw one frame of this much simulated time, without waiting for the water's report on it.
+pub fn frame(app: &mut App, seconds: Seconds) {
+    watching(app, true);
+    step(app, seconds);
+    watching(app, false);
+}
+
+fn advance(app: &mut App, seconds: Seconds) {
     let longest = SUBSTEP_RATE.period().0 * MAX_SUBSTEPS_PER_FRAME as f32;
     let mut left = seconds.0;
     while left > 0.0 {
-        let step = left.min(longest);
-        left -= step;
-        frame(app, Seconds(step));
+        let size = left.min(longest);
+        left -= size;
+        step(app, Seconds(size));
         settle(app);
     }
 }
 
-/// Run the simulation for this long without drawing it: a test that only needs the water to
-/// settle should not pay to look at every frame of it on the way. The water's kernels run
-/// before any camera in the render graph, so it steps exactly as it would with the eye open.
-pub fn run_unseen(app: &mut App, seconds: Seconds) {
-    watching(app, false);
-    run(app, seconds);
-    watching(app, true);
+fn step(app: &mut App, seconds: Seconds) {
+    app.world_mut()
+        .resource_mut::<Simulation>()
+        .request(seconds);
+    app.world_mut().resource_mut::<Step>().0 = seconds;
+    app.update();
 }
 
-/// Whether the player's camera draws what it sees.
+/// Whether the player's camera draws what it sees. The eye stays shut unless a picture is
+/// being taken: on a machine without a GPU a drawn frame costs about as much as a second of
+/// simulation, and most of what the tests assert is never looked at.
 fn watching(app: &mut App, drawing: bool) {
     let mut cameras = app
         .world_mut()
@@ -385,15 +407,6 @@ fn watching(app: &mut App, drawing: bool) {
     for mut camera in cameras.iter_mut(app.world_mut()) {
         camera.is_active = drawing;
     }
-}
-
-/// Run one frame of this much simulated time without waiting for the water's report on it.
-pub fn frame(app: &mut App, seconds: Seconds) {
-    app.world_mut()
-        .resource_mut::<Simulation>()
-        .request(seconds);
-    app.world_mut().resource_mut::<Step>().0 = seconds;
-    app.update();
 }
 
 /// How much time the frame being run simulates, which the paused clock is advanced by so
@@ -432,6 +445,7 @@ pub fn settle(app: &mut App) {
 
 /// Run frames until a fresh copy of the water has been read back, then return it.
 pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
+    watching(app, false);
     let buffers = app.world().resource::<FluidBuffers>().clone();
     let ticket = app
         .world_mut()

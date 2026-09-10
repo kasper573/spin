@@ -503,6 +503,7 @@ fn flood(app: &mut App) {
 }
 
 #[test]
+#[ignore = "wants a GPU"]
 fn the_thrusters_push_through_water_and_out_of_it() {
     let mut app = testing::headless();
     flood(&mut app);

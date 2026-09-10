@@ -60,5 +60,6 @@ Before you start work on a task run benchmarks via `just bench` and save the res
 
 After you finish the task:
 
-- `cargo fmt` · `just lint` (no warnings) · `just test` · `just wasm` · `just e2e`
+- `cargo fmt`, then `just verify` (no warnings, no failures): the runners only run what a
+  machine without a GPU can afford, so the rest of the suite is yours to run here.
 - Run benchmarks again and compare the results to the previous run. If there is a significant regression, investigate and fix it.

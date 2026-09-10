@@ -80,6 +80,7 @@ fn the_avatar_stands_under_one_g_on_any_size_of_ring() {
 /// The water's resolution follows the ring, so a ring of any size is the same number of
 /// spacings across, and water dropped in a huge ring falls to its floor and grows a surface.
 #[test]
+#[ignore = "wants a GPU"]
 fn water_in_a_huge_ring_settles_on_its_floor_and_is_meshed() {
     for radius in [1e5, 1e8] {
         let mut app = world(ring(radius));
@@ -114,6 +115,7 @@ fn water_in_a_huge_ring_settles_on_its_floor_and_is_meshed() {
 /// its water at the same number of spacings, sees that water go the same way in the same
 /// number of its own steps, which take a thousand times longer.
 #[test]
+#[ignore = "wants a GPU"]
 fn water_flows_the_same_at_any_scale() {
     let mut settled = Vec::new();
     for scale in [1.0, 1e6] {
@@ -166,6 +168,7 @@ fn water_flows_the_same_at_any_scale() {
 }
 
 #[test]
+#[ignore = "wants a GPU"]
 fn a_huge_ring_survives_a_save() {
     let mut app = world(ring(1e12));
     inject(&mut app, [1e12 - 2e9, 0.0, 0.0], 50);
@@ -201,7 +204,7 @@ fn a_ring_of_any_size_is_drawn() {
         let mut app = world(ring(radius));
         let (width, height) = (160, 90);
         let image = testing::render_to_image(&mut app, width, height);
-        testing::run(&mut app, Seconds(1.0));
+        testing::watch(&mut app, Seconds(1.0));
         let bytes = testing::capture(&mut app, &image);
         let bottom = bytes[(width * height * 3) as usize..].chunks_exact(4);
         let total = bottom.len();

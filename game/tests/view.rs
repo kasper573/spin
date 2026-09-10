@@ -39,7 +39,7 @@ fn the_ring_is_seen_from_far_away() {
             Player.teleport(&mut sim, eye, axis);
         }
         let image = testing::render_to_image(&mut app, width, height);
-        testing::run(&mut app, Seconds(0.1));
+        testing::watch(&mut app, Seconds(0.1));
         let bytes = testing::capture(&mut app, &image);
         let ring_pixels = bytes
             .chunks_exact(4)

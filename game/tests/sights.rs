@@ -96,7 +96,7 @@ fn settle_the_eye(app: &mut App, eye: [f64; 3], at: [f64; 3], daylight: bool) {
     for _ in 0..ADAPTING_STEPS {
         look(app, eye, at);
         face_the_sun(app, daylight);
-        testing::run(app, Seconds(ADAPTING / ADAPTING_STEPS as f32));
+        testing::watch(app, Seconds(ADAPTING / ADAPTING_STEPS as f32));
     }
     look(app, eye, at);
     face_the_sun(app, daylight);
@@ -116,9 +116,9 @@ fn fill_half(app: &mut App) {
         let arc = k as f64 * 1.5;
         let y = ((k % 4) as f64 - 1.5) * 2.5;
         inject(app, [arc, y, 1.8], 1500);
-        testing::run_unseen(app, Seconds(0.5));
+        testing::run(app, Seconds(0.5));
     }
-    testing::run_unseen(app, Seconds(40.0));
+    testing::run(app, Seconds(40.0));
 }
 
 /// Two ridges across the ring with a pool laid in the valley between them, and left to settle.
@@ -140,9 +140,9 @@ fn pool(app: &mut App) {
         let arc = -1.5 - (k % 3) as f64 * 2.5;
         let y = (k / 3) as f64 * 1.5 - 3.0;
         inject(app, [arc, y, 1.8], 500);
-        testing::run_unseen(app, Seconds(1.0));
+        testing::run(app, Seconds(1.0));
     }
-    testing::run_unseen(app, Seconds(20.0));
+    testing::run(app, Seconds(20.0));
 }
 
 /// The ring spun up by half, so the water is left behind and churns as it catches up.
@@ -153,13 +153,13 @@ fn churn(app: &mut App) {
         let spin = settings.spin.0 * 1.5;
         Dial::Spin.set(&mut settings, spin);
     }
-    testing::run_unseen(app, Seconds(7.0));
+    testing::run(app, Seconds(7.0));
 }
 
 /// A heap of water let go high over the pool, caught as it breaks on the surface.
 fn spray(app: &mut App) {
     inject(app, [-2.0, 0.0, 4.5], 300);
-    testing::run_unseen(app, Seconds(1.25));
+    testing::run(app, Seconds(1.25));
 }
 
 struct Sight {
@@ -363,6 +363,7 @@ fn unlit_by_night(day: &View, night: &View) {
 
 /// The ring half full of water, seen from inside and out.
 #[test]
+#[ignore = "wants a GPU"]
 fn half_a_ring_of_water_is_seen_from_everywhere() {
     let mut sight = Sight::new("half", fill_half);
     // the water stands three metres over the ground all the way round
@@ -424,6 +425,7 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
 
 /// A pool between two ridges, seen from its bed, its shore, over it, and from outside.
 #[test]
+#[ignore = "wants a GPU"]
 fn a_pool_is_seen_from_everywhere() {
     let mut sight = Sight::new("pool", pool);
     let under = ([-2.0, 0.0, 0.6], [-8.0, 0.0, 0.6]);
@@ -461,6 +463,7 @@ fn a_pool_is_seen_from_everywhere() {
 /// outside the glass end. The sun is brought round before the heap is let go, since the splash
 /// is over in a moment.
 #[test]
+#[ignore = "wants a GPU"]
 fn a_splash_is_seen_in_flight() {
     let shore = ([3.5, 2.5, 2.4], [-2.0, 0.0, 2.2]);
     let end = ([-2.0, -10.0, 3.0], [-2.0, 0.0, 2.5]);
@@ -482,6 +485,7 @@ fn a_splash_is_seen_in_flight() {
 /// A pool on a ring two hundred metres across, where the same water covers a much smaller
 /// part of the world: it must still be seen from its shore, from under it and from outside.
 #[test]
+#[ignore = "wants a GPU"]
 fn a_pool_on_a_large_ring_is_seen_from_everywhere() {
     let ring = Ring {
         radius: Metres(100.0),
@@ -508,6 +512,7 @@ fn a_pool_on_a_large_ring_is_seen_from_everywhere() {
 /// Churning water, thrown about by the ring spinning up: it must still read as water from
 /// just over it and from under it, not as a pattern painted on the ground.
 #[test]
+#[ignore = "wants a GPU"]
 fn churning_water_is_seen_from_everywhere() {
     let mut sight = Sight::new("churn", churn);
     let over = ([0.0, 0.0, 3.4], [-14.0, 0.0, 2.9]);
