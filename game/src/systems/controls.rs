@@ -14,7 +14,7 @@ use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
 
 /// Water appears this far in front of the surface the crosshair rests on.
-const INJECT_DEPTH: Metres = Metres(1.0);
+pub const INJECT_DEPTH: Metres = Metres(1.0);
 /// Mouse speed (pixels per second) at which a turning thruster is asked for full.
 const MOUSE_FULL_SPEED: PixelsPerSecond = PixelsPerSecond(800.0);
 /// The sculpting brush: how wide it is and how fast it raises the ground.

@@ -90,12 +90,20 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
     }
 }
 
+/// The water's kernels for the frame, which anything reading their results the same frame runs
+/// after.
+#[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct FluidStep;
+
 pub fn install(render_app: &mut SubApp) {
     render_app
         .init_resource::<Uniforms>()
         .add_systems(RenderStartup, init_pipelines)
         .add_systems(Render, prepare.in_set(RenderSystems::PrepareBindGroups))
-        .add_systems(RenderGraph, dispatch.before(camera_driver));
+        .add_systems(
+            RenderGraph,
+            dispatch.in_set(FluidStep).before(camera_driver),
+        );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,6 +130,8 @@ enum Kernel {
     Extract,
     PrepareQuads,
     Quads,
+    Polish,
+    PolishBack,
 }
 
 const PARTICLES: &str = "embedded://game/core/fluid/shaders/particles.wgsl";
@@ -148,9 +158,12 @@ struct Spec {
 const NONE: &[(usize, u32)] = &[];
 const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (0, 14), (2, 2), (2, 3)];
 const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12), (2, 1)];
-const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 9), (0, 12)];
+/// The surface is smoothed this many times back and forth, and once more into the buffer
+/// it is drawn from.
+const POLISH_PASSES: usize = 1;
+const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 22] = [
+const SPECS: [Spec; 24] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -364,7 +377,7 @@ const SPECS: [Spec; 22] = [
         kernel: Kernel::Extract,
         shader: SURFACE,
         entry: "extract",
-        particles: &[0, 1, 9, 12],
+        particles: &[0, 1, 2, 9, 12],
         vessel: false,
         bodies: &[],
         surface: &[0, 1, 3, 6, 8, 9],
@@ -390,6 +403,28 @@ const SPECS: [Spec; 22] = [
         vessel: false,
         bodies: &[],
         surface: &[0, 1, 2, 3, 4, 5, 6, 8, 9],
+        read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Polish,
+        shader: SURFACE,
+        entry: "polish",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[0, 1, 3, 4, 5, 6, 8, 9, 10],
+        read_only: SURFACE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::PolishBack,
+        shader: SURFACE,
+        entry: "polish_back",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[0, 1, 3, 4, 5, 6, 8, 9, 10],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -887,5 +922,10 @@ fn dispatch(
         d.run(encoder, Kernel::Extract, 0, so, 0, vessel_now, blocks);
         d.run(encoder, Kernel::PrepareQuads, 0, so, 0, vessel_now, one);
         d.run(encoder, Kernel::Quads, 0, so, 0, vessel_now, cells);
+        for _ in 0..POLISH_PASSES {
+            d.run(encoder, Kernel::Polish, 0, so, 0, vessel_now, cells);
+            d.run(encoder, Kernel::PolishBack, 0, so, 0, vessel_now, cells);
+        }
+        d.run(encoder, Kernel::Polish, 0, so, 0, vessel_now, cells);
     }
 }

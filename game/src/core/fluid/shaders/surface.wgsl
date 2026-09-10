@@ -29,9 +29,20 @@ struct Vertex {
     position: vec4<f32>,
     // xyz: normal, w: the key of the cell the vertex sits in, as bits
     normal: vec4<f32>,
+    // xyz: the water's velocity at the vertex, in the vessel's frame
+    velocity: vec4<f32>,
+}
+
+/// What the water is like at a point: the gradient of its density, and its velocity and foam
+/// weighted by the same kernel.
+struct Probe {
+    gradient: vec3<f32>,
+    velocity: vec3<f32>,
+    foam: f32,
 }
 
 @group(0) @binding(1) var<storage, read> position: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> velocity: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read> cell_start: array<u32>;
 @group(0) @binding(12) var<storage, read> key: array<u32>;
 
@@ -45,8 +56,11 @@ struct Vertex {
 @group(3) @binding(7) var<storage, read_write> dispatch: array<u32>;
 @group(3) @binding(8) var<storage, read_write> cell_table: array<atomic<u32>>;
 @group(3) @binding(9) var<storage, read_write> cell_value: array<u32>;
+@group(3) @binding(10) var<storage, read_write> polished: array<Vertex>;
 
 const BLOCK: i32 = 4;
+// how far each vertex is drawn toward the middle of its neighbours when the surface is polished
+const POLISH: f32 = 0.7;
 const CORNERS_PER_BLOCK: u32 = 125u;
 const CELLS_PER_BLOCK: u32 = 64u;
 const COUNTER_VERTICES: u32 = 0u;
@@ -64,7 +78,7 @@ const MAX_PROBES: u32 = 64u;
 // a dispatch axis holds at most 65535 workgroups, so the blocks are spread over two
 const DISPATCH_ROW: u32 = 32768u;
 
-var<workgroup> field: array<vec2<f32>, 125>;
+var<workgroup> field: array<f32, 125>;
 
 fn block_key(b: vec3<i32>) -> u32 {
     let c = b + vec3(KEY_ORIGIN);
@@ -215,12 +229,10 @@ fn corner_position(block: vec3<i32>, corner: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(block * BLOCK + corner) * surface.cell;
 }
 
-/// Splatted density and foam at a corner of a block: the smooth kernel of every particle within
-/// reach.
-fn splat(b: vec3<i32>, corner: vec3<i32>) -> vec2<f32> {
+/// Splatted density at a corner of a block: the smooth kernel of every particle within reach.
+fn splat(b: vec3<i32>, corner: vec3<i32>) -> f32 {
     let p = corner_position(b, corner);
     var d = 0.0;
-    var f = 0.0;
     let c = coords_of(p);
     for (var n = 0u; n < 27u; n++) {
         let cell = neighbour_cell(c, n);
@@ -238,14 +250,52 @@ fn splat(b: vec3<i32>, corner: vec3<i32>) -> vec2<f32> {
             if (q < 1.0) {
                 let w = (1.0 - q) * (1.0 - q);
                 d += w;
-                f += w * s.w;
             }
         }
     }
-    return vec2(d, f);
+    return d;
 }
 
-fn corner_at(c: vec3<i32>) -> vec2<f32> {
+/// The density gradient, velocity and foam of the water at a point of the surface, from every
+/// particle within reach: the gradient gives the surface its true normal, smooth where the
+/// corner samples alone would step from cell to cell.
+fn probe(p: vec3<f32>) -> Probe {
+    var out: Probe;
+    out.gradient = vec3(0.0);
+    out.velocity = vec3(0.0);
+    out.foam = 0.0;
+    var weight = 0.0;
+    let c = coords_of(p);
+    for (var n = 0u; n < 27u; n++) {
+        let cell = neighbour_cell(c, n);
+        let k = cell_key(cell);
+        let ci = cell_slot(cell);
+        let end = cell_start[ci + 1u];
+        for (var j = cell_start[ci]; j < end; j++) {
+            let kj = key[j];
+            let s = position[j];
+            if (kj != k) {
+                continue;
+            }
+            let r = p - s.xyz;
+            let q = dot(r, r) * surface.inv_r2;
+            if (q < 1.0) {
+                let w = (1.0 - q) * (1.0 - q);
+                out.gradient += -4.0 * (1.0 - q) * surface.inv_r2 * r;
+                out.velocity += w * velocity[j].xyz;
+                out.foam += w * s.w;
+                weight += w;
+            }
+        }
+    }
+    if (weight > 0.0) {
+        out.velocity /= weight;
+        out.foam /= weight;
+    }
+    return out;
+}
+
+fn corner_at(c: vec3<i32>) -> f32 {
     return field[u32((c.x * 5 + c.y) * 5 + c.z)];
 }
 
@@ -281,14 +331,9 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     let cell = cell_coords(t);
     var d: array<f32, 8>;
     var mask = 0u;
-    var foam = 0.0;
-    var weight = 0.0;
     for (var k = 0u; k < 8u; k++) {
-        let corner = corner_at(cell + OFFSETS[k]);
-        d[k] = corner.x;
-        foam += corner.y;
-        weight += corner.x;
-        if (corner.x > surface.iso) {
+        d[k] = corner_at(cell + OFFSETS[k]);
+        if (d[k] > surface.iso) {
             mask |= 1u << k;
         }
     }
@@ -311,19 +356,20 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     if (slot >= surface.max_vertices) {
         return;
     }
-    let p = (vec3<f32>(b * BLOCK + cell - surface.anchor) + sum / crossings) * surface.cell;
-    let gradient = vec3(
-        (d[1] - d[0]) + (d[3] - d[2]) + (d[5] - d[4]) + (d[7] - d[6]),
-        (d[2] - d[0]) + (d[3] - d[1]) + (d[6] - d[4]) + (d[7] - d[5]),
-        (d[4] - d[0]) + (d[5] - d[1]) + (d[6] - d[2]) + (d[7] - d[3]),
-    );
-    let normal = -gradient / max(length(gradient), 1e-9);
-    var f = 0.0;
-    if (weight > 0.0) {
-        f = foam / weight;
+    let within = vec3<f32>(b * BLOCK + cell) + sum / crossings;
+    let p = (within - vec3<f32>(surface.anchor)) * surface.cell;
+    let at = probe(within * surface.cell);
+    var gradient = at.gradient;
+    if (dot(gradient, gradient) < 1e-12) {
+        gradient = vec3(
+            (d[1] - d[0]) + (d[3] - d[2]) + (d[5] - d[4]) + (d[7] - d[6]),
+            (d[2] - d[0]) + (d[3] - d[1]) + (d[6] - d[4]) + (d[7] - d[5]),
+            (d[4] - d[0]) + (d[5] - d[1]) + (d[6] - d[2]) + (d[7] - d[3]),
+        );
     }
+    let normal = -gradient / max(length(gradient), 1e-9);
     let key = cell_key_of(block, t);
-    vertices[slot] = Vertex(vec4(p, f), vec4(normal, bitcast<f32>(key)));
+    vertices[slot] = Vertex(vec4(p, at.foam), vec4(normal, bitcast<f32>(key)), vec4(at.velocity, 0.0));
     insert_cell(key, (slot << 8u) | mask);
 }
 
@@ -413,4 +459,69 @@ fn quads(@builtin(global_invocation_id) id: vec3<u32>) {
             vertex_of(block, b, c + vec3(0, -1, 0)),
         ), inside);
     }
+}
+
+/// The surface as drawn: every vertex drawn toward the middle of the vertices of the cells
+/// round it, across its faces and its edges, and its normal toward theirs, which takes the
+/// print of the particles out of the surface while the vertices the quads join stay where
+/// they were found. Applied back and forth between the two vertex buffers so it can be
+/// applied more than once.
+fn smoothed(i: u32, from_polished: bool) -> Vertex {
+    var vertex = vertices[i];
+    if (from_polished) {
+        vertex = polished[i];
+    }
+    let key = bitcast<u32>(vertex.normal.w);
+    let block = (key & 0x7fffffffu) >> 6u;
+    let b = block_coords(blocks[block]);
+    let c = cell_coords(key & 63u);
+    var sum = vec3(0.0);
+    var normal = vec3(0.0);
+    var count = 0.0;
+    for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dz = -1; dz <= 1; dz++) {
+                let away = abs(dx) + abs(dy) + abs(dz);
+                if (away == 0 || away == 3) {
+                    continue;
+                }
+                let other = vertex_of(block, b, c + vec3(dx, dy, dz));
+                if (other == NO_VERTEX) {
+                    continue;
+                }
+                var o = vertices[other];
+                if (from_polished) {
+                    o = polished[other];
+                }
+                sum += o.position.xyz;
+                normal += o.normal.xyz;
+                count += 1.0;
+            }
+        }
+    }
+    var out = vertex;
+    if (count > 0.0) {
+        out.position = vec4(mix(vertex.position.xyz, sum / count, POLISH), vertex.position.w);
+        let n = normalize(mix(vertex.normal.xyz, normal / count, POLISH));
+        out.normal = vec4(n, vertex.normal.w);
+    }
+    return out;
+}
+
+@compute @workgroup_size(64)
+fn polish(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= min(atomicLoad(&counters[COUNTER_VERTICES]), surface.max_vertices)) {
+        return;
+    }
+    polished[i] = smoothed(i, false);
+}
+
+@compute @workgroup_size(64)
+fn polish_back(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= min(atomicLoad(&counters[COUNTER_VERTICES]), surface.max_vertices)) {
+        return;
+    }
+    vertices[i] = smoothed(i, true);
 }

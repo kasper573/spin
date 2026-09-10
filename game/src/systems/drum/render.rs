@@ -8,27 +8,47 @@
 //! the site is in them, which is kept exactly.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPipeline, MaterialPipelineKey};
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
 };
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
-use super::landscape::ROWS;
-use super::{Drum, DrumFrame, DrumUniform, PANE, Ring, Site, TILE};
+use super::gpu::COLUMN_FIXED;
+use super::landscape::{ROWS, SEGMENTS};
+use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Ring, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
-use crate::systems::scene::{SUN_DIRECTION, Sky, Viewpoint};
+use crate::systems::scene::{SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
+use crate::systems::water;
+
+/// The two tints the grass is tiled in, and the dirt under it.
+const GRASS: Color = Color::srgb(0.36, 0.62, 0.24);
+const GRASS_DARK: Color = Color::srgb(0.3, 0.54, 0.2);
+const DIRT: Color = Color::srgb(0.45, 0.32, 0.2);
+
+/// The ground's colour as seen from across the ring, where its tiles blur together.
+pub fn ground_albedo() -> LinearRgba {
+    let (a, b) = (GRASS.to_linear(), GRASS_DARK.to_linear());
+    LinearRgba::new(
+        (a.red + b.red) / 2.0,
+        (a.green + b.green) / 2.0,
+        (a.blue + b.blue) / 2.0,
+        1.0,
+    )
+}
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f64 = 0.02;
 const STRUTS: usize = 24;
-/// The seams between the glass panes are this wide.
-const SEAM: f32 = 0.03;
+/// The grooves bevelled into the glass along its pane grid are this wide.
+const BEVEL: f32 = 0.08;
 /// A chord's sagitta over its distance from the viewer, as a fraction: a tenth of a pixel or so.
 const CHORD: f64 = 0.03;
 /// How many chords of the finest size lie on either side of the anchor before they grow.
@@ -55,7 +75,7 @@ impl Plugin for DrumPlugin {
         .add_systems(Startup, spawn)
         .add_systems(
             Update,
-            (rebuild, place, light, feed_water)
+            (rebuild, place, light, wet, feed_water)
                 .chain()
                 .in_set(SimSet::Observe),
         );
@@ -77,15 +97,29 @@ pub fn slack(ring: Ring, standoff: f64) -> f64 {
     FINE_CHORDS * chord(ring, standoff, 0.0)
 }
 
+/// The glass panes: what they let through, and what they mirror; see `glass.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct GlassMaterial {
+    /// How much of each colour a pane lets through.
     #[uniform(0)]
     tint: LinearRgba,
+    /// Turns a direction of the drum's frame into one among the stars.
     #[uniform(0)]
-    sun: Vec4,
-    /// The pane size round the wall and along it, and the seam width.
+    to_stars: Vec4,
+    #[uniform(0)]
+    background: LinearRgba,
+    /// The pane size round the wall and along it, the groove width and the glass thickness.
     #[uniform(0)]
     panes: Vec4,
+    /// Where the viewpoint lies in the site's frame, in metres.
+    #[uniform(0)]
+    origin: Vec4,
+    /// The ring's radius and half width, in metres.
+    #[uniform(0)]
+    ring: Vec4,
+    /// The ground's colour as seen from across the ring.
+    #[uniform(0)]
+    ground: LinearRgba,
 }
 
 impl Material for GlassMaterial {
@@ -93,8 +127,8 @@ impl Material for GlassMaterial {
         "embedded://game/systems/shaders/glass.wgsl".into()
     }
 
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+    fn reads_view_transmission_texture(&self) -> bool {
+        true
     }
 
     fn specialize(
@@ -108,24 +142,54 @@ impl Material for GlassMaterial {
     }
 }
 
-/// The ground's colouring on top of the standard material; see `terrain.wgsl`.
+/// The ground, lit by the sun and by what comes down to it through the water; see
+/// `terrain.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
-struct TerrainExtension {
-    #[uniform(100)]
+struct TerrainMaterial {
+    #[uniform(0)]
     dirt: LinearRgba,
-    #[uniform(100)]
+    #[uniform(0)]
     grass: LinearRgba,
-    #[uniform(100)]
+    #[uniform(0)]
     grass_dark: LinearRgba,
+    /// The site everything is drawn about: its place round the ring in segments of the grid,
+    /// its place along the axis and the glass radius, in metres.
+    #[uniform(0)]
+    site: Vec4,
+    /// Where the point everything is drawn about lies in the site's frame, in metres.
+    #[uniform(0)]
+    origin: Vec4,
+    /// The landscape grid's angle per segment, its row spacing and the drum's half width, in
+    /// metres, and the depth of water each particle surveyed over a column adds to it.
+    #[uniform(0)]
+    grid: Vec4,
+    /// x: seconds; z: metres per second per unit of a surveyed column's flow; w: the grid's
+    /// rows and segments, packed.
+    #[uniform(0)]
+    clock: Vec4,
+    #[uniform(0)]
+    absorption: Vec4,
+    #[uniform(0)]
+    scatter: Vec4,
+    #[storage(1, read_only)]
+    columns: Handle<ShaderBuffer>,
 }
 
-impl MaterialExtension for TerrainExtension {
+impl Material for TerrainMaterial {
     fn fragment_shader() -> ShaderRef {
         "embedded://game/systems/shaders/terrain.wgsl".into()
     }
-}
 
-type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
 
 /// Something fixed to the wheel: where it sits in the drum's frame.
 #[derive(Component)]
@@ -155,15 +219,20 @@ struct WheelMaterials {
 
 fn spawn(
     mut commands: Commands,
+    frame: Res<DrumFrame>,
     mut glass: ResMut<Assets<GlassMaterial>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
     commands.insert_resource(WheelMaterials {
         glass: glass.add(GlassMaterial {
-            tint: LinearRgba::new(0.55, 0.75, 0.95, 0.09),
-            sun: SUN_DIRECTION.extend(0.0),
+            tint: LinearRgba::new(0.9, 0.96, 0.98, 1.0),
+            to_stars: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            background: SPACE.to_linear(),
             panes: Vec4::ZERO,
+            origin: Vec4::ZERO,
+            ring: Vec4::ZERO,
+            ground: ground_albedo(),
         }),
         metal: standard.add(StandardMaterial {
             base_color: Color::srgb(0.16, 0.17, 0.2),
@@ -171,18 +240,17 @@ fn spawn(
             perceptual_roughness: 0.45,
             ..default()
         }),
-        terrain: terrain.add(ExtendedMaterial {
-            base: StandardMaterial {
-                perceptual_roughness: 0.95,
-                double_sided: true,
-                cull_mode: None,
-                ..default()
-            },
-            extension: TerrainExtension {
-                dirt: Color::srgb(0.45, 0.32, 0.2).into(),
-                grass: Color::srgb(0.36, 0.62, 0.24).into(),
-                grass_dark: Color::srgb(0.3, 0.54, 0.2).into(),
-            },
+        terrain: terrain.add(TerrainMaterial {
+            dirt: DIRT.into(),
+            grass: GRASS.into(),
+            grass_dark: GRASS_DARK.into(),
+            site: Vec4::ZERO,
+            origin: Vec4::ZERO,
+            grid: Vec4::ONE,
+            clock: Vec4::ZERO,
+            absorption: water::ABSORPTION.extend(0.0),
+            scatter: water::SCATTER.extend(water::SCATTER_PER_METRE),
+            columns: frame.columns.clone(),
         }),
     });
     commands.init_resource::<Built>();
@@ -212,7 +280,12 @@ fn rebuild(
         let columns = columns(ring, standoff);
         let spans = spans(drum, standoff);
         if let Some(mut material) = glass.get_mut(&materials.glass) {
-            material.panes = Vec4::new(pane_round(ring) as f32, PANE as f32, SEAM, 0.0);
+            material.panes = Vec4::new(
+                pane_round(ring) as f32,
+                PANE as f32,
+                BEVEL,
+                GLASS_THICKNESS as f32,
+            );
         }
         let mut structure = |mesh: Mesh| {
             (
@@ -227,6 +300,7 @@ fn rebuild(
         commands.spawn((
             structure(glass_wall),
             MeshMaterial3d(materials.glass.clone()),
+            NotShadowCaster,
         ));
         for side in [-1.0, 1.0] {
             let rim = rim_mesh(drum, &columns, side);
@@ -264,11 +338,61 @@ fn place(viewpoint: Res<Viewpoint>, mut placed: Query<(&Placed, &mut Transform)>
     }
 }
 
-/// The glass glints from the sun wherever the sky has turned it.
-fn light(sky: Res<Sky>, materials: Res<WheelMaterials>, mut glass: ResMut<Assets<GlassMaterial>>) {
+/// The glass mirrors space wherever the sky has turned it.
+fn light(
+    sim: Res<Simulation>,
+    viewpoint: Res<Viewpoint>,
+    sky: Res<Sky>,
+    materials: Res<WheelMaterials>,
+    mut glass: ResMut<Assets<GlassMaterial>>,
+) {
     if let Some(mut material) = glass.get_mut(&materials.glass) {
-        material.sun = sky.sun.extend(0.0);
+        let stars = sky.rotation.inverse();
+        material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
+        let [x, y, z] = viewpoint.origin;
+        material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        let ring = sim.drum.ring;
+        material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
     }
+}
+
+/// The ground is told where the site lies on the ring and where the viewpoint lies about the
+/// site, so it can look up the water surveyed over each of its points.
+fn wet(
+    sim: Res<Simulation>,
+    fluid: Res<Fluid>,
+    viewpoint: Res<Viewpoint>,
+    materials: Res<WheelMaterials>,
+    mut terrain: ResMut<Assets<TerrainMaterial>>,
+) {
+    let Some(mut material) = terrain.get_mut(&materials.terrain) else {
+        return;
+    };
+    let drum = &sim.drum;
+    let resolution = fluid.resolution();
+    let dphi = std::f64::consts::TAU / SEGMENTS as f64;
+    material.site = Vec4::new(
+        (drum.site.phi / dphi).rem_euclid(SEGMENTS as f64) as f32,
+        drum.site.y as f32,
+        drum.ring.radius.0,
+        0.0,
+    );
+    let [x, y, z] = viewpoint.origin;
+    material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+    let footprint = drum.landscape.segment_arc() * drum.landscape.row_spacing();
+    let particle = resolution.length().powi(3);
+    material.grid = Vec4::new(
+        std::f32::consts::TAU / SEGMENTS as f32,
+        drum.landscape.row_spacing() as f32,
+        drum.ring.half_width.0,
+        (particle / footprint) as f32,
+    );
+    material.clock = Vec4::new(
+        sim.time.0,
+        (resolution.length() / COLUMN_FIXED) as f32,
+        (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
+        (ROWS * 4096 + SEGMENTS) as f32,
+    );
 }
 
 /// The turns round the ring the meshes are sampled at, from the site round to it again: the

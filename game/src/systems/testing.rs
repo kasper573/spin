@@ -12,6 +12,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::renderer::initialize_renderer;
 use bevy::render::settings::{Backends, RenderCreation, RenderResources, WgpuSettings};
 use bevy::render::storage::ShaderBuffer;
+use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
@@ -306,6 +307,8 @@ fn publish(
 pub fn headless() -> Headless {
     let turn = GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut app = app::build_headless(RenderCreation::Manual(device()));
+    app.init_resource::<Step>()
+        .add_systems(First, advance_clock.after(TimeSystems));
     app.finish();
     app.cleanup();
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
@@ -370,7 +373,26 @@ pub fn frame(app: &mut App, seconds: Seconds) {
     app.world_mut()
         .resource_mut::<Simulation>()
         .request(seconds);
+    app.world_mut().resource_mut::<Step>().0 = seconds;
     app.update();
+}
+
+/// How much time the frame being run simulates, which the paused clock is advanced by so
+/// that everything timed sees the frame last as long as it simulates.
+#[derive(Resource, Default)]
+struct Step(Seconds);
+
+fn advance_clock(
+    mut step: ResMut<Step>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+    mut time: ResMut<Time>,
+) {
+    if step.0.0 <= 0.0 {
+        return;
+    }
+    virtual_time.advance_by(std::time::Duration::from_secs_f32(step.0.0));
+    *time = virtual_time.as_generic();
+    step.0 = Seconds(0.0);
 }
 
 /// Run frames that simulate nothing until the water has reported on every frame issued.
@@ -460,7 +482,7 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
         .copied()
         .unwrap_or(0) as usize;
     read_back(app, Readback::buffer(surface.vertices))
-        .chunks_exact(32)
+        .chunks_exact(48)
         .take(count)
         .map(|v| {
             let f = |i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);

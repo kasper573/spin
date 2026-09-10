@@ -21,6 +21,7 @@ bevy = { workspace = true, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
+    "bevy_post_process",
     "bevy_light",
     "bevy_camera",
     "bevy_color",

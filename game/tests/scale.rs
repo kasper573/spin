@@ -192,20 +192,21 @@ fn a_huge_ring_survives_a_save() {
     );
 }
 
-/// A frame of a ring of any size, up to one a light year across, draws the ring: the ground
-/// fills the bottom of the view in front of the standing avatar.
+/// A frame of a ring of any size, up to one a light year across, draws the ring: once the eye
+/// has adapted to the light, the ground fills the bottom of the view in front of the standing
+/// avatar, green however dim the side of the ring it is on.
 #[test]
 fn a_ring_of_any_size_is_drawn() {
     for radius in [10.5, 1e7, 1e16] {
         let mut app = world(ring(radius));
         let (width, height) = (160, 90);
         let image = testing::render_to_image(&mut app, width, height);
-        testing::run(&mut app, Seconds(0.1));
+        testing::run(&mut app, Seconds(1.0));
         let bytes = testing::capture(&mut app, &image);
         let bottom = bytes[(width * height * 3) as usize..].chunks_exact(4);
         let total = bottom.len();
         let ground = bottom
-            .filter(|p| p[1] > 30 && p[1] > p[0] && p[1] > p[2])
+            .filter(|p| p[1] > 8 && p[1] > p[0] && p[1] > p[2])
             .count();
         assert!(
             ground * 20 > total * 19,

@@ -1,23 +1,26 @@
 // The stars: a sphere about the viewer drawn at infinity, so that nothing is ever behind it
-// however far away it is, and lit by a hash of the direction it is seen in.
+// however far away it is, turned with the sky, and lit by the direction each point of it is
+// seen in from within it.
 #import bevy_pbr::forward_io::{Vertex, VertexOutput}
 #import bevy_pbr::mesh_functions
-#import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::view_transformations::position_world_to_clip
+#import bevy_pbr::mesh_view_bindings::view
+#import space::space_colour
+#ifdef DISTANCE_FOG
+#import bevy_pbr::mesh_view_bindings::fog
+#import bevy_pbr::pbr_functions::apply_fog
+#endif
 
 struct Sky {
     background: vec4<f32>,
+    // the sun's direction among the stars
+    sun: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: Sky;
 
-fn hash3(p: vec3<f32>) -> f32 {
-    let q = fract(p * vec3(0.1031, 0.1030, 0.0973));
-    let r = q + dot(q, q.yxz + 33.33);
-    return fract((r.x + r.y) * r.z);
-}
-
-/// Every point of the sphere lands on the far plane: as far as the depth buffer reaches.
+/// Every point of the sphere lands on the far plane: as far as the depth buffer reaches. Its
+/// direction among the stars, before the sphere is turned, rides along as the normal.
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     var out: VertexOutput;
@@ -25,19 +28,19 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
     let clip = position_world_to_clip(out.world_position.xyz);
     out.position = vec4(clip.xy, 0.0, clip.w);
+    out.world_normal = normalize(vertex.position);
     out.instance_index = vertex.instance_index;
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let dir = normalize(in.world_position.xyz - view.world_position);
-    let cell = floor(dir * 140.0);
-    let h = hash3(cell);
-    let centre = (cell + 0.5 + vec3(hash3(cell + 1.7), hash3(cell + 3.1), hash3(cell + 5.3)) - 0.5) / 140.0;
-    let d = length(dir - normalize(centre)) * 140.0;
-    let star = smoothstep(0.35, 0.0, d) * step(0.965, h);
-    let bright = 0.5 + 0.5 * hash3(cell + 9.9);
-    let tint = mix(vec3(0.8, 0.85, 1.0), vec3(1.0, 0.92, 0.8), hash3(cell + 2.2));
-    return vec4(sky.background.rgb + tint * star * bright, 1.0);
+    let dir = normalize(in.world_normal);
+    let out = vec4(space_colour(dir, normalize(sky.sun.xyz), sky.background.rgb), 1.0);
+#ifdef DISTANCE_FOG
+    // with the eye under water, space is seen through the water round the eye
+    return apply_fog(fog, out, in.world_position.xyz, view.world_position, in.position.xy);
+#else
+    return out;
+#endif
 }

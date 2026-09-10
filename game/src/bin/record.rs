@@ -4,18 +4,21 @@
 //! it, rendered headless frame by frame into `target/record/` as PNGs beside the thrusters'
 //! voices as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
 //! The body turns to look, so looking round is a matter of the turning thrusters. Run with
-//! `marker` as its argument, it records the crosshair's marker wrapping the ground instead.
+//! `marker` as its argument, it records the crosshair's marker wrapping the ground instead, and
+//! with `water`, the water: poured in, waded through, seen from under and from above, set
+//! flowing by a change of spin, and poured from the crosshair.
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
 use bevy::prelude::*;
 use game::core::audio::{self, Fader, Placement, Voice};
-use game::core::avatar::{TURN_RATE, Thruster};
+use game::core::avatar::{self, Gyros, TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
+use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::Seconds;
 use game::systems::aim::Aim;
-use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE};
+use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::Simulation;
@@ -37,6 +40,11 @@ enum Cue {
     Equalize,
     /// Raise a few hills on the ground ahead.
     Hills,
+    /// Spin the ring up by half again.
+    SpinUp,
+    /// Raise the ground under the avatar into a bank, hollow a basin out of the ground ahead,
+    /// and pour water in all round the ring, enough to fill the basin over head height.
+    Basin,
 }
 
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
@@ -47,6 +55,8 @@ struct Phase {
     cue: Cue,
     /// Whether the sculpting brush is held on the crosshair throughout.
     sculpting: bool,
+    /// Whether water is poured at the crosshair throughout.
+    pouring: bool,
 }
 
 /// The time the turning thrusters at `level` take to turn the body by `radians`.
@@ -63,6 +73,7 @@ fn script() -> Vec<Phase> {
         caption,
         cue: Cue::None,
         sculpting: false,
+        pouring: false,
     };
     let eased = |seconds, held: &[Thruster], level: f32, caption| {
         let mut pilot = PilotInput::default();
@@ -184,6 +195,7 @@ fn marker_script() -> Vec<Phase> {
             caption,
             cue: Cue::None,
             sculpting,
+            pouring: false,
         }
     };
     let (pan, sweep) = (0.3, 0.55);
@@ -267,24 +279,104 @@ fn marker_script() -> Vec<Phase> {
     ]
 }
 
+/// The water: poured in all round the ring and left to settle, looked into and across, waded
+/// into until the eye is under it, looked at from below, flown out of and looked down on,
+/// set flowing by spinning the ring up, and poured from the crosshair.
+fn water_script() -> Vec<Phase> {
+    use Thruster::*;
+    let phase = |seconds, held: &[Thruster], level: f32, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            seconds,
+            pilot,
+            caption,
+            cue: Cue::None,
+            sculpting: false,
+            pouring: false,
+        }
+    };
+    let glance = 0.5;
+    vec![
+        Phase {
+            cue: Cue::Basin,
+            ..phase(
+                3.5,
+                &[Down],
+                1.0,
+                "held down (Shift) on the bed of a pool dammed between two ridges: everything seen through the water, dimmed and coloured by its depth",
+            )
+        },
+        phase(
+            turn_time(1.1, glance),
+            &[PitchUp, Down],
+            glance,
+            "looking up at the surface from below (mouse up)",
+        ),
+        phase(
+            3.0,
+            &[Down],
+            1.0,
+            "the surface from below: the world above within the critical angle, the bed mirrored beyond it",
+        ),
+        phase(2.4, &[Up], 1.0, "thrusting up out of the water (Space)"),
+        phase(1.0, &[], 0.0, "rising"),
+        phase(
+            turn_time(1.5, glance),
+            &[PitchDown],
+            glance,
+            "looking down at the pool from above (mouse down)",
+        ),
+        phase(
+            4.0,
+            &[],
+            0.0,
+            "the ring mirrored in the water where it lies flat, the sun glinting where it ripples, the bed bent by them",
+        ),
+        phase(3.0, &[], 0.0, "falling back in"),
+        Phase {
+            cue: Cue::SpinUp,
+            ..phase(
+                7.0,
+                &[],
+                0.0,
+                "the ring spun up by half (F1): the water is left behind, and flows and churns",
+            )
+        },
+        Phase {
+            pouring: true,
+            ..phase(
+                4.0,
+                &[],
+                0.0,
+                "pouring water from the crosshair (LMB): foam where it churns, ripples riding the flow",
+            )
+        },
+        phase(4.0, &[], 0.0, "the pour settling"),
+    ]
+}
+
 fn cue(app: &mut App, cue: Cue) {
     match cue {
         Cue::None => {}
         Cue::Flood => {
             for k in 0..30 {
-                let a = k as f64 * 0.52;
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
                         let sim = world.resource::<Simulation>();
-                        sim.inject(
-                            &mut fluid,
-                            sim.drum.from_water([
-                                a.cos() * 7.0,
-                                (k % 3) as f64 * 3.0 - 3.0,
-                                a.sin() * 7.0,
-                            ]),
-                            1500,
-                        )
+                        let radius = sim.drum.ring.radius.0 as f64;
+                        let turn = (-7.0 + (k % 3) as f64 * 1.5 - 1.5) / radius;
+                        let on = sim.drum.wall_point(turn, (k % 5) as f64 - 2.0);
+                        let (_, out) = sim.drum.depth_and_outward(on);
+                        let height = 2.5 + (k / 5) as f64 * 0.5;
+                        let centre = [
+                            on[0] - out[0] * height,
+                            on[1] - out[1] * height,
+                            on[2] - out[2] * height,
+                        ];
+                        sim.inject(&mut fluid, centre, 1500)
                     });
             }
         }
@@ -294,6 +386,75 @@ fn cue(app: &mut App, cue: Cue) {
             Dial::Width.set(&mut settings, 16.0);
         }
         Cue::Equalize => app.world_mut().resource_mut::<Settings>().equalize_thrust(),
+        Cue::Basin => {
+            {
+                let mut sim = app.world_mut().resource_mut::<Simulation>();
+                let site = sim.drum.site;
+                let radius = sim.drum.ring.radius.0 as f64;
+                // two broad ridges across the ring, a valley between them for the pool
+                for crest in [RIDGE_NEAR, RIDGE_FAR] {
+                    let phi = site.phi + crest / radius;
+                    for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
+                        for _ in 0..20 {
+                            sim.drum
+                                .landscape
+                                .sculpt(phi, site.y + y, 8.0, RIDGE_HEIGHT / 20.0);
+                        }
+                    }
+                }
+            }
+            // the water is laid in low and in small heaps, since water dropped from a height in
+            // a small ring lands with the spin it lacked and sloshes about
+            for k in 0..15 {
+                app.world_mut()
+                    .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                        let sim = world.resource::<Simulation>();
+                        let site = sim.drum.site;
+                        let radius = sim.drum.ring.radius.0 as f64;
+                        let arc = -1.5 - (k % 3) as f64 * 2.5;
+                        let y = (k / 3) as f64 * 1.5 - 3.0;
+                        let ground = sim
+                            .drum
+                            .landscape
+                            .sample(site.phi + arc / radius, site.y + y)
+                            .0;
+                        let on = sim.drum.wall_point(arc / radius, y);
+                        let (_, out) = sim.drum.depth_and_outward(on);
+                        let lift = ground + HEAP_CLEARANCE;
+                        let centre = [
+                            on[0] - out[0] * lift,
+                            on[1] - out[1] * lift,
+                            on[2] - out[2] * lift,
+                        ];
+                        sim.inject(&mut fluid, centre, POOL_PARTICLES / 15)
+                    });
+            }
+            testing::run(app, Seconds(20.0));
+            // then the avatar takes its place on the pool's bed where it lies deepest, under
+            // the water, looking along the pool
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            let site = sim.drum.site;
+            let radius = sim.drum.ring.radius.0 as f64;
+            let ground = sim
+                .drum
+                .landscape
+                .sample(site.phi + POOL_DEEP / radius, site.y)
+                .0;
+            let on = sim.drum.wall_point(POOL_DEEP / radius, 0.0);
+            let (_, out) = sim.drum.depth_and_outward(on);
+            let lift = ground + avatar::EYE_HEIGHT.0 as f64;
+            let eye = [
+                on[0] - out[0] * lift,
+                on[1] - out[1] * lift,
+                on[2] - out[2] * lift,
+            ];
+            stand(&mut sim, eye, [eye[0] + 0.3, eye[1], eye[2] + 6.0]);
+        }
+        Cue::SpinUp => {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            let spin = settings.spin.0 * 1.5;
+            Dial::Spin.set(&mut settings, spin);
+        }
         Cue::Hills => {
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             let site = sim.drum.site;
@@ -310,6 +471,34 @@ fn cue(app: &mut App, cue: Cue) {
             }
         }
     }
+}
+
+/// The water demo's pool: the flat floor between two ridges across the ring, each a row of
+/// broad mounds this tall, holding this many particles laid in heaps this far clear of the
+/// ground; the avatar starts on its bed at the near ridge's foot.
+const RIDGE_NEAR: f64 = 8.0;
+const RIDGE_FAR: f64 = -12.0;
+const RIDGE_HEIGHT: f64 = 1.4;
+const POOL_PARTICLES: u32 = 7500;
+const HEAP_CLEARANCE: f64 = 1.8;
+/// Where the pool lies deepest once it has settled: on the far ridge's lower slope.
+const POOL_DEEP: f64 = -6.0;
+
+/// Put the avatar at rest with its eye at `eye`, facing `target`, standing up on the ring.
+fn stand(sim: &mut Simulation, eye: [f64; 3], target: [f64; 3]) {
+    let (_, outward) = sim.drum.depth_and_outward(eye);
+    let mut back = [eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]];
+    let len = norm(&back);
+    back = back.map(|c| c / len);
+    let mut right = cross(&outward.map(|c| -c), &back);
+    let len = norm(&right);
+    right = right.map(|c| c / len);
+    let up = cross(&back, &right);
+    let q = quat_from_basis(&right, &up, &back);
+    let head = quat_rotate(&q, &avatar::eye_offset());
+    sim.avatar_mut()
+        .place([eye[0] - head[0], eye[1] - head[1], eye[2] - head[2]], q);
+    sim.gyros = Gyros::holding(sim.avatar());
 }
 
 fn main() {
@@ -329,7 +518,8 @@ fn main() {
             app.world_mut().resource_mut::<Aim>().engaged = true;
             marker_script()
         }
-        Some(other) => panic!("unknown script {other:?}: the only one is `marker`"),
+        Some("water") => water_script(),
+        Some(other) => panic!("unknown script {other:?}: the others are `marker` and `water`"),
     };
     let mut frame = 0u32;
     for phase in script {
@@ -348,6 +538,19 @@ fn main() {
                     sim.sculpt(target.point.to_array(), BRUSH_SIZE.0 as f64, amount as f64);
                 }
                 app.world_mut().resource_mut::<Aim>().brush = phase.sculpting.then_some(BRUSH_SIZE);
+            }
+            if phase.pouring
+                && let Some(target) = app.world().resource::<Aim>().target
+            {
+                let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
+                app.world_mut()
+                    .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                        let settings = world.resource::<Settings>();
+                        let count = settings.flow.0 * frame_time.0
+                            / fluid.resolution().litres_per_particle().0;
+                        let sim = world.resource::<Simulation>();
+                        sim.inject(&mut fluid, at.to_array(), count.round() as u32)
+                    });
             }
             testing::run(&mut app, frame_time);
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());

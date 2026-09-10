@@ -87,7 +87,8 @@ fn cell(resolution: Resolution) -> f32 {
 
 #[derive(Clone)]
 pub struct SurfaceBuffers {
-    /// Two vec4 per vertex: position with foam, normal with the key of the vertex's cell.
+    /// Three vec4 per vertex: position with foam, normal with the key of the vertex's cell, and
+    /// the water's velocity there.
     pub vertices: Handle<ShaderBuffer>,
     pub indices: Handle<ShaderBuffer>,
     /// Vertex count, index count, block count.
@@ -102,10 +103,12 @@ pub struct SurfaceBuffers {
     /// The keys of the cells the surface crosses, hashed, and each one's vertex and corners.
     pub cell_table: Handle<ShaderBuffer>,
     pub cell_value: Handle<ShaderBuffer>,
+    /// The vertices as drawn, smoothed.
+    pub polished: Handle<ShaderBuffer>,
 }
 
 impl SurfaceBuffers {
-    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 9] {
+    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 10] {
         [
             &self.vertices,
             &self.indices,
@@ -116,6 +119,7 @@ impl SurfaceBuffers {
             &self.dispatch,
             &self.cell_table,
             &self.cell_value,
+            &self.polished,
         ]
     }
 
@@ -129,7 +133,7 @@ impl SurfaceBuffers {
 
 pub fn create_buffers(make: &mut impl FnMut(usize) -> Handle<ShaderBuffer>) -> SurfaceBuffers {
     SurfaceBuffers {
-        vertices: make(MAX_VERTICES * 32),
+        vertices: make(MAX_VERTICES * 48),
         indices: make(MAX_INDICES * 4),
         counters: make(16),
         table: make(TABLE_SLOTS * 4),
@@ -138,5 +142,6 @@ pub fn create_buffers(make: &mut impl FnMut(usize) -> Handle<ShaderBuffer>) -> S
         dispatch: make(32),
         cell_table: make(CELL_SLOTS * 4),
         cell_value: make(CELL_SLOTS * 4),
+        polished: make(MAX_VERTICES * 48),
     }
 }

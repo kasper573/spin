@@ -33,7 +33,7 @@ mod resolution;
 mod surface;
 
 pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
-pub use gpu::FluidBuffers;
+pub use gpu::{FluidBuffers, FluidStep};
 pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_AXIS, STEP_RATE, canonical};
 pub use surface::{
     MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, SurfaceBuffers, SurfaceParams, grid_reach,

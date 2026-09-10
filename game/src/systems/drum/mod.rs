@@ -14,7 +14,7 @@ mod render;
 
 pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{Landscape, wheel_angle};
-pub use render::{DrumPlugin, chord, slack};
+pub use render::{DrumPlugin, chord, ground_albedo, slack};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,7 @@ pub const DEFAULT_RING: Ring = Ring {
 };
 /// The ground that covers the glass all the way round in the initial state.
 pub const GROUND_DEPTH: Metres = Metres(0.5);
+
 /// The glass shell's thickness, felt only from outside.
 pub const GLASS_THICKNESS: f64 = 0.1;
 /// Maximum spin-up acceleration of the drum (rad/s²).
