@@ -16,6 +16,7 @@ use game::core::audio::{self, Fader, Placement, Voice};
 use game::core::avatar::{self, Gyros, TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
+use game::core::units::Litres;
 use game::core::units::Seconds;
 use game::systems::aim::Aim;
 use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
@@ -26,8 +27,13 @@ use game::systems::sim::Simulation;
 use game::systems::testing;
 
 const FPS: u32 = 30;
+/// The video's size, and the factor the frames are drawn larger by before they are scaled down
+/// to it: one sample a pixel leaves the water's ripples and its edge against the shore finer
+/// than the pixels that have to carry them, which crawls from frame to frame and eats the
+/// bitrate that the rest of the picture wants (see `just record`).
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+const SUPERSAMPLE: u32 = 2;
 
 /// Something the script does to the world as a phase begins.
 #[derive(Clone, Copy, PartialEq)]
@@ -46,6 +52,11 @@ enum Cue {
     /// Raise the ground under the avatar into a bank, hollow a basin out of the ground ahead,
     /// and pour water in all round the ring, enough to fill the basin over head height.
     Basin,
+    /// Make the ring big, raise a headland across it, and flood the whole ring round the
+    /// headland deep enough for the water to show its own colour rather than its bed's.
+    Sea,
+    /// Put the avatar back in its body over the deep water, at rest, for the sea to take it.
+    Dive,
     /// Put the avatar, as a ghost, at a viewpoint of the survey, by night or by day.
     Look(View),
 }
@@ -420,6 +431,195 @@ fn water_script() -> Vec<Phase> {
     ]
 }
 
+/// The water's colour: a pool between two ridges, shallow enough that the sun reaches its bed
+/// and comes back off the sand, and then a sea laid all the way round a bigger ring, deep enough
+/// that away from its shore only the water's own colour comes back. Each is looked at from the
+/// shore, from under the water, from over it, from outside the glass and from off the ring.
+fn sea_script() -> Vec<Phase> {
+    use Thruster::*;
+    let phase = |seconds, held: &[Thruster], level: f32, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            seconds,
+            pilot,
+            caption,
+            cue: Cue::None,
+            sculpting: false,
+            pouring: false,
+            hold: None,
+        }
+    };
+    let held = |cue, seconds, eye, at, daylight, caption| {
+        let view = View { eye, at, daylight };
+        Phase {
+            cue: if cue { Cue::Look(view) } else { Cue::None },
+            hold: Some(view),
+            ..phase(seconds, &[], 0.0, caption)
+        }
+    };
+    let mut script = vec![Phase {
+        cue: Cue::Basin,
+        ..phase(
+            0.5,
+            &[],
+            0.0,
+            "a pool dammed between two ridges, a metre deep over its bed",
+        )
+    }];
+    // the pool: shallow water over pale sand, which is what a lagoon is
+    script.extend([
+        held(
+            true,
+            4.0,
+            [8.0, 0.0, 1.7],
+            [-6.0, 0.0, 1.0],
+            true,
+            "from the near ridge: the sand the water laid down under itself, and over it the water, greener the further the sun's light has to cross to come back",
+        ),
+        held(
+            false,
+            3.5,
+            [-2.0, 0.0, 0.6],
+            [-8.0, 0.0, 0.6],
+            true,
+            "on the bed, under the water: nothing yet stands between the eye and the sand",
+        ),
+        held(
+            false,
+            3.5,
+            [-2.0, 0.0, 0.6],
+            [-4.0, 0.5, 3.0],
+            true,
+            "up at the surface from below: the world above gathered into the circle within the critical angle, the bed mirrored beyond it",
+        ),
+        held(
+            false,
+            3.5,
+            [-2.0, 0.0, 8.5],
+            [-6.0, 1.0, 0.0],
+            true,
+            "from up by the axis: the shallows pale at the shore and darkening toward the middle",
+        ),
+        held(
+            false,
+            3.5,
+            [-2.0, 0.0, -3.5],
+            [-2.0, 0.0, 1.5],
+            true,
+            "from outside, in through the glass floor: the pool from underneath, lit through its own surface",
+        ),
+        held(
+            true,
+            3.0,
+            [8.0, 0.0, 1.7],
+            [-6.0, 0.0, 1.0],
+            false,
+            "the same pool by night, with only the light bounced round the ring left to come back out of it",
+        ),
+    ]);
+    // the sea: the same water, deep enough to keep its own colour
+    script.push(Phase {
+        cue: Cue::Sea,
+        ..phase(
+            4.0,
+            &[],
+            0.0,
+            "the ring made bigger and flooded all the way round: a sea four metres deep, a headland standing out of it",
+        )
+    });
+    script.extend([
+        held(
+            true,
+            4.0,
+            [0.0, 0.0, 1.7],
+            [26.0, 0.0, 4.0],
+            true,
+            "from the headland, along the ring: the shallows over the shelf, then blue where the bed drops away and the sand no longer answers",
+        ),
+        held(
+            false,
+            3.5,
+            [11.0, 0.0, 1.2],
+            [26.0, 0.0, -0.5],
+            true,
+            "at the water's edge: sand, then the shelf under a metre of water, then the deep",
+        ),
+    ]);
+    // down through the surface and back out of it, carried by the thrusters rather than cut to
+    script.extend([
+        Phase {
+            cue: Cue::Dive,
+            ..phase(2.0, &[], 0.0, "let go over the deep, falling toward the sea")
+        },
+        phase(
+            3.0,
+            &[Down],
+            1.0,
+            "down through the surface (Shift): the water closes over the eye",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            "under the sea: no bed answers here, so what comes back is the water's own colour, the blue that is left of the sun after four metres of it",
+        ),
+        phase(
+            turn_time(1.2, 0.5),
+            &[PitchUp],
+            0.5,
+            "looking up (mouse up)",
+        ),
+        phase(3.0, &[], 0.0, "the surface from below, the ring beyond it"),
+        phase(3.0, &[Up], 1.0, "up and out again (Space)"),
+    ]);
+    script.extend([
+        held(
+            true,
+            4.0,
+            [0.0, 0.0, 14.0],
+            [16.0, 3.0, 0.0],
+            true,
+            "from up by the axis: the sea running away round the ring, pale over the shelves and blue over the deep",
+        ),
+        held(
+            false,
+            4.0,
+            [20.0, 0.0, -5.0],
+            [20.0, 0.0, 2.0],
+            true,
+            "from outside, in through the glass floor: the sea from underneath",
+        ),
+        held(
+            false,
+            4.0,
+            [0.0, -16.0, 4.0],
+            [0.0, 0.0, 3.0],
+            true,
+            "from outside the ring's end, in through the glass disc and the length of the sea",
+        ),
+        held(
+            false,
+            4.0,
+            [0.0, 34.0, -34.0],
+            [0.0, 0.0, 0.0],
+            true,
+            "the whole ring from off its axis: a band of water closed on itself, lit from within",
+        ),
+        held(
+            true,
+            3.5,
+            [0.0, 0.0, 1.7],
+            [26.0, 0.0, 4.0],
+            false,
+            "the sea by night: the sun behind the ring, and the water showing only what the ring bounces round to it",
+        ),
+    ]);
+    script
+}
+
 /// One frame from each of many viewpoints about the pool, by night and then by day: under the
 /// water, at its surface, over it, out through the glass, in through the glass and the water
 /// from outside, and from far off.
@@ -614,6 +814,79 @@ fn cue(app: &mut App, cue: Cue) {
             let eye = spot(&sim, pool, [POOL_DEEP, 0.0, avatar::EYE_HEIGHT.0 as f64]);
             stand(&mut sim, eye, [eye[0] + 0.3, eye[1], eye[2] + 6.0]);
         }
+        Cue::Sea => {
+            {
+                let mut settings = app.world_mut().resource_mut::<Settings>();
+                Dial::Diameter.set(&mut settings, SEA_DIAMETER);
+                Dial::Width.set(&mut settings, SEA_WIDTH);
+                settings.equalize_thrust();
+            }
+            testing::run(app, Seconds(1.0));
+            let pool = {
+                let mut sim = app.world_mut().resource_mut::<Simulation>();
+                let site = sim.drum.site;
+                // one island of a headland, raised in one place so that it comes up as a dome
+                // standing clear of the water, its sides shelving away under it into the shallows
+                for _ in 0..20 {
+                    sim.drum.landscape.sculpt(
+                        site.phi,
+                        site.y,
+                        HEADLAND_SPREAD,
+                        HEADLAND_HEIGHT / 20.0,
+                    );
+                }
+                Pool {
+                    phi: site.phi,
+                    y: site.y,
+                }
+            };
+            app.world_mut().insert_resource(pool);
+            // enough water to stand SEA_DEPTH deep over the whole floor, laid in heaps all
+            // round: how many particles that is depends on how coarse the water has grown by
+            // then, so each heap is asked for by the volume it carries rather than by a count
+            let target = {
+                let ring = app.world().resource::<Simulation>().drum.ring;
+                let floor =
+                    std::f64::consts::TAU * ring.radius.0 as f64 * 2.0 * ring.half_width.0 as f64;
+                Litres((floor * SEA_DEPTH * 1000.0) as f32)
+            };
+            for k in 0..SEA_HEAPS {
+                app.world_mut()
+                    .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                        let sim = world.resource::<Simulation>();
+                        let turn = k as f64 / SEA_HEAPS as f64 * std::f64::consts::TAU;
+                        let y = ((k % 5) as f64 - 2.0) * sim.drum.ring.half_width.0 as f64 * 0.4;
+                        let on = sim.drum.wall_point(turn, y);
+                        let (_, out) = sim.drum.depth_and_outward(on);
+                        let centre = [
+                            on[0] - out[0] * HEAP_CLEARANCE,
+                            on[1] - out[1] * HEAP_CLEARANCE,
+                            on[2] - out[2] * HEAP_CLEARANCE,
+                        ];
+                        let left = target.0 - fluid.litres().0;
+                        let heap = left / (SEA_HEAPS - k) as f32;
+                        let count = heap / fluid.resolution().litres_per_particle().0;
+                        sim.inject(&mut fluid, centre, count.max(0.0).round() as u32)
+                    });
+                testing::run(app, Seconds(0.4));
+            }
+            testing::run(app, Seconds(60.0));
+            app.world_mut().resource_mut::<Settings>().collisions = true;
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            sim.avatar_mut().solid = true;
+            let eye = spot(&sim, pool, [0.0, 0.0, avatar::EYE_HEIGHT.0 as f64]);
+            let along = spot(&sim, pool, [30.0, 0.0, 3.0]);
+            stand(&mut sim, eye, along);
+        }
+        Cue::Dive => {
+            let pool = *app.world().resource::<Pool>();
+            app.world_mut().resource_mut::<Settings>().collisions = true;
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            sim.avatar_mut().solid = true;
+            let eye = spot(&sim, pool, [DIVE_ARC, 0.0, DIVE_HEIGHT]);
+            let ahead = spot(&sim, pool, [DIVE_ARC + 8.0, 0.0, DIVE_HEIGHT - 1.5]);
+            stand(&mut sim, eye, ahead);
+        }
         Cue::SpinUp => {
             let mut settings = app.world_mut().resource_mut::<Settings>();
             let spin = settings.spin.0 * 1.5;
@@ -648,6 +921,19 @@ const HEAP_CLEARANCE: f64 = 1.8;
 const HEAP_INTERVAL: f32 = 1.0;
 /// Where the pool lies deepest: the middle of the valley between the ridges.
 const POOL_DEEP: f64 = -2.0;
+
+/// The sea: a ring wide enough for the water to run deep, a headland raised across it to stand
+/// on and to shelve away into the shallows, and this many heaps of water laid all round it.
+const SEA_DIAMETER: f32 = 30.0;
+const SEA_WIDTH: f32 = 16.0;
+const HEADLAND_HEIGHT: f64 = 8.0;
+const HEADLAND_SPREAD: f64 = 11.0;
+const SEA_DEPTH: f64 = 5.0;
+const SEA_HEAPS: usize = 64;
+/// Where the avatar is let go over the sea, clear of the headland's shelf, and how far over the
+/// ground it starts: high enough to be over the water rather than in it.
+const DIVE_ARC: f64 = 24.0;
+const DIVE_HEIGHT: f64 = 6.0;
 
 /// A place about the pool, in the frame: `arc` metres round the ring from it, `y` along the
 /// axis and `height` over the ground there, which is under the ground, and out through the
@@ -694,7 +980,7 @@ fn main() {
     let _ = fs::remove_dir_all(out);
     fs::create_dir_all(out).expect("create target/record");
     let mut app = testing::headless();
-    let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
+    let image = testing::render_to_image(&mut app, WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE);
     testing::watch(&mut app, Seconds(0.5));
 
     let frame_time = Seconds(1.0 / FPS as f32);
@@ -708,8 +994,9 @@ fn main() {
         }
         Some("water") => water_script(),
         Some("survey") => survey_script(),
+        Some("sea") => sea_script(),
         Some(other) => {
-            panic!("unknown script {other:?}: the others are `marker`, `water` and `survey`")
+            panic!("unknown script {other:?}: the others are `marker`, `water`, `survey` and `sea`")
         }
     };
     let mut frame = 0u32;
@@ -768,8 +1055,8 @@ fn main() {
             image::save_buffer(
                 out.join(format!("frame_{frame:04}.png")),
                 &pixels,
-                WIDTH,
-                HEIGHT,
+                WIDTH * SUPERSAMPLE,
+                HEIGHT * SUPERSAMPLE,
                 image::ColorType::Rgba8,
             )
             .expect("write frame");

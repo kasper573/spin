@@ -33,8 +33,16 @@ use crate::systems::water::WATER_IOR;
 const GRASS: Color = Color::srgb(0.36, 0.62, 0.24);
 const GRASS_DARK: Color = Color::srgb(0.3, 0.54, 0.2);
 const DIRT: Color = Color::srgb(0.45, 0.32, 0.2);
+/// The bed under standing water: the carbonate sand that settles out of it, pale enough that
+/// what the water leaves of the light bounced off it is the colour the water is seen by.
+const BED: Color = Color::srgb(0.68, 0.66, 0.58);
 
 /// The ground's colour as seen from across the ring, where its tiles blur together.
+/// What the water lies on, which is what light crossing it falls on and comes back from.
+pub fn bed_albedo() -> LinearRgba {
+    BED.to_linear()
+}
+
 pub fn ground_albedo() -> LinearRgba {
     let (a, b) = (GRASS.to_linear(), GRASS_DARK.to_linear());
     LinearRgba::new(
@@ -156,6 +164,8 @@ struct TerrainMaterial {
     grass: LinearRgba,
     #[uniform(0)]
     grass_dark: LinearRgba,
+    #[uniform(0)]
+    bed: LinearRgba,
     /// The site everything is drawn about: its place round the ring in segments of the grid,
     /// its place along the axis and the glass radius, in metres.
     #[uniform(0)]
@@ -248,12 +258,13 @@ fn spawn(
             dirt: DIRT.into(),
             grass: GRASS.into(),
             grass_dark: GRASS_DARK.into(),
+            bed: BED.into(),
             site: Vec4::ZERO,
             origin: Vec4::ZERO,
             grid: Vec4::ONE,
             clock: Vec4::ZERO,
             absorption: water::ABSORPTION.extend(0.0),
-            scatter: water::SCATTER.extend(water::SCATTER_PER_METRE),
+            scatter: water::SCATTERING.extend(0.0),
             columns: frame.columns.clone(),
         }),
     });

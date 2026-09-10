@@ -14,7 +14,7 @@ mod render;
 
 pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{Landscape, wheel_angle};
-pub use render::{DrumPlugin, chord, ground_albedo, slack};
+pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 
 use serde::{Deserialize, Serialize};
 
@@ -248,6 +248,12 @@ impl Drum {
     /// How far a point of the frame is inside the glass.
     pub fn height_above_glass(&self, p: Vec3d) -> f64 {
         self.depth_and_outward(p).0
+    }
+
+    /// Whether a point of the frame is within the drum at all: inside the glass it turns in,
+    /// and between the discs that close its ends.
+    pub fn holds(&self, p: Vec3d) -> bool {
+        self.height_above_glass(p) > 0.0 && self.axial(p).abs() < self.ring.half_width.0 as f64
     }
 
     /// A point's place along the axis, from the middle of the drum.

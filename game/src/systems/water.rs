@@ -24,7 +24,7 @@ use bevy::shader::ShaderRef;
 use crate::core::fluid::{Fluid, Resolution};
 use crate::core::fluid::{FluidBuffers, MAX_DROPLETS, MAX_INDICES};
 use crate::core::vessel::Vessel;
-use crate::systems::drum::ground_albedo;
+use crate::systems::drum::bed_albedo;
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::{self, SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
@@ -32,10 +32,18 @@ use crate::systems::sim::{SimSet, Simulation};
 const SHADER: &str = "embedded://game/systems/shaders/water.wgsl";
 
 /// How much of each colour a metre of water takes out of light crossing it, and how much of
-/// its own colour a metre of water adds by scattering light within it.
-pub const ABSORPTION: Vec3 = Vec3::new(0.24, 0.04, 0.012);
-pub const SCATTER: Vec3 = Vec3::new(0.012, 0.11, 0.15);
-pub const SCATTER_PER_METRE: f32 = 0.14;
+/// that light a metre turns back toward the eye. Absorption is clear water's own: it lets blue
+/// through and stops red. The scattering is the carbonate the water carries in suspension,
+/// ground off its own bed and near enough white that what comes back out is coloured by the
+/// water it crossed rather than by the grains that turned it.
+pub const ABSORPTION: Vec3 = Vec3::new(0.38, 0.062, 0.012);
+pub const SCATTERING: Vec3 = Vec3::new(0.010, 0.013, 0.016);
+
+/// What a ray of light loses to a metre of water, whether it is swallowed or turned aside.
+pub fn extinction() -> Vec3 {
+    ABSORPTION + SCATTERING
+}
+
 /// Water's refractive index, which what is seen through water from within it bends by.
 pub const WATER_IOR: f32 = 1.333;
 
@@ -156,12 +164,12 @@ fn spawn(
         from_water: Vec4::new(0.0, 0.0, 0.0, 1.0),
         origin: Vec4::ZERO,
         ring: Vec4::ZERO,
-        ground: ground_albedo().to_vec4(),
+        ground: bed_albedo().to_vec4(),
         background: SPACE.to_linear().to_vec4(),
         anchor: Vec4::new(0.0, 0.0, 0.0, 1.0),
         clock: Vec4::new(0.0, 1.0, 0.0, 0.0),
         absorption: ABSORPTION.extend(0.0),
-        scatter: SCATTER.extend(SCATTER_PER_METRE),
+        scatter: SCATTERING.extend(0.0),
     };
     let material = materials.add(WaterMaterial {
         water,
@@ -253,23 +261,36 @@ fn droplet_radius(resolution: Resolution) -> f64 {
 fn submerge(
     mut commands: Commands,
     sim: Res<Simulation>,
-    cameras: Query<(Entity, Has<DistanceFog>), With<PlayerCamera>>,
+    sky: Res<Sky>,
+    mut cameras: Query<(Entity, Option<&mut DistanceFog>), With<PlayerCamera>>,
 ) {
     let under = sim.submerged();
-    // what the water scatters is lit by the light bounced round the ring, as the eye sees it
-    let glow = SCATTER * scene::bounce_light();
-    for (camera, fogged) in &cameras {
-        if under && !fogged {
-            commands.entity(camera).insert(DistanceFog {
-                color: Color::linear_rgb(glow.x, glow.y, glow.z),
-                falloff: FogFalloff::Atmospheric {
-                    extinction: ABSORPTION,
-                    inscattering: Vec3::splat(SCATTER_PER_METRE),
-                },
-                ..default()
-            });
-        } else if !under && fogged {
-            commands.entity(camera).remove::<DistanceFog>();
+    // what the water turns back is lit by what comes down to it: the sun, where it stands over
+    // the water rather than behind the ring, on top of the light bounced round the ring. Deep
+    // water settles at the share of a ray that scattering rather than absorption takes.
+    let (_, outward) = sim.drum.depth_and_outward(sim.avatar().p);
+    let up = Vec3::new(-outward[0] as f32, -outward[1] as f32, -outward[2] as f32);
+    let downwelling = scene::bounce_light() + scene::sunlight() * sky.sun.dot(up).max(0.0);
+    let glow = SCATTERING / extinction() * downwelling;
+    let colour = Color::linear_rgb(glow.x, glow.y, glow.z);
+    for (camera, fog) in &mut cameras {
+        match (under, fog) {
+            // the light coming down turns with the ring, so the water it lights turns with it
+            (true, Some(mut fog)) => fog.color = colour,
+            (true, None) => {
+                commands.entity(camera).insert(DistanceFog {
+                    color: colour,
+                    falloff: FogFalloff::Atmospheric {
+                        extinction: extinction(),
+                        inscattering: extinction(),
+                    },
+                    ..default()
+                });
+            }
+            (false, Some(_)) => {
+                commands.entity(camera).remove::<DistanceFog>();
+            }
+            (false, None) => {}
         }
     }
 }

@@ -72,7 +72,10 @@ fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
         }
         let gap = s.z - scene_depth(s.xy);
         if (gap > 0.0) {
-            if (gap < t * 0.6 + 0.05) {
+            // the ray can only have run past the scene by as far as the last stretch carried
+            // it; anything deeper than that is behind what was drawn, not on it, and taking it
+            // for a hit smears whatever is there across the reflection in streaks
+            if (gap < t - last + 0.05) {
                 // the scene was met somewhere over the last stretch: narrow it down
                 var near = last;
                 var far = t;

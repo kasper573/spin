@@ -11,12 +11,13 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import bevy_pbr::pbr_functions::apply_fog
 #endif
-#import ripples::{carried, crossing_length, waves_carried}
+#import ripples::{carried, crossing_length, noise3, waves_carried}
 
 struct Terrain {
     dirt: vec4<f32>,
     grass: vec4<f32>,
     grass_dark: vec4<f32>,
+    bed: vec4<f32>,
     // the site everything is drawn about: its place round the ring in segments of the grid,
     // its place along the axis and the glass radius, in metres
     site: vec4<f32>,
@@ -43,6 +44,27 @@ const SHARPEST: f32 = 0.4;
 // wet ground is darker, once this many particles' worth of water lies over a column of it
 const WET: f32 = 0.35;
 const WET_BY: f32 = 4.0;
+// the widest the survey is ever gathered, in cells: water coarser than this is read as if its
+// grain were this wide, which costs it a little smoothing rather than an unbounded gather
+const GATHER: f32 = 4.0;
+// water standing this deep has laid its bed down over the ground and drowned what grew there,
+// over a stretch of shore rather than at a line, since a shore is never a line
+const BED_BY: f32 = 0.9;
+
+// the ripple marks a current leaves in a sandy bed: their spacing, their height, how far
+// their crests meander and turn out of true, and the spacing and depth of the grain
+// speckling the sand between them
+const SAND_RIPPLE: f32 = 0.13;
+const SAND_RELIEF: f32 = 0.009;
+const SAND_MEANDER: f32 = 3.0;
+const SAND_TURN: f32 = 0.35;
+const SAND_GRAIN: f32 = 0.05;
+const SAND_MOTTLE: f32 = 0.16;
+// the patchiness of the bed itself, which is what is left of it once the ripples and the grain
+// are finer than a pixel: coarse sand against fine, and the looser sand of a ripple field
+const SAND_PATCH: f32 = 1.1;
+const SAND_PATCHY: f32 = 0.20;
+const SAND_WORKED: f32 = 0.13;
 
 /// 1 on a light tile, 0 on a dark one, blended over the width of a pixel so the edges stay
 /// crisp at any distance without shimmering.
@@ -87,9 +109,16 @@ fn column_at(segment: i32, row: i32) -> vec4<f32> {
     return vec4(thickness, flow.x, flow.y, f32(c.x) * terrain.clock.y);
 }
 
-/// The survey read at a point of the site's frame, blended over the four columns round it.
-/// The point's place round the ring is its turn from the site, which is small however big
-/// the ring is, on top of the site's own.
+/// The survey read at a point of the site's frame. The point's place round the ring is its turn
+/// from the site, which is small however big the ring is, on top of the site's own.
+///
+/// A column holds the particles standing over one cell of the grid, and the cells are finer
+/// than the water is grained: over shallow water a cell catches one particle or none, so its
+/// count steps between whole particles and its top jumps by a particle's width. Reading a
+/// single cell puts those steps into the ground, as a pattern in the grid's own shape, which
+/// is the grid showing rather than the water. The field is gathered over the water's grain
+/// instead, since nothing about the water's surface is known finer than the particles it is
+/// made of, and what is gathered is smooth to the width of one of them.
 fn column_over(p: vec3<f32>) -> Column {
     let segments = terrain.clock.w % 4096.0;
     let turn = atan2(p.z, terrain.site.z + p.x);
@@ -99,11 +128,42 @@ fn column_over(p: vec3<f32>) -> Column {
     let j = floor(v);
     let fu = u - i;
     let fv = v - j;
-    let aa = column_at(i32(i), i32(j));
-    let ba = column_at(i32(i) + 1, i32(j));
-    let ab = column_at(i32(i), i32(j) + 1);
-    let bb = column_at(i32(i) + 1, i32(j) + 1);
-    let c = mix(mix(aa, ba, fu), mix(ab, bb, fu), fv);
+    // how wide a cell is on the ground, and how far apart the water's particles stand: a
+    // particle's water spread over a cell is the depth one of them adds there, so the cube
+    // root of that depth times the cell's area is the spacing they sit at
+    let across = terrain.site.z * terrain.grid.x;
+    let along = terrain.grid.y;
+    let grain = pow(terrain.grid.w * across * along, 1.0 / 3.0);
+    let reach = clamp(vec2(grain / across, grain / along), vec2(1.0), vec2(GATHER));
+    // only the cells within a reach of the point carry any weight, so those are the ones read:
+    // where the water is no coarser than the grid, that is the four cells round it and no more
+    let first = vec2<i32>(ceil(vec2(fu, fv) - reach));
+    let last = vec2<i32>(floor(vec2(fu, fv) + reach));
+    // how much water stands over a cell is a density, and gathers by area. How high it reaches
+    // and which way it flows belong to the water that is there rather than to the cell, so they
+    // gather weighted by it: a cell with no water in it has no height to lend its neighbours.
+    var thickness = 0.0;
+    var area = 0.0;
+    var carried = vec2(0.0);
+    var top = 0.0;
+    var held = 0.0;
+    for (var dj = first.y; dj <= last.y; dj++) {
+        let wv = max(1.0 - abs(f32(dj) - fv) / reach.y, 0.0);
+        for (var di = first.x; di <= last.x; di++) {
+            let w = max(1.0 - abs(f32(di) - fu) / reach.x, 0.0) * wv;
+            let cell = column_at(i32(i) + di, i32(j) + dj);
+            thickness += cell.x * w;
+            area += w;
+            carried += cell.yz * (cell.x * w);
+            top += cell.w * (cell.x * w);
+            held += cell.x * w;
+        }
+    }
+    let c = vec4(
+        thickness / max(area, 1e-6),
+        carried / max(held, 1e-6),
+        top / max(held, 1e-6),
+    );
     var out: Column;
     out.depth = c.x;
     out.top = c.w;
@@ -179,17 +239,57 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let at = p + terrain.origin.xyz;
     let up = -normalize(vec3(terrain.site.z + at.x, 0.0, at.z));
     var water = column_over(at);
-    // water flying over the ground, not lying on it, neither wets nor dims it
-    let lying = 1.0 - smoothstep(0.3, 0.8, water.top - height - water.depth);
-    water.depth *= lying;
+    // How deep the water lies over this ground: the height its top reaches above the ground,
+    // which is what light crossing it has to cross. The particles counted over a column say how
+    // much water is there, but only in whole particles, which over shallow water is a handful:
+    // taking the depth from that count would put the count's own steps into the ground's colour
+    // and its light. The count is still what tells water lying on the ground from spray flying
+    // over it, which reaches no deeper than the water it is made of.
+    let span = max(water.top - height, 0.0);
+    let lying = 1.0 - smoothstep(0.3, 0.8, span - water.depth);
+    water.depth = span * lying;
     if (underside) {
         albedo = terrain.dirt.rgb;
         water.depth = 0.0;
     }
+    // where water stands, the ground is the water's bed: the carbonate settled out of it, with
+    // nothing growing under it, shading back into the bank over the shallows at the shore
+    albedo = mix(albedo, terrain.bed.rgb, smoothstep(0.0, BED_BY, span * lying));
     // a stray drop dampens a patch, a body of water soaks it
     let wet = smoothstep(0.0, WET_BY * terrain.grid.w, water.depth);
     albedo *= 1.0 - WET * wet;
-    let dimmed = exp(-terrain.absorption.rgb * water.depth);
+    // the bed's ripples and grain, which are what the light coming down through the water has
+    // to break over: without them the sand takes the light evenly and reads as a flat sheet
+    let bedded = smoothstep(0.0, BED_BY, span * lying);
+    if (bedded > 0.0) {
+        // the ripples lie across the water's run, or across the ring where it barely moves
+        let spinward = normalize(vec3(-at.z, 0.0, terrain.site.z + at.x));
+        let run = water.flow - up * dot(water.flow, up);
+        let side = cross(up, run);
+        let along = select(spinward, side / max(length(side), 1e-6), length(side) > 1e-3);
+        // no bed is a corrugation: the crests turn slowly out of true, meander over a few
+        // wavelengths, and give out over stretches the water has left alone
+        let turn = (noise3(at / (SAND_RIPPLE * 40.0)) - 0.5) * SAND_TURN;
+        let across = normalize(cross(up, along) + along * turn);
+        let meander = (noise3(at / (SAND_RIPPLE * 4.0)) - 0.5)
+            + (noise3(at / (SAND_RIPPLE * 15.0)) - 0.5) * 2.0;
+        let phase = dot(at, across) * 2.0 * PI / SAND_RIPPLE + meander * SAND_MEANDER;
+        let worked = smoothstep(0.3, 0.7, noise3(at / (SAND_RIPPLE * 25.0)));
+        // each of the three scales is left at its mean once a pixel is too wide to draw it,
+        // so what a bed loses with distance is its grain first and its patchiness last
+        let crisp = 1.0 - smoothstep(0.25 * SAND_RIPPLE, 0.5 * SAND_RIPPLE, footprint);
+        let relief = SAND_RELIEF * bedded * crisp * worked;
+        let slope = relief * cos(phase) * 2.0 * PI / SAND_RIPPLE;
+        n = normalize(n - across * slope);
+        let grained = 1.0 - smoothstep(0.25 * SAND_GRAIN, 0.5 * SAND_GRAIN, footprint);
+        let grain = (noise3(at / SAND_GRAIN) - 0.5) * SAND_MOTTLE * grained;
+        let broad = 1.0 - smoothstep(0.25 * SAND_PATCH, 0.5 * SAND_PATCH, footprint);
+        // sand the water has worked lies looser and darker than sand it has left flat
+        let coarse = ((noise3(at / SAND_PATCH) - 0.5) * SAND_PATCHY - worked * SAND_WORKED) * broad;
+        albedo *= 1.0 + (grain + coarse) * bedded;
+    }
+    let extinction = terrain.absorption.rgb + terrain.scatter.rgb;
+    let dimmed = exp(-extinction * water.depth);
 
     let view_z = dot(vec4(view.view_from_world[0].z, view.view_from_world[1].z, view.view_from_world[2].z, view.view_from_world[3].z), in.world_position);
     var colour = vec3(0.0);
@@ -206,7 +306,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             let cos_in = dot(l, up);
             let sin_r2 = (1.0 - cos_in * cos_in) / (IOR * IOR);
             let path = water.depth / sqrt(max(1.0 - sin_r2, 1e-3));
-            through = exp(-terrain.absorption.rgb * path) * sunlight_through(at, up, l, water, footprint);
+            through = exp(-extinction * path) * sunlight_through(at, up, l, water, footprint);
         }
         colour += sunlight(i) * albedo / PI * ndl * shadow * through;
     }

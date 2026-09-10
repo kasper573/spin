@@ -33,8 +33,13 @@ use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, Shift};
 pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
-/// The hull is this wet when the eye is under water.
+/// The hull is this wet when the eye has gone under the water, and this dry again when the eye
+/// is back out of it. The wetted fraction is measured over the whole hull rather than at the
+/// eye, so where the avatar floats it wavers by a sample or two from one substep to the next: a
+/// single mark to cross would have the eye diving and surfacing several times a second while
+/// the avatar simply bobs, and everything seen through the water switching with it.
 const SUBMERGED: f64 = 0.9;
+const SURFACED: f64 = 0.75;
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -95,6 +100,9 @@ pub struct Simulation {
     water_due: f64,
     queued: f32,
     window: (f32, f32),
+    /// Whether the eye is under the water, which only changes when the hull is clearly one side
+    /// of the surface or the other.
+    eye_under: bool,
 }
 
 impl Default for Simulation {
@@ -146,6 +154,7 @@ impl Simulation {
             water_due: 0.0,
             queued: 0.0,
             window: (0.0, 0.0),
+            eye_under: false,
         }
     }
 
@@ -231,6 +240,12 @@ impl Simulation {
             None
         };
         self.clamp_speeds();
+        let wet = self.avatar().wet;
+        if wet > SUBMERGED {
+            self.eye_under = true;
+        } else if wet < SURFACED {
+            self.eye_under = false;
+        }
         let water_step = fluid.step().0 as f64;
         for k in 0..steps {
             avatar::drive(
@@ -336,9 +351,11 @@ impl Simulation {
         &self.shapes
     }
 
-    /// Whether the eye is under water: the avatar wet over its head.
+    /// Whether the eye is under water: the avatar wet over its head, and within the drum at
+    /// that, since the water is held in by the drum and a viewer outside it looks in through
+    /// glass however much of the hull the water it is looking at happens to touch.
     pub fn submerged(&self) -> bool {
-        self.avatar().wet > SUBMERGED
+        self.eye_under && self.drum.holds(self.avatar().p)
     }
 
     pub fn avatar(&self) -> &Body {

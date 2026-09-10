@@ -39,10 +39,17 @@ pub const SPACE: Color = Color::srgb(0.02, 0.027, 0.05);
 /// bounced off the sunlit ground across the ring, dimmed and greened by it.
 const BOUNCE: Color = Color::srgb(0.62, 0.7, 0.55);
 const BOUNCE_BRIGHTNESS: f32 = 15000.0;
+const SUN: Color = Color::srgb(1.0, 0.98, 0.95);
 /// The light bounced round the ring as a lit surface shows it, at the exposure the sun is
 /// seen at.
 pub fn bounce_light() -> Vec3 {
     BOUNCE.to_linear().to_vec3() * BOUNCE_BRIGHTNESS * Exposure::SUNLIGHT.exposure()
+}
+
+/// The sun's light as a surface facing it shows it, at that same exposure.
+pub fn sunlight() -> Vec3 {
+    SUN.to_linear().to_vec3() * light_consts::lux::DIRECT_SUNLIGHT / std::f32::consts::PI
+        * Exposure::SUNLIGHT.exposure()
 }
 
 /// How much of the light the eye's own lens scatters about what is bright.
@@ -340,7 +347,7 @@ fn spawn(
     commands.spawn((
         SunLight(SUN_DIRECTION),
         DirectionalLight {
-            color: Color::srgb(1.0, 0.98, 0.95),
+            color: SUN,
             illuminance: light_consts::lux::DIRECT_SUNLIGHT,
             shadow_maps_enabled: true,
             ..default()

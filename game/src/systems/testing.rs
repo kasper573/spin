@@ -7,8 +7,11 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::diagnostic::{DiagnosticsStore, FrameCount};
 use bevy::prelude::*;
+use bevy::render::RenderApp;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::render_resource::{
+    CachedPipelineState, Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureUsages,
+};
 use bevy::render::renderer::initialize_renderer;
 use bevy::render::settings::{Backends, RenderCreation, RenderResources, WgpuSettings};
 use bevy::render::storage::ShaderBuffer;
@@ -497,6 +500,7 @@ pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> 
 /// the padding the copy aligned each row to taken out.
 pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
     let padded = read_back(app, Readback::texture(image.clone()));
+    compiled(app);
     let width = app
         .world()
         .resource::<Assets<Image>>()
@@ -508,6 +512,29 @@ pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
         .chunks(stride)
         .flat_map(|line| line[..row.min(line.len())].iter().copied())
         .collect()
+}
+
+/// Every shader the frame wanted came out of the compiler. One that does not is logged and
+/// then skipped, so whatever it was to draw is simply missing from the picture: what a test
+/// reads then is a hole in the frame rather than a broken shader, and what a recording keeps
+/// is a black ground nobody asked for.
+fn compiled(app: &App) {
+    let broken: Vec<String> = app
+        .sub_app(RenderApp)
+        .world()
+        .resource::<PipelineCache>()
+        .pipelines()
+        .filter_map(|pipeline| match &pipeline.state {
+            CachedPipelineState::Err(err) => Some(err.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "{} shader(s) did not compile:\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
 }
 
 /// The water's surface as last extracted: each vertex's position with its foam, read back from

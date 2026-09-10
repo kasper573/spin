@@ -113,12 +113,15 @@ fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32)
     return out;
 }
 
-/// Light dimmed by crossing this much water, and the water's own glow gathered over it: the
-/// light falling on the water, scattered back out of it.
+/// Light dimmed by crossing this much water, and the water's own colour gathered over it.
+/// Absorption and scattering both take light out of a ray, and the share scattering takes is
+/// the share that comes back, so a stretch of water long enough to hide whatever lies beyond
+/// it settles at that share of the light falling on it, and nothing deeper changes it.
 fn through_water(colour: vec3<f32>, distance: f32, light: vec3<f32>) -> vec3<f32> {
     let d = min(distance, FARTHEST);
-    let glow = water.scatter.rgb * light * (1.0 - exp(-water.scatter.w * d));
-    return colour * exp(-water.absorption.rgb * d) + glow;
+    let extinction = water.absorption.rgb + water.scatter.rgb;
+    let left = exp(-extinction * d);
+    return colour * left + water.scatter.rgb / extinction * light * (1.0 - left);
 }
 
 /// A pixel of a droplet's square: the drop's sphere where the pixel's ray hits it.

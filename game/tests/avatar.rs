@@ -502,6 +502,35 @@ fn flood(app: &mut App) {
     testing::run(app, Seconds(6.0));
 }
 
+/// An avatar left to itself under still water comes to rest and stays there. Water pushes on a
+/// body it covers from every side at once, and a body that answers each push with another is a
+/// body that shakes: the eye is at its head, so a shake there is a shake of everything seen.
+#[test]
+#[ignore = "wants a GPU"]
+fn an_avatar_under_still_water_comes_to_rest() {
+    let mut app = testing::headless();
+    flood(&mut app);
+    testing::run(&mut app, Seconds(6.0));
+    let mut flips = 0;
+    let mut wets = Vec::new();
+    let mut before = state(&app).submerged();
+    for _ in 0..60 {
+        testing::run(&mut app, Seconds(1.0 / 60.0));
+        let now = state(&app).submerged();
+        wets.push(state(&app).avatar().wet);
+        if now != before {
+            flips += 1;
+        }
+        before = now;
+    }
+    let least = wets.iter().cloned().fold(f64::MAX, f64::min);
+    let most = wets.iter().cloned().fold(0.0, f64::max);
+    assert!(
+        flips < 2,
+        "the eye crosses the water {flips} times in a second while the avatar floats: wet runs {least:.3} to {most:.3}"
+    );
+}
+
 #[test]
 #[ignore = "wants a GPU"]
 fn the_thrusters_push_through_water_and_out_of_it() {
