@@ -38,6 +38,8 @@ struct Terrain {
 const PI: f32 = 3.14159265;
 const IOR: f32 = 1.333;
 const F0: f32 = 0.02;
+// the tightest the sun's disc can be focused, as a share of the light it started with
+const SHARPEST: f32 = 0.4;
 // wet ground is darker, once this many particles' worth of water lies over a column of it
 const WET: f32 = 0.35;
 const WET_BY: f32 = 4.0;
@@ -139,12 +141,11 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
         1.0 + spread * dot(e1, w.curve * e1), spread * dot(e2, w.curve * e1),
         spread * dot(e1, w.curve * e2), 1.0 + spread * dot(e2, w.curve * e2),
     );
-    // where several waves' bending adds up to cross the rays anyway, the paraxial brightness
-    // runs away: the light there has folded over itself, so it is taken as an even glow
-    let det = abs(determinant(m));
-    let focus = 1.0 / max(det, 0.4);
-    let standing = smoothstep(0.2, 0.6, det);
-    let caustic = mix(1.0, mix(1.0, focus, standing), smoothstep(0.0, 0.15, water.depth));
+    // the sun is a disc rather than a point, so where several waves' bending adds up to cross
+    // the rays its focus is never a spike: the brightness rounds off instead of running away,
+    // and rounding it off smoothly leaves no edge for the eye to read as a line
+    let focus = 1.0 / sqrt(determinant(m) * determinant(m) + SHARPEST * SHARPEST);
+    let caustic = mix(1.0, focus, smoothstep(0.0, 0.15, water.depth));
     return (1.0 - fresnel(cos_in)) * caustic;
 }
 
