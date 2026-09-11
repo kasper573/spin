@@ -56,3 +56,6 @@ num-complex = "0.4"
 bevy = { workspace = true, features = ["x11"] }
 cargo_metadata = "0.19"
 syn = { version = "2", features = ["full", "visit"] }
+
+[dev-dependencies]
+rand = "0.10"

@@ -50,7 +50,14 @@ impl Ring {
 
     /// The landscape may never be raised closer to the axis than this.
     pub fn max_height(self) -> Metres {
-        Metres(self.radius.0 - 1.0)
+        Metres((self.radius.0 - 1.0).max(0.0))
+    }
+
+    /// How far along the axis from the middle something of this half-size may stand and still be
+    /// clear of both caps. A drum narrower than the thing is wide leaves it nowhere but the
+    /// middle, which is as clear of the caps as it can be got.
+    pub fn room_along(self, margin: f64) -> f64 {
+        (self.half_width.0 as f64 - margin).max(0.0)
     }
 
     /// Half the size of the box the drum fits in: radius across, half width along the axis.
@@ -282,8 +289,8 @@ impl Drum {
     /// Pull a point of the water's frame inside the drum, `margin` clear of the caps and above
     /// the landscape.
     pub fn place_inside(&self, p: Vec3d, margin: f64) -> Vec3d {
-        let half_width = self.ring.half_width.0 as f64;
-        let y = p[1].clamp(-half_width + margin, half_width - margin);
+        let room = self.ring.room_along(margin);
+        let y = p[1].clamp(-room, room);
         let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
         let (h, _, _) = self.landscape.sample(p[2].atan2(p[0]), y);
         let limit = self.ring.radius.0 as f64 - margin - h;
@@ -297,8 +304,8 @@ impl Drum {
     /// Pull a sphere's centre inside the drum, clear of the caps and no deeper than the initial
     /// ground, keeping its bearing from the axis.
     pub fn place_sphere_inside(&self, c: Vec3d, radius: f64) -> Vec3d {
-        let half_width = self.ring.half_width.0 as f64 - radius;
-        let y = (self.axial(c).clamp(-half_width, half_width)) - self.site.y;
+        let room = self.ring.room_along(radius);
+        let y = self.axial(c).clamp(-room, room) - self.site.y;
         let (height, outward) = self.depth_and_outward(c);
         let least = GROUND_DEPTH.0 as f64 + radius;
         let lift = (least - height).max(0.0);
@@ -326,6 +333,18 @@ impl Drum {
         (f / len, [-g[0] / len, -g[1] / len, -g[2] / len])
     }
 
+    /// Whether a sphere belongs to the inside of the drum rather than the outside of it. A
+    /// sphere still touching the hull belongs to the inside: the hull is a shell of some
+    /// thickness and a sphere has some size, so one whose centre has passed the inner face is
+    /// still half in the room it came from, and what it wants is to be put back in it. Judging
+    /// that by the centre alone makes the hull a trapdoor, since a body that crosses the face
+    /// between one step and the next is then met by the outer surface, which throws it clear.
+    fn holds_sphere(&self, c: Vec3d, radius: f64) -> bool {
+        let clear = GLASS_THICKNESS + radius;
+        self.height_above_glass(c) > -clear
+            && self.axial(c).abs() < self.ring.half_width.0 as f64 + clear
+    }
+
     /// A sphere inside the drum against the rim, the landscape and the caps.
     fn inner_sphere_penetrations(&self, c: Vec3d, radius: f64) -> Penetrations {
         let mut out = Penetrations::default();
@@ -338,7 +357,7 @@ impl Drum {
         if depth > 0.0 {
             out.push(Penetration { depth, normal });
         }
-        let cap = self.ring.half_width.0 as f64 - radius;
+        let cap = self.ring.room_along(radius);
         let y = self.axial(c);
         if y > cap {
             out.push(Penetration {
@@ -446,7 +465,7 @@ impl Vessel for Drum {
     }
 
     fn sphere_penetrations(&self, centre: Vec3d, radius: f64) -> Penetrations {
-        if self.encloses(centre) {
+        if self.holds_sphere(centre, radius) {
             self.inner_sphere_penetrations(centre, radius)
         } else {
             self.outer_sphere_penetrations(centre, radius)

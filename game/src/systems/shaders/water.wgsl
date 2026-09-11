@@ -162,6 +162,11 @@ fn droplet(in: Fragment) -> Shaded {
 
     let n = normalize(hit - centre);
     let v = -dir;
+    // how much sky this pixel's mirrored ray covers: a drop this small turns it right round
+    // within a pixel, and what that pixel shows of the sky is an average rather than whatever
+    // one point of it landed on
+    let across = t * 1.15 / view.viewport.w;
+    let spread = 2.0 * across / (radius * max(abs(dot(n, v)), 0.02)) + across / max(t, 1e-4);
     let uv = (in.clip.xy - view.viewport.xy) / view.viewport.zw;
     let pixel = in.clip.xy;
     let depth_here = depth_of(hit);
@@ -173,7 +178,7 @@ fn droplet(in: Fragment) -> Shaded {
         return out;
     }
     let reflected = reflect(dir, n);
-    var mirror = ring_seen(water.air, hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    var mirror = ring_seen(water.air, hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb, spread);
     if (water.ring.z > 0.5) {
         mirror = mirrored(hit, reflected, mirror);
     }
@@ -263,6 +268,10 @@ fn surface(in: Fragment) -> vec4<f32> {
         n = normalize(n - 2.0 * v * dot(n, v) + v * 1e-3);
     }
     let roughness = 0.06 + 0.14 * churn;
+    // how much sky this pixel's mirrored ray covers: twice how far the surface's own slope turns
+    // across the pixel, and never less than the pixel's own width on the sky
+    let bend = length(waves.curve[0]) + length(waves.curve[1]) + length(waves.curve[2]);
+    let sky = 2.0 * bend * footprint * amplitude + 1.15 / view.viewport.w;
 
     let uv = (in.clip.xy - view.viewport.xy) / view.viewport.zw;
     let depth_here = depth_of(in.world_position);
@@ -282,7 +291,7 @@ fn surface(in: Fragment) -> vec4<f32> {
     let reflected = reflect(-v, n);
     // beyond the scene the mirror shows the ring, or from under water the bed, lit by the
     // light coming down through the surface and about as far off as the surface is
-    var beyond = ring_seen(water.air, site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    var beyond = ring_seen(water.air, site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb, sky);
     if (submerged) {
         beyond = through_water(water.ground.rgb * light, glow(light), extinction(), dot(reflected, up), distance);
     }
@@ -302,7 +311,6 @@ fn surface(in: Fragment) -> vec4<f32> {
         let reach = min(column, 6.0) * 0.5;
         // a pixel covers a stretch of the surface with a spread of slopes, which bends what it
         // shows over a patch of the scene rather than a point of it
-        let bend = length(waves.curve[0]) + length(waves.curve[1]) + length(waves.curve[2]);
         let spread = reach * (1.0 - 1.0 / IOR) * bend * footprint * amplitude;
         seen = through_water(spread_over(uv, depth_here, in.world_position + r * reach, r, spread), glow(light), extinction(), dot(r, up), column);
         f = fresnel(dot(n, v), F0);

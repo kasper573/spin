@@ -678,7 +678,7 @@ fn rim_mesh(drum: &Drum, columns: &[f64], side: f64) -> Mesh {
 fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh {
     let landscape = &drum.landscape;
     let ring = drum.ring;
-    let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
+    let radius = ring.radius.0 as f64;
     let tile = tile_round(ring);
     let across = rows.len() + 2;
     let mut positions = Vec::with_capacity(columns.len() * across);
@@ -688,10 +688,8 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
     for &turn in columns {
         let phi = drum.site.phi + turn;
         let mut push = |height: f64, y: f64| {
-            let y = y.clamp(
-                -half_width + GLASS_INSET - drum.site.y,
-                half_width - GLASS_INSET - drum.site.y,
-            );
+            let room = drum.ring.room_along(GLASS_INSET);
+            let y = y.clamp(-room - drum.site.y, room - drum.site.y);
             let at = drum.wall_point(turn, y);
             let (_, outward) = drum.depth_and_outward(at);
             let lift = height.max(GLASS_INSET);

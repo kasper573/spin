@@ -109,7 +109,7 @@ fn bevel(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> Facet {
 /// What a facet of the glass with normal `face` shows at `p`, seen along `v`: what passes
 /// through the thick glass, bent in at this face and out through the flat one behind it, and
 /// what the face mirrors, with the sun glinting off it.
-fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32>, spread: f32) -> vec3<f32> {
     let cos_theta = max(dot(face, v), 0.0);
     // the glass against what the eye is in, air or water
     let eta = IOR / glass.ring.w;
@@ -131,7 +131,7 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     let reflected = reflect(-v, face);
     // from outside the drum the screen shows the far sides of everything the mirror would
     // show the near sides of, so only the ring itself is mirrored there
-    var mirror = ring_seen(glass.air, p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb);
+    var mirror = ring_seen(glass.air, p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb, spread);
     if (glass.ring.z > 0.5) {
         mirror = mirrored(p, reflected, mirror);
     }
@@ -154,7 +154,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         n = -n;
     }
     let uv = (in.position.xy - view.viewport.xy) / view.viewport.zw;
-    var colour = shade(n, n, p, v, uv);
+    // how much sky a pixel's own mirrored ray covers, which is how fast the mirrored direction
+    // turns across the pixel: a curve far enough off turns it right round within one, and what
+    // that pixel shows of the sky is an average rather than whatever one point of it landed on
+    let mirrored_ray = reflect(-v, n);
+    let spread = length(dpdx(mirrored_ray)) + length(dpdy(mirrored_ray));
+    var colour = shade(n, n, p, v, uv, spread);
 #ifdef VERTEX_UVS_A
     // where a groove crosses the pixel, its slanted side shows in its share of it: the side
     // that faces the eye, since the other is hidden behind it
@@ -164,7 +169,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if (dot(face, v) < 0.1) {
             face = normalize(n - facet.slant);
         }
-        colour = mix(colour, shade(face, n, p, v, uv), facet.share);
+        colour = mix(colour, shade(face, n, p, v, uv, spread), facet.share);
     }
 #endif
     let out = vec4(saturated(colour), 1.0);

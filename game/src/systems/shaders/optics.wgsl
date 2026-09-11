@@ -115,9 +115,10 @@ fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
     return beyond;
 }
 
-/// Space in a direction of the world, given the turn that takes the world among the stars.
-fn space_seen(dir: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
-    return background + stars(rotate(to_stars, dir));
+/// Space in a direction of the world, given the turn that takes the world among the stars, as a
+/// ray covering `spread` radians of sky sees it.
+fn space_seen(dir: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>, spread: f32) -> vec3<f32> {
+    return background + stars(rotate(to_stars, dir), spread);
 }
 
 /// What the air between a point of the ring and the eye does to what the eye sees of it: only
@@ -148,16 +149,16 @@ fn through_ring_air(colour: vec3<f32>, air: Air, at: vec3<f32>, to_eye: vec3<f32
 /// out bends it, and bends each colour of it by its own amount, so a ray that crosses enough of
 /// it comes out of the ring spread into its colours and what it shows is pulled out of shape
 /// and fringed. Each colour is followed along its own way out.
-fn space_through_air(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+fn space_through_air(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, to_stars: vec4<f32>, background: vec3<f32>, spread: f32) -> vec3<f32> {
     let held = ring_run(at, dir, ring).distance;
     if (held <= 0.0) {
-        return space_seen(dir, to_stars, background);
+        return space_seen(dir, to_stars, background, spread);
     }
-    var out = space_seen(dir, to_stars, background);
+    var out = space_seen(dir, to_stars, background, spread);
     if (air.slowing.w != 0.0) {
-        let red = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.x), to_stars, background);
-        let green = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.y), to_stars, background);
-        let blue = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.z), to_stars, background);
+        let red = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.x), to_stars, background, spread);
+        let green = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.y), to_stars, background, spread);
+        let blue = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.z), to_stars, background, spread);
         out = vec3(red.r, green.g, blue.b);
     }
     // and the air it crossed on the way out dims it and glows in front of it
@@ -185,10 +186,10 @@ fn through_water(colour: vec3<f32>, glow: vec3<f32>, extinction: vec3<f32>, rise
 /// What a ray meets once it has left the screen, inside the ring: the ground where it strikes
 /// the ring, lit by the sun where the sun reaches it and by the bounce light everywhere, or
 /// space where it leaves through a cap.
-fn ring_seen(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+fn ring_seen(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>, spread: f32) -> vec3<f32> {
     let run = ring_run(at, dir, ring);
     if (!run.wall) {
-        return space_through_air(air, at, dir, ring, to_stars, background);
+        return space_through_air(air, at, dir, ring, to_stars, background, spread);
     }
     let hit = at + dir * run.distance;
     let up = ring_up(hit, ring.x);

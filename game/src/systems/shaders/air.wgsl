@@ -162,16 +162,15 @@ fn air_bent(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32,
         let n = 1.0 + slowing * thinner;
         // the gradient of the index, which lies along the axis's own outward direction
         let gradient = outward * (slowing * thinner * air.slowing.w * 2.0 * r);
-        // a step must not only resolve the air but the turn it puts in the ray, which is the
+        // a step must resolve not only the air but the turn it puts in the ray, which is the
         // gradient across the index: air steep enough to turn a ray right round is walked in
-        // steps short against the circle it turns it on
+        // steps short against the circle it turns it on. Air too steep to walk to the end in the
+        // steps allowed is not walked further at all: what is left of the ray is carried
+        // straight, which leaves it short of where the air would have taken it rather than
+        // throwing it anywhere whatever.
         let turning = length(gradient) / n;
         var step = min(air_step(air, p, d, radius), longest);
-        step = min(step, TURNING / max(turning, 1e-30));
-        if (k == MOST_STEPS - 1) {
-            step = distance - run;
-        }
-        step = min(step, distance - run);
+        step = min(min(step, TURNING / max(turning, 1e-30)), distance - run);
         d = normalize(d + (gradient - d * dot(gradient, d)) / n * step);
         p += d * step;
         run += step;

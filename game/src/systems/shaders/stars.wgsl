@@ -50,13 +50,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // is pulled out of shape and fringed with colour, the sun above all.
     let eye = view.world_position + sky.origin.xyz;
     let out = normalize(in.world_position.xyz - view.world_position);
+    // how much sky one pixel covers, which is what the field is averaged over
+    let spread = length(dpdx(out)) + length(dpdy(out));
     let held = ring_run(eye, out, sky.ring.xy).distance;
     if (held <= 0.0 || sky.air.slowing.w == 0.0) {
-        return vec4(space_colour(dir, to_sun, sky.background.rgb), 1.0);
+        return vec4(space_colour(dir, to_sun, sky.background.rgb, spread), 1.0);
     }
     let radius = sky.ring.x;
-    let red = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.x)), to_sun, sky.background.rgb);
-    let green = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.y)), to_sun, sky.background.rgb);
-    let blue = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.z)), to_sun, sky.background.rgb);
+    let red = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.x)), to_sun, sky.background.rgb, spread);
+    let green = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.y)), to_sun, sky.background.rgb, spread);
+    let blue = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.z)), to_sun, sky.background.rgb, spread);
     return vec4(red.r, green.g, blue.b, 1.0);
 }
