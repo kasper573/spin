@@ -44,3 +44,15 @@ pub struct PixelsPerSecond(pub f32);
 
 /// Standard gravity at the Earth's surface, the reference every "g" readout is measured against.
 pub const EARTH_GRAVITY: MetresPerSecondSquared = MetresPerSecondSquared(9.80665);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct Pascals(pub f64);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct Kelvin(pub f64);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct KilogramsPerCubicMetre(pub f64);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct Nanometres(pub f64);

@@ -24,6 +24,7 @@ use bevy::shader::ShaderRef;
 use crate::core::fluid::{Fluid, Resolution};
 use crate::core::fluid::{FluidBuffers, MAX_DROPLETS, MAX_INDICES};
 use crate::core::vessel::Vessel;
+use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::{self, SPACE, Sky, Viewpoint};
@@ -89,6 +90,8 @@ struct WaterUniform {
     clock: Vec4,
     absorption: Vec4,
     scatter: Vec4,
+    /// The air between the eye and the water; see `systems/air.rs`.
+    air: AirUniform,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -172,6 +175,7 @@ fn spawn(
         clock: Vec4::new(0.0, 1.0, 0.0, 0.0),
         absorption: ABSORPTION.extend(0.0),
         scatter: SCATTERING.extend(0.0),
+        air: AirUniform::default(),
     };
     let material = materials.add(WaterMaterial {
         water,
@@ -202,11 +206,13 @@ fn spawn(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tick(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     viewpoint: Res<Viewpoint>,
     sky: Res<Sky>,
+    air: Res<Air>,
     water: Res<Water>,
     mut materials: ResMut<Assets<WaterMaterial>>,
     mut meshes: Query<&mut Transform, With<WaterMesh>>,
@@ -222,6 +228,7 @@ fn tick(
         let enclosed = sim.drum.encloses(sim.avatar().p);
         material.order = if enclosed { ORDER } else { -ORDER };
         let uniform = &mut material.water;
+        uniform.air = air.uniform(sim.drum.spin);
         let stars = sky.rotation.inverse();
         uniform.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
         uniform.from_water = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);

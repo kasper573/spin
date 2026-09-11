@@ -24,6 +24,7 @@ use super::landscape::{ROWS, SEGMENTS};
 use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Ring, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
+use crate::systems::air::{Air, AirUniform};
 use crate::systems::scene::{SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
@@ -132,6 +133,9 @@ struct GlassMaterial {
     /// The ground's colour as seen from across the ring.
     #[uniform(0)]
     ground: LinearRgba,
+    /// The air between the eye and the glass; see `systems/air.rs`.
+    #[uniform(0)]
+    air: AirUniform,
 }
 
 impl Material for GlassMaterial {
@@ -185,6 +189,9 @@ struct TerrainMaterial {
     absorption: Vec4,
     #[uniform(0)]
     scatter: Vec4,
+    /// The air between the eye and the ground; see `systems/air.rs`.
+    #[uniform(0)]
+    air: AirUniform,
     #[storage(1, read_only)]
     columns: Handle<ShaderBuffer>,
 }
@@ -247,6 +254,7 @@ fn spawn(
             origin: Vec4::ZERO,
             ring: Vec4::new(0.0, 0.0, 1.0, 1.0),
             ground: ground_albedo(),
+            air: AirUniform::default(),
         }),
         metal: standard.add(StandardMaterial {
             base_color: Color::srgb(0.16, 0.17, 0.2),
@@ -265,6 +273,7 @@ fn spawn(
             clock: Vec4::ZERO,
             absorption: water::ABSORPTION.extend(0.0),
             scatter: water::SCATTERING.extend(0.0),
+            air: AirUniform::default(),
             columns: frame.columns.clone(),
         }),
     });
@@ -358,10 +367,12 @@ fn light(
     sim: Res<Simulation>,
     viewpoint: Res<Viewpoint>,
     sky: Res<Sky>,
+    air: Res<Air>,
     materials: Res<WheelMaterials>,
     mut glass: ResMut<Assets<GlassMaterial>>,
 ) {
     if let Some(mut material) = glass.get_mut(&materials.glass) {
+        material.air = air.uniform(sim.drum.spin);
         let stars = sky.rotation.inverse();
         material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
         let [x, y, z] = viewpoint.origin;
@@ -384,12 +395,14 @@ fn wet(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     viewpoint: Res<Viewpoint>,
+    air: Res<Air>,
     materials: Res<WheelMaterials>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
     let Some(mut material) = terrain.get_mut(&materials.terrain) else {
         return;
     };
+    material.air = air.uniform(sim.drum.spin);
     let drum = &sim.drum;
     let resolution = fluid.resolution();
     let dphi = std::f64::consts::TAU / SEGMENTS as f64;

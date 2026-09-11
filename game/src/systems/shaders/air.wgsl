@@ -1,70 +1,180 @@
-// The air the ring holds, which is what it has in place of a sky. Air scatters light out of a
-// ray crossing it and scatters other light into it: off the molecules themselves, which take
-// the short wavelengths far harder than the long ones and send them almost as readily backward
-// as forward, and off what the air carries — dust, spray, smoke — whose grains are wider than
-// a wavelength, take every colour much alike, and throw the light forward in a tight lobe.
+// The air the ring holds, as light crosses it. What a metre of it does is worked out on the
+// other side from what the air is — see `systems/air.rs` — and what arrives here is that,
+// together with how the air thins away from the rim: a ring holds its air by spinning, so the
+// air stands in the potential the spin makes and settles the way a planet's does with height.
 //
-// A habitat is not a planet. Thirty metres of air at the pressure a lung wants scatters about
-// a twentieth of one percent of the light crossing it off its molecules, so nothing in the
-// ring is a wavelength away from the colour it would have in vacuum; what does show is the
-// forward lobe off the dust, as a faint bloom on the air between the eye and the sun. Air also
-// slows light, which is why the water and the glass are given their indices against air rather
-// than against vacuum; it bends light too, but the bending that shows on a planet — a flattened
-// sun, a green flash — is a ray grazing hundreds of kilometres of thinning air, and the whole
-// ring is thirty metres across.
+// Nothing here is a fit to how the ring ought to look. A ray is walked across the air in steps,
+// and at every step the density where it stands says how much light that stretch takes out of
+// it, how much it turns into it, and how sharply it bends it. What follows from that at the
+// ring's own size is slight; what follows from it in air a hundred times thicker, or round a
+// ring spun a hundred times harder, is a blue sky, a white haze and a sun pulled out of shape
+// and fringed with colour, because those are what the same steps come to when the air is deep
+// enough for them to show.
 #define_import_path air
 
-const PI: f32 = 3.14159265;
+#import ring::{sunlit_run, sunlit_share}
 
-/// What a metre of air at a habitat's pressure scatters off its molecules, at the wavelengths
-/// the eye's three kinds of cone answer to. Scattering goes as the inverse fourth power of the
-/// wavelength, which is the whole of why a sky is blue.
-const RAYLEIGH: vec3<f32> = vec3<f32>(5.8e-6, 13.5e-6, 33.1e-6);
-/// What a metre of it scatters off the dust and spray it carries, which is nearly the same at
-/// every wavelength, and how tightly forward that scattering throws the light.
-const MIE: f32 = 21e-6;
-const MIE_LOBE: f32 = 0.76;
-/// Air's refractive index: what the water and the glass are seen through it against.
-const AIR_IOR: f32 = 1.000293;
-
-/// What a metre of air takes out of a ray crossing it, whichever way it is turned aside.
-fn air_extinction() -> vec3<f32> {
-    return RAYLEIGH + vec3(MIE);
+struct Air {
+    // what a metre of the air at the rim scatters off its molecules, per channel
+    rayleigh: vec4<f32>,
+    // what a metre of it scatters off what it carries, per channel, and how far forward a
+    // grain of that throws what it turns
+    mie: vec4<f32>,
+    // what a metre of it takes out of a ray altogether, per channel: what it turns aside and
+    // what it swallows
+    taken: vec4<f32>,
+    // how much it slows light at the rim, as n - 1 per channel, and the coefficient of
+    // r^2 - rim^2 in how its density falls away from the rim
+    slowing: vec4<f32>,
 }
 
-/// How readily the molecules turn light through this angle: as willingly backward as forward,
+/// How far a point of the ring's frame stands from the axis, that frame having its origin on
+/// the wall with the axis `radius` in along -x.
+fn from_axis(at: vec3<f32>, radius: f32) -> f32 {
+    return length(vec2(radius + at.x, at.z));
+}
+
+const PI: f32 = 3.14159265;
+// the most steps a ray is walked across the air in, and the fewest: how long a step may be is
+// worked out where the step starts, so a ray that sets out in dense air and climbs out of it
+// takes short steps while it is in it and one long one for everything after.
+const FEWEST_STEPS: i32 = 6;
+const MOST_STEPS: i32 = 96;
+/// How much of the air's own e-folding a step may cross.
+const EVENNESS: f32 = 0.25;
+/// How far round the circle the air turns a ray on a step may carry it, in radians.
+const TURNING: f32 = 0.02;
+
+/// How dense the air is at a point against how dense it is at the rim.
+fn air_density(air: Air, at: vec3<f32>, radius: f32) -> f32 {
+    let r = from_axis(at, radius);
+    return exp(air.slowing.w * (r * r - radius * radius));
+}
+
+/// How far a ray may run from a point in one step and still resolve the air it crosses. The
+/// density goes as `exp(thinning * r^2)`, so what a step changes it by follows how far the step
+/// carries the ray from the axis; a ray running level changes it only by the curve of its own
+/// path, and one climbing away changes it at once. A stretch that holds almost nothing neither
+/// dims a ray nor lights it however it is cut, so the thinner the air already is the farther a
+/// step may reach: a ray leaving the air behind covers everything after it in one.
+fn air_step(air: Air, at: vec3<f32>, dir: vec3<f32>, radius: f32) -> f32 {
+    let thinning = abs(air.slowing.w);
+    if (thinning <= 0.0) {
+        return 1e30;
+    }
+    let axis = vec3(radius + at.x, 0.0, at.z);
+    let r = max(length(axis), 1e-6);
+    let climb = abs(dot(axis / r, dir)) * r;
+    let even = sqrt(climb * climb + EVENNESS / thinning) - climb;
+    return even / max(air_density(air, at, radius), 1e-6);
+}
+
+/// How readily a molecule turns light through this angle: as willingly backward as forward,
 /// and half as willingly side on.
 fn rayleigh_phase(cosine: f32) -> f32 {
     return 3.0 / (16.0 * PI) * (1.0 + cosine * cosine);
 }
 
-/// How readily the dust turns it: forward, overwhelmingly.
-fn mie_phase(cosine: f32) -> f32 {
-    let g = MIE_LOBE;
+/// How readily a grain turns it, as a lobe of the asymmetry Mie's solution gives the grain.
+fn mie_phase(forward: f32, cosine: f32) -> f32 {
+    let g = clamp(forward, -0.95, 0.95);
     let d = 1.0 + g * g - 2.0 * g * cosine;
     return (1.0 - g * g) / (4.0 * PI * d * sqrt(max(d, 1e-6)));
 }
 
-/// What a metre of air turns into a ray running along `dir`, out of a sun's light `sun` coming
-/// from `to_sun`: off the molecules, which favour neither way much, and off the dust, which
-/// throws it forward and so shows as a bloom on the air between the eye and the sun.
-fn air_turned(dir: vec3<f32>, to_sun: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+/// What a stretch of air did to the light that crossed it: the share of it that is left, and
+/// the light the air turned into the ray along the way, already dimmed by the air in front of
+/// where it was turned.
+struct Crossing {
+    left: vec3<f32>,
+    turned: vec3<f32>,
+}
+
+/// Walk `distance` metres of air from `at` along `dir`, which runs from the eye toward what it
+/// is looking at. `sun` is a sun's light and `to_sun` the way to it; `ambient` is the light
+/// reaching the air from everywhere at once.
+fn air_crossed(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, ring: vec2<f32>, sun: vec3<f32>, to_sun: vec3<f32>, ambient: vec3<f32>) -> Crossing {
+    let radius = ring.x;
+    var out: Crossing;
+    out.left = vec3(1.0);
+    out.turned = vec3(0.0);
+    if (distance <= 0.0) {
+        return out;
+    }
+    // the light met at a step is on its way to the eye, so it is turned through the angle
+    // between the way it was already going and the way the ray runs
     let cosine = dot(dir, to_sun);
-    return (RAYLEIGH * rayleigh_phase(cosine) + MIE * mie_phase(cosine)) * sun;
+    let molecules = air.rayleigh.rgb * rayleigh_phase(cosine);
+    let grains = air.mie.rgb * mie_phase(air.mie.w, cosine);
+    // the ring shades its own air, so a ray crosses a stretch the sun reaches and stretches it
+    // does not; where that stretch begins and ends is worked out once for the whole ray
+    let sunlit = sunlit_run(at, dir, distance, to_sun, ring);
+    let longest = distance / f32(FEWEST_STEPS);
+    var run = 0.0;
+    for (var k = 0; k < MOST_STEPS; k++) {
+        if (run >= distance) {
+            break;
+        }
+        var step = min(air_step(air, at + dir * run, dir, radius), longest);
+        if (k == MOST_STEPS - 1) {
+            step = distance - run;
+        }
+        step = min(step, distance - run);
+        let here = at + dir * (run + step * 0.5);
+        let density = air_density(air, here, radius);
+        let extinction = air.taken.rgb * density;
+        let scattering = (air.rayleigh.rgb + air.mie.rgb) * density;
+        // what this stretch turns into the ray, lit by the sun over as much of it as the sun
+        // reaches, and by the light that reaches it from everywhere at once, which it turns
+        // into the ray from every direction alike since a phase function gathers to one over
+        // the whole sphere
+        let lit = sun * sunlit_share(sunlit, run, run + step);
+        let turned = (molecules + grains) * density * lit + scattering * ambient;
+        let across = exp(-extinction * step);
+        out.turned += out.left * turned * (vec3(1.0) - across) / max(extinction, vec3(1e-30));
+        out.left *= across;
+        run += step;
+    }
+    return out;
 }
 
-/// What a metre of it turns into the ray out of light reaching it from everywhere at once,
-/// which no phase favours a direction of.
-fn air_lit_all_round(ambient: vec3<f32>) -> vec3<f32> {
-    return air_extinction() * ambient / (4.0 * PI);
-}
-
-/// What `distance` metres of air do to the light `colour` that set out across them toward the
-/// eye: what is left of it, and what the air turned into the ray on the way, given how much a
-/// metre of it turns. The light turned in partway is dimmed by the air left in front of it,
-/// which over the same stretch leaves the same share of it as of the light from behind.
-fn through_air(colour: vec3<f32>, turned: vec3<f32>, distance: f32) -> vec3<f32> {
-    let extinction = air_extinction();
-    let left = exp(-extinction * distance);
-    return colour * left + turned * (vec3(1.0) - left) / extinction;
+/// Where a ray ends up pointing after `distance` metres of air, having been bent by the air's
+/// own gradient: a ray in a medium whose index varies obeys `d(n t)/ds = grad n`, so it turns
+/// toward the denser air, which in a ring is toward the rim. `slowing` is `n - 1` at the rim
+/// for the colour being traced, so tracing three colours through the same air gives three
+/// directions, and a ray that crosses enough of it comes out spread into them.
+fn air_bent(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32, slowing: f32) -> vec3<f32> {
+    if (distance <= 0.0 || air.slowing.w == 0.0) {
+        return dir;
+    }
+    var p = at;
+    var d = dir;
+    let longest = distance / f32(FEWEST_STEPS);
+    var run = 0.0;
+    for (var k = 0; k < MOST_STEPS; k++) {
+        if (run >= distance) {
+            break;
+        }
+        let axis = vec3(radius + p.x, 0.0, p.z);
+        let r = max(length(axis), 1e-6);
+        let outward = axis / r;
+        let thinner = exp(air.slowing.w * (r * r - radius * radius));
+        let n = 1.0 + slowing * thinner;
+        // the gradient of the index, which lies along the axis's own outward direction
+        let gradient = outward * (slowing * thinner * air.slowing.w * 2.0 * r);
+        // a step must not only resolve the air but the turn it puts in the ray, which is the
+        // gradient across the index: air steep enough to turn a ray right round is walked in
+        // steps short against the circle it turns it on
+        let turning = length(gradient) / n;
+        var step = min(air_step(air, p, d, radius), longest);
+        step = min(step, TURNING / max(turning, 1e-30));
+        if (k == MOST_STEPS - 1) {
+            step = distance - run;
+        }
+        step = min(step, distance - run);
+        d = normalize(d + (gradient - d * dot(gradient, d)) / n * step);
+        p += d * step;
+        run += step;
+    }
+    return d;
 }

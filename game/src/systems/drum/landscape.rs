@@ -233,6 +233,12 @@ impl Landscape {
         (f / len, [-gx / len, -gy / len, -gz / len])
     }
 
+    /// The finest feature the landscape can hold anywhere: a brush narrower than this falls
+    /// between its cells and touches nothing, however large or small the ring is.
+    pub fn grain(&self) -> Metres {
+        Metres(self.segment_arc().max(self.row_spacing()) as f32)
+    }
+
     /// The arc one segment spans round the ring: the finest feature the landscape can hold.
     pub fn segment_arc(&self) -> f64 {
         DPHI * self.ring.radius.0 as f64

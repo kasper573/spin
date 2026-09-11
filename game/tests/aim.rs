@@ -1,9 +1,18 @@
 //! Where the crosshair rests and what it outlines.
-use bevy::math::DVec3;
-use game::core::units::Seconds;
+use bevy::math::{DVec2, DVec3};
+use bevy::prelude::*;
+use game::core::avatar;
+use game::core::math::mat3mul;
+use game::core::units::{Metres, Seconds};
 use game::systems::aim::{self, AimPoint};
+use game::systems::controls::BRUSH_SIZE;
 use game::systems::drum::GROUND_DEPTH;
+use game::systems::drum::Ring;
+use game::systems::player::PlayerCamera;
+use game::systems::scene::Viewpoint;
+use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
+use game::systems::sim::standing_spin;
 use game::systems::testing;
 
 /// The outline of a brush on uneven ground lies on the ground, just above it, everywhere
@@ -76,5 +85,86 @@ fn the_outline_wraps_the_ground_under_it() {
             (p.y - flat.point.y + lift).abs() < 1e-9,
             "a cap outline point is off the cap"
         );
+    }
+}
+
+/// The crosshair sits at the middle of the screen, so what it points at must be drawn there:
+/// on a ring of any size, the aim point and the marker outlined about it land under the
+/// crosshair, not beside it.
+#[test]
+#[ignore = "wants a GPU"]
+fn what_the_crosshair_points_at_is_drawn_under_it() {
+    for radius in [10.5, 100.0, 5000.0] {
+        let ring = Ring {
+            radius: Metres(radius),
+            half_width: Metres((radius * 0.1).max(6.0)),
+        };
+        let mut app = testing::headless();
+        {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            settings.diameter = Metres(ring.radius.0 * 2.0);
+            settings.width = Metres(ring.half_width.0 * 2.0);
+            settings.spin = standing_spin(ring);
+            settings.equalize_thrust();
+        }
+        app.insert_resource(Simulation::new(ring));
+        testing::run(&mut app, Seconds(1.0));
+        let image = testing::render_to_image(&mut app, 1280, 720);
+        testing::draw_into(&mut app, &image);
+        testing::frame(&mut app, Seconds(0.0));
+        let (projection, transform) = app
+            .world_mut()
+            .query_filtered::<(&Projection, &GlobalTransform), With<PlayerCamera>>()
+            .single(app.world())
+            .expect("the scene has one camera");
+        let clip_from_world = projection.get_clip_from_view() * transform.to_matrix().inverse();
+        let viewpoint = *app.world().resource::<Viewpoint>();
+        let sim = app.world().resource::<Simulation>();
+        let eye = DVec3::from_array(avatar::eye(sim.avatar()));
+        // half the screen is one in the clip's own units, so this is in half-screens
+        let on_screen = |p: [f64; 3]| -> Option<DVec2> {
+            let clip = clip_from_world * viewpoint.local(p).extend(1.0);
+            if clip.w <= 0.0 {
+                return None;
+            }
+            let ndc = clip.xy() / clip.w;
+            Some(DVec2::new(ndc.x as f64, ndc.y as f64) * 720.0 / 2.0)
+        };
+        let ahead = DVec3::from_array(mat3mul(&sim.avatar().m, &[0.0, 0.0, -1.0]));
+        let up = DVec3::from_array(mat3mul(&sim.avatar().m, &[0.0, 1.0, 0.0]));
+        for down in [0.0, 0.01, 0.05, 0.2, 0.6, 1.2] {
+            let dir = (ahead - up * down).normalize();
+            let Some(hit) = aim::cast(eye, dir, &sim.drum) else {
+                continue;
+            };
+            let (radius, lift) = (BRUSH_SIZE.0 as f64, 0.02);
+            let Some(crosshair) = on_screen((eye + dir * eye.distance(hit.point)).to_array())
+            else {
+                continue;
+            };
+            let at = on_screen(hit.point.to_array()).expect("the aim point is in front");
+            let off = (at - crosshair).length();
+            assert!(
+                off < 2.0,
+                "on a ring of radius {radius_m} m, looking {down} down, the crosshair points {off} pixels from where it is drawn",
+                radius_m = ring.radius.0
+            );
+            let outline = aim::outline(&sim.drum, hit, radius, lift);
+            let seen: Vec<DVec2> = outline
+                .iter()
+                .filter_map(|p| on_screen(p.to_array()))
+                .collect();
+            let middle = seen.iter().fold(DVec2::ZERO, |a, b| a + *b) / seen.len() as f64;
+            let spread = seen
+                .iter()
+                .map(|p| (*p - middle).length())
+                .fold(0.0, f64::max);
+            assert!(
+                (middle - at).length() < spread.max(2.0),
+                "on a ring of radius {radius_m} m, looking {down} down, the marker is drawn {} pixels from the point it outlines, and is only {spread} pixels across",
+                (middle - at).length(),
+                radius_m = ring.radius.0
+            );
+        }
     }
 }

@@ -8,7 +8,7 @@ use crate::core::fluid::Fluid;
 use crate::core::units::{Metres, MetresPerSecond, PixelsPerSecond};
 use crate::core::web;
 use crate::systems::aim::Aim;
-use crate::systems::drum::GROUND_DEPTH;
+use crate::systems::drum::{GROUND_DEPTH, Landscape};
 use crate::systems::player::{PilotInput, Player};
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
@@ -17,9 +17,15 @@ use crate::systems::sim::{SimSet, Simulation};
 pub const INJECT_DEPTH: Metres = Metres(1.0);
 /// Mouse speed (pixels per second) at which a turning thruster is asked for full.
 const MOUSE_FULL_SPEED: PixelsPerSecond = PixelsPerSecond(800.0);
-/// The sculpting brush: how wide it is and how fast it raises the ground.
+/// The sculpting brush: how wide it is at least and how fast it raises the ground. On a ring
+/// big enough that the landscape's own cells are wider than that, the brush is as wide as they
+/// are, since anything narrower falls between them.
 pub const BRUSH_SIZE: Metres = Metres(2.0);
 pub const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
+
+pub fn brush(landscape: &Landscape) -> Metres {
+    Metres(BRUSH_SIZE.0.max(landscape.grain().0))
+}
 
 /// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,9 +233,10 @@ fn mouse(
         controls.inject_carry = 0.0;
     }
     if mouse.pressed(MouseButton::Right) {
-        aim.brush = Some(BRUSH_SIZE);
+        let brush = brush(&sim.drum.landscape);
+        aim.brush = Some(brush);
         let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
-        sim.sculpt(target.point.to_array(), BRUSH_SIZE.0 as f64, amount as f64);
+        sim.sculpt(target.point.to_array(), brush.0 as f64, amount as f64);
     }
 }

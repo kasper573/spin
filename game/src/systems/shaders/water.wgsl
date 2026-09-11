@@ -9,9 +9,10 @@
 // what hits takes the sphere's depth and is shaded as the water is.
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
-#import optics::{rotate, mirrored, ring_run, ring_seen, ring_up, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
+#import optics::{rotate, mirrored, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
+#import ring::{ring_run, ring_up}
 #import ripples::{Carried, carried, waves_carried, noise3}
-#import air::AIR_IOR
+#import air::Air
 
 struct Water {
     to_stars: vec4<f32>,
@@ -24,6 +25,7 @@ struct Water {
     clock: vec4<f32>,
     absorption: vec4<f32>,
     scatter: vec4<f32>,
+    air: Air,
 }
 
 struct SurfaceVertex {
@@ -42,7 +44,7 @@ struct SurfaceVertex {
 
 const PI: f32 = 3.14159265;
 // water's index against the air it is seen through rather than against vacuum
-const IOR: f32 = 1.333 / AIR_IOR;
+const IOR: f32 = 1.333 / 1.000293;
 // air to water, so the mirror is faint face on
 const F0: f32 = 0.02;
 const DROP_ROUGHNESS: f32 = 0.05;
@@ -171,7 +173,7 @@ fn droplet(in: Fragment) -> Shaded {
         return out;
     }
     let reflected = reflect(dir, n);
-    var mirror = ring_seen(hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    var mirror = ring_seen(water.air, hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
     if (water.ring.z > 0.5) {
         mirror = mirrored(hit, reflected, mirror);
     }
@@ -186,7 +188,7 @@ fn droplet(in: Fragment) -> Shaded {
         let l = lights.directional_lights[i].direction_to_light;
         colour += sunlight(i) * glint(n, v, l, DROP_ROUGHNESS, F0) * sun_shadow(i, hit, n, pixel);
     }
-    out.colour = vec4(saturated(through_ring_air(colour, hit + water.origin.xyz, -dir, t, water.ring.xy)), 1.0);
+    out.colour = vec4(saturated(through_ring_air(colour, water.air, hit + water.origin.xyz, -dir, t, water.ring.xy)), 1.0);
     return out;
 }
 
@@ -280,7 +282,7 @@ fn surface(in: Fragment) -> vec4<f32> {
     let reflected = reflect(-v, n);
     // beyond the scene the mirror shows the ring, or from under water the bed, lit by the
     // light coming down through the surface and about as far off as the surface is
-    var beyond = ring_seen(site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
+    var beyond = ring_seen(water.air, site, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb);
     if (submerged) {
         beyond = through_water(water.ground.rgb * light, glow(light), extinction(), dot(reflected, up), distance);
     }
@@ -342,7 +344,7 @@ fn surface(in: Fragment) -> vec4<f32> {
     colour = mix(seen_through(uv, depth_here, in.world_position), colour, smoothstep(0.0, FILM, in.sheet));
     if (!submerged) {
         // with the eye out of the water, the air between it and the surface stands in the way
-        colour = through_ring_air(colour, site, v, distance, water.ring.xy);
+        colour = through_ring_air(colour, water.air, site, v, distance, water.ring.xy);
     }
     return vec4(saturated(colour), 1.0);
 }

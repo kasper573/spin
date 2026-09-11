@@ -10,8 +10,9 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import optics::through_water
 #endif
-#import optics::{mirrored, ring_seen, ring_up, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
-#import air::AIR_IOR
+#import optics::{mirrored, ring_seen, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
+#import ring::ring_up
+#import air::Air
 
 struct Glass {
     // how much of each colour a pane lets through
@@ -24,12 +25,13 @@ struct Glass {
     origin: vec4<f32>,
     ring: vec4<f32>,
     ground: vec4<f32>,
+    air: Air,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> glass: Glass;
 
 // the glass's index against the air it is seen through rather than against vacuum
-const IOR: f32 = 1.52 / AIR_IOR;
+const IOR: f32 = 1.52 / 1.000293;
 // glass mirrors this much face on
 const ROUGHNESS: f32 = 0.04;
 // the grooves' sides fall this steeply: depth over half their width
@@ -66,6 +68,9 @@ fn bevel(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> Facet {
     let w = max(fwidth(uv), vec2(1e-6));
     let u = groove(x.x, half.x, w.x);
     let v = groove(x.y, half.y, w.y);
+    // the two sides of a groove slant opposite ways, so a pixel that takes in both of them
+    // sees the flat pane again: a groove shows only while it is wider than the pixel on it
+    let shown = clamp(half / w - vec2(1.0), vec2(0.0), vec2(1.0));
     // the directions the grid runs in, from how the grid and the world change across the pixel
     let dp1 = dpdx(p);
     let dp2 = dpdy(p);
@@ -76,9 +81,14 @@ fn bevel(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> Facet {
     if (abs(det) < 1e-12) {
         return out;
     }
-    let along_u = normalize((dp1 * duv2.y - dp2 * duv1.y) / det);
-    let along_v = normalize((dp2 * duv1.x - dp1 * duv2.x) / det);
-    let shares = vec4(u.x, u.y, v.x, v.y);
+    let du = (dp1 * duv2.y - dp2 * duv1.y) / det;
+    let dv = (dp2 * duv1.x - dp1 * duv2.x) / det;
+    if (dot(du, du) <= 0.0 || dot(dv, dv) <= 0.0) {
+        return out;
+    }
+    let along_u = normalize(du);
+    let along_v = normalize(dv);
+    let shares = vec4(u * shown.x, v * shown.y);
     let most = max(max(shares.x, shares.y), max(shares.z, shares.w));
     if (most <= 0.0) {
         return out;
@@ -92,7 +102,7 @@ fn bevel(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> Facet {
         slant = -along_v * SLANT;
     }
     out.slant = slant;
-    out.share = min(u.x + u.y + v.x + v.y, 1.0);
+    out.share = min(shares.x + shares.y + shares.z + shares.w, 1.0);
     return out;
 }
 
@@ -104,9 +114,10 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     // the glass against what the eye is in, air or water
     let eta = IOR / glass.ring.w;
     let f0 = (eta - 1.0) * (eta - 1.0) / ((eta + 1.0) * (eta + 1.0));
-    // a pane has two faces: what the first passes, the second mirrors back in part
+    // a pane has two faces: what the first passes, the second mirrors back in part, and what
+    // that one passes back the first mirrors again, without end: the sum of them all
     let f = fresnel(cos_theta, f0);
-    let mirrored_share = f + (1.0 - f) * (1.0 - f) * f / (1.0 - f * f);
+    let mirrored_share = 2.0 * f / (1.0 + f);
     var inside = refract(-v, face, 1.0 / eta);
     if (all(inside == vec3(0.0))) {
         inside = -v;
@@ -120,7 +131,7 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     let reflected = reflect(-v, face);
     // from outside the drum the screen shows the far sides of everything the mirror would
     // show the near sides of, so only the ring itself is mirrored there
-    var mirror = ring_seen(p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb);
+    var mirror = ring_seen(glass.air, p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb);
     if (glass.ring.z > 0.5) {
         mirror = mirrored(p, reflected, mirror);
     }
@@ -165,6 +176,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rise = -dot(toward, ring_up(view.world_position + glass.origin.xyz, glass.ring.x));
     return vec4(through_water(out.rgb, fog.base_color.rgb, fog.be, rise, reach), out.a);
 #else
-    return vec4(through_ring_air(out.rgb, p + glass.origin.xyz, toward, reach, glass.ring.xy), out.a);
+    return vec4(through_ring_air(out.rgb, glass.air, p + glass.origin.xyz, toward, reach, glass.ring.xy), out.a);
 #endif
 }

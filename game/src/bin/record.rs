@@ -16,14 +16,17 @@ use game::core::audio::{self, Fader, Placement, Voice};
 use game::core::avatar::{self, Gyros, TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
-use game::core::units::Litres;
-use game::core::units::Seconds;
+use game::core::units::{
+    KilogramsPerCubicMetre, Litres, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
+};
 use game::systems::aim::Aim;
-use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
+use game::systems::air::{Air, Suspension};
+use game::systems::controls::{self, BRUSH_RATE, INJECT_DEPTH};
+use game::systems::drum::Ring;
 use game::systems::player::{PilotInput, Player};
-use game::systems::scene::Sky;
+use game::systems::scene::{SUN_DIRECTION, Sky};
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::Simulation;
+use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
 
 const FPS: u32 = 30;
@@ -59,6 +62,23 @@ enum Cue {
     Dive,
     /// Put the avatar, as a ghost, at a viewpoint of the survey, by night or by day.
     Look(View),
+    /// Hold the eye at a viewpoint with the wheel turned to the light the shot wants, while the
+    /// eye adapts to it, before the shot itself begins.
+    Steady(View),
+    /// Give the ring air of this depth, in atmospheres, carrying this.
+    Air {
+        atmospheres: f64,
+        carrying: Suspension,
+    },
+    /// Make the ring this size across and along, spun for a standing gravity of one g.
+    Resize {
+        diameter: f32,
+        width: f32,
+    },
+    /// Spin the ring at this many radians a second, whatever that does to the gravity.
+    Spin(f32),
+    /// Measure the shots that follow from where the avatar stands.
+    Here,
 }
 
 /// A viewpoint of the survey: where the eye is and what it looks at, each a place about the
@@ -75,10 +95,10 @@ struct View {
     ashore: bool,
 }
 
-/// Where the pool was laid in: its wheel angle and its place along the axis, which the site
-/// leaves behind as the avatar moves about.
+/// Where the shots are measured from: the wheel angle and the place along the axis a pool was
+/// laid in, or wherever a script marked, which the site leaves behind as the avatar moves.
 #[derive(Resource, Clone, Copy)]
-struct Pool {
+struct Mark {
     phi: f64,
     y: f64,
     /// How far round the ring from `phi` the water's edge lies, once a sea stands in the ring.
@@ -88,6 +108,9 @@ struct Pool {
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
 struct Phase {
     seconds: f32,
+    /// Seconds of the simulation to a second of the video: one for real time, a fraction for
+    /// slow motion, which is the only way to watch a ring spun hard enough to stack its air.
+    pace: f32,
     pilot: PilotInput,
     caption: &'static str,
     cue: Cue,
@@ -110,6 +133,7 @@ fn script() -> Vec<Phase> {
     let pi = std::f64::consts::PI;
     let phase = |seconds, held: &[Thruster], caption| Phase {
         seconds,
+        pace: 1.0,
         pilot: PilotInput::firing(held),
         caption,
         cue: Cue::None,
@@ -232,6 +256,7 @@ fn marker_script() -> Vec<Phase> {
             pilot.levels[*thruster as usize] = level;
         }
         Phase {
+            pace: 1.0,
             seconds,
             pilot,
             caption,
@@ -333,6 +358,7 @@ fn water_script() -> Vec<Phase> {
             pilot.levels[*thruster as usize] = level;
         }
         Phase {
+            pace: 1.0,
             seconds,
             pilot,
             caption,
@@ -450,6 +476,7 @@ fn sea_script() -> Vec<Phase> {
             pilot.levels[*thruster as usize] = level;
         }
         Phase {
+            pace: 1.0,
             seconds,
             pilot,
             caption,
@@ -643,6 +670,209 @@ fn sea_script() -> Vec<Phase> {
     script
 }
 
+/// The air the ring holds, shown by giving it circumstances enough of it to show in: a ring
+/// ten kilometres across, so that there are kilometres of air between the eye and the far side
+/// of it; that air made twenty times as deep, so that the ring has a sky; the same air carrying
+/// fog and then smoke, which turn light in their own ways; and the ring spun hard enough to
+/// stack its air into a shell against the rim, where the gradient bends what crosses it and
+/// bends each colour of it by its own amount. Nothing here is drawn differently from the ring
+/// as it stands — only the air is changed, and the same steps follow from it.
+fn air_script() -> Vec<Phase> {
+    const SMALL: f32 = 21.0;
+    const VAST: f32 = 10_000.0;
+    const WIDE: f32 = 1_000.0;
+    /// The spin that leaves the ring's air in a shell a metre or so deep against the rim, which
+    /// is thousands of times the spin it is held together by, so the shot is slowed to match.
+    const STACKING: f32 = 5.0;
+    const STACKED_DEPTH: f64 = 100.0;
+    const SLOWED: f32 = 1.0 / 20.0;
+
+    let along = View {
+        eye: [0.0, 0.0, 1.7],
+        at: [4000.0, 0.0, 1.7],
+        daylight: true,
+        ashore: false,
+    };
+    let across = View {
+        eye: [0.0, 0.0, 1.7],
+        at: [0.0, 0.0, 3000.0],
+        daylight: true,
+        ashore: false,
+    };
+    let axis = View {
+        eye: [0.0, 0.0, 0.2],
+        at: [0.0, -490.0, 0.2],
+        daylight: true,
+        ashore: false,
+    };
+    let cap = View {
+        eye: [0.0, 0.0, 1.7],
+        at: [0.0, -490.0, 1.7],
+        daylight: true,
+        ashore: false,
+    };
+    let outside = View {
+        eye: [0.0, 0.0, -8000.0],
+        at: [0.0, 0.0, 0.0],
+        daylight: true,
+        ashore: false,
+    };
+    let small = View {
+        eye: [0.0, 0.0, 1.7],
+        at: [25.0, 0.0, 1.7],
+        daylight: true,
+        ashore: false,
+    };
+    let ground = View {
+        eye: [0.0, 0.0, 90.0],
+        at: [90.0, 0.0, 0.0],
+        daylight: true,
+        ashore: false,
+    };
+
+    let shot = |seconds: f32, view: View, caption: &'static str| Phase {
+        seconds,
+        pace: 1.0,
+        pilot: PilotInput::default(),
+        caption,
+        cue: Cue::Steady(view),
+        sculpting: false,
+        pouring: false,
+        hold: Some(view),
+    };
+    let set = |cue: Cue| Phase {
+        seconds: 1.0 / FPS as f32,
+        pace: 1.0,
+        pilot: PilotInput::default(),
+        caption: "",
+        cue,
+        sculpting: false,
+        pouring: false,
+        hold: None,
+    };
+    let mut script = vec![
+        set(Cue::Here),
+        set(Cue::Resize {
+            diameter: SMALL,
+            width: 12.0,
+        }),
+        set(Cue::Here),
+        shot(
+            4.0,
+            small,
+            "a habitat's own air: thirty metres of it between the eye and the far wall, which takes a thousandth of the light and is not to be seen",
+        ),
+        set(Cue::Resize {
+            diameter: VAST,
+            width: WIDE,
+        }),
+        set(Cue::Here),
+        shot(
+            5.0,
+            along,
+            "the same air in a ring ten kilometres across: kilometres of it now, and the far ground goes pale and blue behind it",
+        ),
+        shot(
+            5.0,
+            across,
+            "across the ring, ten kilometres of air: the far side is half lost in it, and what is lost is the red of it first",
+        ),
+        shot(
+            4.0,
+            cap,
+            "a cap of the same ring, half a kilometre off: a glass disc a kilometre across, with space behind it",
+        ),
+        shot(4.0, outside, "the whole of it from eight kilometres out"),
+        set(Cue::Air {
+            atmospheres: 20.0,
+            carrying: Suspension::CLEAR,
+        }),
+        shot(
+            5.0,
+            along,
+            "twenty atmospheres of the same air, and nothing carried in it: as many molecules along the way as a planet's sky, so the ring has one",
+        ),
+        shot(
+            5.0,
+            across,
+            "the fourth power of the wavelength is the whole of it: blue is turned aside three times as readily as red, and what is turned aside is what is seen",
+        ),
+    ];
+    // a fog of droplets wider than any wavelength, and smoke of grains far finer than one:
+    // thick enough to see over kilometres, which is thousands of times a room's worth
+    script.push(set(Cue::Air {
+        atmospheres: 1.0,
+        carrying: Suspension {
+            loading: KilogramsPerCubicMetre(3.0e-4),
+            ..Suspension::FOG
+        },
+    }));
+    script.push(shot(
+        5.0,
+        along,
+        "the same air carrying droplets eight micrometres across: a grain that wide turns every colour alike, so the fog shows no blue of its own but the colour of the light filling the ring, which is its own sunlit ground",
+    ));
+    script.push(set(Cue::Air {
+        atmospheres: 1.0,
+        carrying: Suspension {
+            loading: KilogramsPerCubicMetre(1.0e-5),
+            ..Suspension::SMOKE
+        },
+    }));
+    script.push(shot(
+        5.0,
+        along,
+        "and carrying soot a twentieth of a micrometre across: far finer than a wavelength, so it blues like the molecules, and it swallows four fifths of what it takes",
+    ));
+    script.push(set(Cue::Air {
+        atmospheres: 20.0,
+        carrying: Suspension::CLEAR,
+    }));
+    script.push(shot(
+        4.0,
+        axis,
+        "twenty atmospheres again, and the ring turning only fast enough to stand on: the air lies as evenly as the ring is wide",
+    ));
+    script.push(set(Cue::Air {
+        atmospheres: STACKED_DEPTH,
+        carrying: Suspension::CLEAR,
+    }));
+    script.push(set(Cue::Spin(STACKING)));
+    let mut stacked = shot(
+        6.0,
+        axis,
+        "the ring spun until its air stacks into a shell a metre deep at the rim: shown at a twentieth of the speed, since the ring turns five times a second",
+    );
+    stacked.pace = SLOWED;
+    script.push(stacked);
+    let mut fringed = shot(
+        6.0,
+        axis,
+        "the gradient bends every ray that crosses it, and bends blue further than red, so the stars come apart into their colours",
+    );
+    fringed.pace = SLOWED;
+    script.push(fringed);
+    script.push(set(Cue::Spin(
+        standing_spin(Ring {
+            radius: Metres(VAST / 2.0),
+            half_width: Metres(WIDE / 2.0),
+        })
+        .0,
+    )));
+    script.push(set(Cue::Air {
+        atmospheres: 1.0,
+        carrying: Suspension::DUST,
+    }));
+    let mut working = shot(
+        6.0,
+        ground,
+        "the ground of a ring this size is coarse: the brush the crosshair outlines is as wide as the smallest thing that ground can hold, sixty metres of it",
+    );
+    working.sculpting = true;
+    script.push(working);
+    script
+}
+
 /// One frame from each of many viewpoints about the pool, by night and then by day: under the
 /// water, at its surface, over it, out through the glass, in through the glass and the water
 /// from outside, and from far off.
@@ -710,6 +940,7 @@ fn survey_script() -> Vec<Phase> {
         ),
     ];
     let mut script = vec![Phase {
+        pace: 1.0,
         seconds: 1.0 / FPS as f32,
         pilot: PilotInput::default(),
         caption: "the pool laid in",
@@ -721,6 +952,7 @@ fn survey_script() -> Vec<Phase> {
     for daylight in [false, true] {
         for (eye, at, caption) in views {
             script.push(Phase {
+                pace: 1.0,
                 seconds: 1.0 / FPS as f32,
                 pilot: PilotInput::default(),
                 caption,
@@ -741,7 +973,7 @@ fn survey_script() -> Vec<Phase> {
 
 /// Hold the eye at a viewpoint about the pool, as a ghost.
 fn hold(app: &mut App, view: View) {
-    let pool = *app.world().resource::<Pool>();
+    let pool = *app.world().resource::<Mark>();
     let shore = if view.ashore { pool.shore } else { 0.0 };
     let mut sim = app.world_mut().resource_mut::<Simulation>();
     sim.avatar_mut().solid = false;
@@ -795,6 +1027,57 @@ fn cue(app: &mut App, cue: Cue) {
             }
             hold(app, view);
         }
+        Cue::Steady(view) => {
+            app.world_mut().resource_mut::<Settings>().collisions = false;
+            face_the_sun(app, view.daylight);
+            // a second and a half is more than the eye takes to adapt to what it is shown
+            for _ in 0..(FPS + FPS / 2) {
+                hold(app, view);
+                testing::watch(app, Seconds(1.0 / FPS as f32));
+            }
+            face_the_sun(app, view.daylight);
+            hold(app, view);
+        }
+        Cue::Air {
+            atmospheres,
+            carrying,
+        } => {
+            app.world_mut().insert_resource(Air {
+                pressure: Pascals(101_325.0 * atmospheres),
+                carries: carrying,
+                ..Air::default()
+            });
+        }
+        Cue::Resize { diameter, width } => {
+            let ring = Ring {
+                radius: Metres(diameter / 2.0),
+                half_width: Metres(width / 2.0),
+            };
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            Dial::Diameter.set(&mut settings, diameter);
+            Dial::Width.set(&mut settings, width);
+            settings.spin = standing_spin(ring);
+            settings.equalize_thrust();
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            sim.drum.spin = standing_spin(ring);
+            sim.drum.target_spin = standing_spin(ring);
+        }
+        Cue::Spin(rate) => {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            Dial::Spin.set(&mut settings, rate);
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            sim.drum.spin = RadiansPerSecond(rate);
+            sim.drum.target_spin = RadiansPerSecond(rate);
+        }
+        Cue::Here => {
+            app.world_mut().resource_mut::<Settings>().collisions = false;
+            let site = app.world().resource::<Simulation>().drum.site;
+            app.world_mut().insert_resource(Mark {
+                phi: site.phi,
+                y: site.y,
+                shore: 0.0,
+            });
+        }
         Cue::Flood => {
             for k in 0..30 {
                 app.world_mut()
@@ -836,7 +1119,7 @@ fn cue(app: &mut App, cue: Cue) {
                         }
                     }
                 }
-                Pool {
+                Mark {
                     phi: site.phi,
                     y: site.y,
                     shore: 0.0,
@@ -894,7 +1177,7 @@ fn cue(app: &mut App, cue: Cue) {
                         TERRACE_HEIGHT / 20.0,
                     );
                 }
-                Pool {
+                Mark {
                     phi: site.phi,
                     y: site.y,
                     shore: 0.0,
@@ -946,7 +1229,7 @@ fn cue(app: &mut App, cue: Cue) {
                 }
                 arc
             };
-            app.world_mut().insert_resource(Pool { shore, ..pool });
+            app.world_mut().insert_resource(Mark { shore, ..pool });
             app.world_mut().resource_mut::<Settings>().collisions = true;
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             sim.avatar_mut().solid = true;
@@ -955,7 +1238,7 @@ fn cue(app: &mut App, cue: Cue) {
             stand(&mut sim, eye, along);
         }
         Cue::Dive => {
-            let pool = *app.world().resource::<Pool>();
+            let pool = *app.world().resource::<Mark>();
             app.world_mut().resource_mut::<Settings>().collisions = true;
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             sim.avatar_mut().solid = true;
@@ -1022,7 +1305,7 @@ const DAY: f32 = 2.5;
 /// A place about the pool, in the frame: `arc` metres round the ring from it, `y` along the
 /// axis and `height` over the ground there, which is under the ground, and out through the
 /// glass, when negative.
-fn spot(sim: &Simulation, pool: Pool, [arc, y, height]: [f64; 3]) -> [f64; 3] {
+fn spot(sim: &Simulation, pool: Mark, [arc, y, height]: [f64; 3]) -> [f64; 3] {
     let drum = &sim.drum;
     let radius = drum.ring.radius.0 as f64;
     let phi = pool.phi + arc / radius;
@@ -1036,6 +1319,20 @@ fn spot(sim: &Simulation, pool: Pool, [arc, y, height]: [f64; 3]) -> [f64; 3] {
         on[1] - out[1] * lift,
         on[2] - out[2] * lift,
     ]
+}
+
+/// Turn the wheel so the sun stands over the site, or behind the ring from it. The sun keeps
+/// its place among the stars and the wheel turns under it, so a shot sets the turn it wants
+/// rather than running the ring round to it, which on a ring kilometres across takes minutes.
+fn face_the_sun(app: &mut App, daylight: bool) {
+    let mut sim = app.world_mut().resource_mut::<Simulation>();
+    let over = (SUN_DIRECTION.z as f64).atan2(SUN_DIRECTION.x as f64) + std::f64::consts::PI;
+    let turn = if daylight {
+        over
+    } else {
+        over + std::f64::consts::PI
+    };
+    sim.drum.angle = Radians(sim.drum.site.phi - turn);
 }
 
 /// Put the avatar at rest with its eye at `eye`, facing `target`, standing up on the ring.
@@ -1079,8 +1376,11 @@ fn main() {
         Some("water") => water_script(),
         Some("survey") => survey_script(),
         Some("sea") => sea_script(),
+        Some("air") => air_script(),
         Some(other) => {
-            panic!("unknown script {other:?}: the others are `marker`, `water`, `survey` and `sea`")
+            panic!(
+                "unknown script {other:?}: the others are `marker`, `water`, `survey`, `sea` and `air`"
+            )
         }
     };
     let mut frame = 0u32;
@@ -1093,13 +1393,14 @@ fn main() {
                 let target = app.world().resource::<Aim>().target;
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 sim.avatar_input = player.input(phase.pilot);
+                let brush = controls::brush(&sim.drum.landscape);
                 if phase.sculpting
                     && let Some(target) = target
                 {
-                    let amount = BRUSH_RATE.0 * frame_time.0;
-                    sim.sculpt(target.point.to_array(), BRUSH_SIZE.0 as f64, amount as f64);
+                    let amount = BRUSH_RATE.0 * frame_time.0 * phase.pace;
+                    sim.sculpt(target.point.to_array(), brush.0 as f64, amount as f64);
                 }
-                app.world_mut().resource_mut::<Aim>().brush = phase.sculpting.then_some(BRUSH_SIZE);
+                app.world_mut().resource_mut::<Aim>().brush = phase.sculpting.then_some(brush);
             }
             if phase.pouring
                 && let Some(target) = app.world().resource::<Aim>().target
@@ -1117,7 +1418,7 @@ fn main() {
             if let Some(view) = phase.hold {
                 hold(&mut app, view);
             }
-            testing::watch(&mut app, frame_time);
+            testing::watch(&mut app, Seconds(frame_time.0 * phase.pace));
             soundtrack.frame(app.world().resource::<Simulation>().thrusters.levels());
             let readout = {
                 let sim = app.world().resource::<Simulation>();

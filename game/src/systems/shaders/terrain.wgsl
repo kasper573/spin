@@ -6,7 +6,8 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_directional_shadow
-#import optics::{bounce, ring_up, sunlight, through_ring_air}
+#import optics::{bounce, sunlight, through_ring_air}
+#import ring::ring_up
 #ifdef DISTANCE_FOG
 // with the eye under water the fog carries the water round it: its colour just under the
 // surface, and what a metre of it takes out of light crossing it
@@ -14,7 +15,7 @@
 #import optics::through_water
 #endif
 #import ripples::{carried, crossing_length, noise3, waves_carried}
-#import air::AIR_IOR
+#import air::Air
 
 struct Terrain {
     dirt: vec4<f32>,
@@ -34,6 +35,7 @@ struct Terrain {
     clock: vec4<f32>,
     absorption: vec4<f32>,
     scatter: vec4<f32>,
+    air: Air,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> terrain: Terrain;
@@ -41,7 +43,7 @@ struct Terrain {
 
 const PI: f32 = 3.14159265;
 // water's index against the air it is seen through rather than against vacuum
-const IOR: f32 = 1.333 / AIR_IOR;
+const IOR: f32 = 1.333 / 1.000293;
 const F0: f32 = 0.02;
 // the tightest the sun's disc can be focused, as a share of the light it started with
 const SHARPEST: f32 = 0.4;
@@ -324,6 +326,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rise = -dot(toward, ring_up(view.world_position + terrain.origin.xyz, terrain.site.z));
     return vec4(through_water(colour, fog.base_color.rgb, fog.be, rise, reach), 1.0);
 #else
-    return vec4(through_ring_air(colour, at, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
+    return vec4(through_ring_air(colour, terrain.air, at, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
 #endif
 }

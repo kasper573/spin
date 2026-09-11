@@ -9,6 +9,7 @@ use crate::core::avatar;
 use crate::core::math::mat3mul;
 use crate::core::units::Metres;
 use crate::core::vessel::Vessel;
+use crate::systems::controls;
 use crate::systems::drum::Drum;
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
@@ -42,9 +43,10 @@ pub struct Aim {
     pub engaged: bool,
 }
 
-/// The marker at rest outlines a disc this big, and floats this far above the surface.
-const MARKER_RADIUS: Metres = Metres(0.3);
-const MARKER_LIFT: Metres = Metres(0.02);
+/// The marker at rest outlines this share of the brush it would put to work, and every marker
+/// floats this share of its own radius above the surface, clear of it at any size of ring.
+const MARKER_SHARE: f64 = 0.15;
+const MARKER_LIFT: f64 = 0.01;
 
 pub struct AimPlugin;
 
@@ -155,13 +157,16 @@ fn marker(aim: Res<Aim>, sim: Res<Simulation>, viewpoint: Res<Viewpoint>, mut gi
     let Some(target) = aim.target else {
         return;
     };
-    let radius = aim.brush.unwrap_or(MARKER_RADIUS).0 as f64;
+    let radius = match aim.brush {
+        Some(brush) => brush.0 as f64,
+        None => controls::brush(&sim.drum.landscape).0 as f64 * MARKER_SHARE,
+    };
     let colour = if aim.engaged {
         Color::srgba(1.0, 1.0, 1.0, 0.9)
     } else {
         Color::srgba(1.0, 1.0, 1.0, 0.35)
     };
-    let outline = outline(&sim.drum, target, radius, MARKER_LIFT.0 as f64);
+    let outline = outline(&sim.drum, target, radius, radius * MARKER_LIFT);
     let closed = outline.iter().chain(outline.first());
     gizmos.linestrip(closed.map(|p| viewpoint.local(p.to_array())), colour);
 }

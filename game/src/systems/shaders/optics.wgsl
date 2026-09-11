@@ -9,10 +9,15 @@
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
 #import space::stars
-#import air::{air_lit_all_round, air_turned, through_air}
+#import air::{Air, air_bent, air_crossed}
+#import ring::{ring_run, ring_up, sun_reaches}
 
 const PI: f32 = 3.14159265;
 const MARCH_STEPS: i32 = 28;
+// the first step of a march, and the deepest the scene is taken to be where a ray runs past
+// it, both as shares of how far off what is mirroring stands
+const FINEST_MARCH: f32 = 0.01;
+const THICKEST_SCENE: f32 = 0.025;
 // how many times the stretch of the march that met the scene is halved to find where
 const REFINE_STEPS: i32 = 5;
 // the brightest the eye tells from white: the sun's mirror image is thousands of times
@@ -65,7 +70,12 @@ fn depth_of(world: vec3<f32>) -> f32 {
 /// What a ray from a point sees: the scene where the ray meets it on screen, found by marching
 /// it against the depth of the scene, or else what lies `beyond` the scene.
 fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
-    var t = 0.02;
+    // how far the surface itself stands from the eye sets the march: its first step and the
+    // thickness it allows the scene are shares of that, so what a wall a kilometre off mirrors
+    // is followed as far as what a wall a metre off does, and neither is followed finer than
+    // the depth it was drawn at can tell
+    let scale = max(depth_of(origin), 1e-4);
+    var t = FINEST_MARCH * scale;
     var last = 0.0;
     for (var i = 0; i < MARCH_STEPS; i++) {
         let q = origin + dir * t;
@@ -111,78 +121,47 @@ fn space_seen(dir: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec
 }
 
 /// What the air between a point of the ring and the eye does to what the eye sees of it: only
-/// the stretch inside the ring holds any air, and the sun is taken to reach the whole of that
-/// stretch, or none of it, as it reaches the point itself.
-fn through_ring_air(colour: vec3<f32>, at: vec3<f32>, to_eye: vec3<f32>, distance: f32, ring: vec2<f32>) -> vec3<f32> {
+/// the stretch inside the ring holds any air, and the sun lights each stretch of it that the
+/// sun reaches.
+fn through_ring_air(colour: vec3<f32>, air: Air, at: vec3<f32>, to_eye: vec3<f32>, distance: f32, ring: vec2<f32>) -> vec3<f32> {
     let held = min(distance, ring_run(at, to_eye, ring).distance);
     if (held <= 0.0) {
         return colour;
     }
-    let up = ring_up(at, ring.x);
-    var turned = air_lit_all_round(bounce());
+    // walked from the eye toward the point, which is the way the air is met
+    let eye = at + to_eye * held;
+    let dir = -to_eye;
+    var out = colour;
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
-        if (sun_reaches(at, up, l, ring)) {
-            turned += air_turned(-to_eye, l, sunlight(i));
-        }
+        let crossed = air_crossed(air, eye, dir, held, ring, sunlight(i), l, bounce());
+        out = out * crossed.left + crossed.turned;
     }
-    return through_air(colour, turned, held);
+    if (lights.n_directional_lights == 0u) {
+        let crossed = air_crossed(air, eye, dir, held, ring, vec3(0.0), vec3(0.0, 1.0, 0.0), bounce());
+        out = out * crossed.left + crossed.turned;
+    }
+    return out;
 }
 
-/// Whether the sun reaches a point of the ground: its light must come in through a cap, so
-/// the way toward the sun from there must leave the ring's width before it crosses the ring.
-fn sun_reaches(q: vec3<f32>, up: vec3<f32>, l: vec3<f32>, ring: vec2<f32>) -> bool {
-    if (abs(l.y) < 1e-6) {
-        return false;
+/// Space in a direction, as it is seen from within the ring: the air the ray crosses on its way
+/// out bends it, and bends each colour of it by its own amount, so a ray that crosses enough of
+/// it comes out of the ring spread into its colours and what it shows is pulled out of shape
+/// and fringed. Each colour is followed along its own way out.
+fn space_through_air(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+    let held = ring_run(at, dir, ring).distance;
+    if (held <= 0.0) {
+        return space_seen(dir, to_stars, background);
     }
-    let flat = l.xz;
-    let across = 2.0 * ring.x * dot(up.xz, flat) / max(dot(flat, flat), 1e-12);
-    let cap = select(-ring.y, ring.y, l.y > 0.0);
-    return (cap - q.y) / l.y < across;
-}
-
-/// How far a ray from inside the ring runs before it meets the ring's wall, or leaves through
-/// a cap, whichever comes first, and whether it was the wall. `at` and `dir` are in the ring's
-/// frame, whose origin lies on the wall with the axis `ring.x` in along -x, and whose caps lie
-/// `ring.y` out along y from the ring's middle. The far root is found without the near one's cancellation, so it
-/// holds for any ring. A ray starting outside the ring runs nowhere in it.
-struct RingRun {
-    distance: f32,
-    wall: bool,
-}
-
-fn ring_run(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>) -> RingRun {
-    let a = dir.x * dir.x + dir.z * dir.z;
-    let b = 2.0 * ((ring.x + at.x) * dir.x + at.z * dir.z);
-    let c = 2.0 * ring.x * at.x + at.x * at.x + at.z * at.z;
-    if (c > 0.0) {
-        return RingRun(0.0, false);
+    var out = space_seen(dir, to_stars, background);
+    if (air.slowing.w != 0.0) {
+        let red = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.x), to_stars, background);
+        let green = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.y), to_stars, background);
+        let blue = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.z), to_stars, background);
+        out = vec3(red.r, green.g, blue.b);
     }
-    var t = 1e9;
-    if (a >= 1e-12) {
-        let root = sqrt(max(b * b - 4.0 * a * c, 0.0));
-        var q = -0.5 * (b + root);
-        if (b < 0.0) {
-            q = -0.5 * (b - root);
-        }
-        t = q / a;
-        if (q != 0.0) {
-            t = max(t, c / q);
-        }
-    }
-    if (abs(dir.y) > 1e-6) {
-        let cap = (select(-ring.y, ring.y, dir.y > 0.0) - at.y) / dir.y;
-        if (cap < t) {
-            return RingRun(max(cap, 0.0), false);
-        }
-    }
-    return RingRun(max(t, 0.0), true);
-}
-
-/// Which way is up at a point of the ring's frame, which is away from the axis the spin
-/// presses everything from.
-fn ring_up(at: vec3<f32>, radius: f32) -> vec3<f32> {
-    return -normalize(vec3(radius + at.x, 0.0, at.z));
+    // and the air it crossed on the way out dims it and glows in front of it
+    return through_ring_air(out, air, at + dir * held, -dir, held, ring);
 }
 
 /// What a stretch of water `distance` long does to the light that set out across it: what is
@@ -206,10 +185,10 @@ fn through_water(colour: vec3<f32>, glow: vec3<f32>, extinction: vec3<f32>, rise
 /// What a ray meets once it has left the screen, inside the ring: the ground where it strikes
 /// the ring, lit by the sun where the sun reaches it and by the bounce light everywhere, or
 /// space where it leaves through a cap.
-fn ring_seen(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+fn ring_seen(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, to_stars: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
     let run = ring_run(at, dir, ring);
     if (!run.wall) {
-        return space_seen(dir, to_stars, background);
+        return space_through_air(air, at, dir, ring, to_stars, background);
     }
     let hit = at + dir * run.distance;
     let up = ring_up(hit, ring.x);
@@ -217,11 +196,12 @@ fn ring_seen(at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: vec3<f32>, 
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
         let ndl = dot(up, l);
-        if (ndl > 0.0 && sun_reaches(hit, up, l, ring)) {
+        if (ndl > 0.0 && sun_reaches(hit, l, ring)) {
             light += sunlight(i) * ndl / PI;
         }
     }
-    return ground * light;
+    // the wall is seen through whatever air stands between it and where the ray set out
+    return through_ring_air(ground * light, air, hit, -dir, run.distance, ring);
 }
 
 /// What is seen through a surface at a point of the screen, refracted to `exit`: the scene

@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
+use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{DEFAULT_RING, Drum, Landscape, Site};
+use game::systems::controls;
+use game::systems::drum::{DEFAULT_RING, Drum, Landscape, Ring, Site};
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing;
@@ -21,6 +23,40 @@ fn sculpting_raises_ground_under_the_brush_only() {
     assert_eq!(far, 0.0);
     land.flatten(game::core::units::Metres(0.0));
     assert!(land.is_empty());
+}
+
+/// The brush the crosshair outlines is what the ground answers to: wherever it is put to
+/// work the ground rises under the middle of it, on a ring of any size. A ring big enough
+/// that its landscape is coarser than the brush would otherwise take nothing from it, the
+/// brush falling between the cells it is made of.
+#[test]
+fn a_brush_raises_the_ground_where_it_is_put_to_work_on_any_ring() {
+    for radius in [10.5f64, 100.0, 5_000.0, 1e6] {
+        let ring = Ring {
+            radius: Metres(radius as f32),
+            half_width: Metres((radius * 0.1).max(6.0) as f32),
+        };
+        let mut land = Landscape::new(ring);
+        let brush = controls::brush(&land).0 as f64;
+        // somewhere between the cells rather than on one of them
+        let (phi, y) = (
+            1.0 + 0.5 * land.segment_arc() / radius,
+            0.5 * land.row_spacing(),
+        );
+        for _ in 0..10 {
+            land.sculpt(phi, y, brush, 0.05 * brush);
+        }
+        let (h, _, _) = land.sample(phi, y);
+        assert!(
+            h > 0.15 * brush,
+            "on a ring of radius {radius} m a brush {brush} m wide raised the ground {h} m"
+        );
+        let (far, _, _) = land.sample(phi + std::f64::consts::PI, y);
+        assert_eq!(
+            far, 0.0,
+            "on a ring of radius {radius} m the brush raised the far side of the ring too"
+        );
+    }
 }
 
 #[test]

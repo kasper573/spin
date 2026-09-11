@@ -29,6 +29,7 @@ use crate::core::avatar;
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::core::rigid::Body;
+use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::{Ring, bed_albedo, slack};
 use crate::systems::player::PlayerCamera;
 use crate::systems::sim::{SimSet, Simulation};
@@ -136,6 +137,7 @@ impl Plugin for ScenePlugin {
         ))
         .init_resource::<Viewpoint>()
         .init_resource::<Sky>()
+        .init_resource::<Air>()
         .insert_resource(ClearColor(SPACE))
         .insert_resource(GlobalAmbientLight {
             color: BOUNCE,
@@ -193,17 +195,33 @@ pub fn locate(mut sim: ResMut<Simulation>, mut viewpoint: ResMut<Viewpoint>) {
 }
 
 /// The stars and the sun turn the other way from the drum.
+#[allow(clippy::type_complexity)]
 fn turn_sky(
     sim: Res<Simulation>,
+    air: Res<Air>,
+    viewpoint: Res<Viewpoint>,
     mut sky: ResMut<Sky>,
-    mut stars: Query<&mut Transform, (With<StarSphere>, Without<SunLight>)>,
+    mut materials: ResMut<Assets<StarsMaterial>>,
+    mut stars: Query<
+        (&MeshMaterial3d<StarsMaterial>, &mut Transform),
+        (With<StarSphere>, Without<SunLight>),
+    >,
     mut suns: Query<(&SunLight, &mut Transform), Without<StarSphere>>,
 ) {
     let angle = sim.drum.site.phi - sim.drum.angle.0;
     sky.rotation = Quat::from_rotation_y(angle.rem_euclid(std::f64::consts::TAU) as f32);
     sky.sun = sky.rotation * SUN_DIRECTION;
-    for mut transform in &mut stars {
+    let ring = sim.drum.ring;
+    let [x, y, z] = viewpoint.origin;
+    for (material, mut transform) in &mut stars {
         transform.rotation = sky.rotation;
+        if let Some(mut material) = materials.get_mut(&material.0) {
+            material.air = air.uniform(sim.drum.spin);
+            let to_stars = sky.rotation.inverse();
+            material.to_stars = Vec4::new(to_stars.x, to_stars.y, to_stars.z, to_stars.w);
+            material.origin = Vec4::new(x as f32, (y + sim.drum.site.y) as f32, z as f32, 0.0);
+            material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
+        }
     }
     for (SunLight(direction), mut transform) in &mut suns {
         *transform = Transform::default().looking_to(-(sky.rotation * *direction), Vec3::Y);
@@ -280,15 +298,16 @@ fn metering_mask() -> Image {
 struct StarSphere;
 
 /// The shader modules the materials share, kept loaded: space, for the stars and whatever
-/// reflects them; the optics of smooth surfaces, for the water and the glass; the air between
-/// the eye and everything in the ring; and the ripples, for the water and the ground they cast
-/// their light on.
+/// reflects them; the ring as a shape rays are cast against; the optics of smooth surfaces,
+/// for the water and the glass; the air between the eye and everything in the ring; and the
+/// ripples, for the water and the ground they cast their light on.
 #[derive(Resource)]
-struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 4]);
+struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 5]);
 
 fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SharedShaders([
         assets.load("embedded://game/systems/shaders/space.wgsl"),
+        assets.load("embedded://game/systems/shaders/ring.wgsl"),
         assets.load("embedded://game/systems/shaders/optics.wgsl"),
         assets.load("embedded://game/systems/shaders/air.wgsl"),
         assets.load("embedded://game/systems/shaders/ripples.wgsl"),
@@ -305,6 +324,18 @@ struct StarsMaterial {
     background: LinearRgba,
     #[uniform(0)]
     sun: Vec4,
+    /// Turns a direction of the ring's frame into one among the stars.
+    #[uniform(0)]
+    to_stars: Vec4,
+    /// Where the viewpoint lies in the ring's frame, in metres, and the ring's radius and half
+    /// width: space is seen through whatever of the ring's air stands between.
+    #[uniform(0)]
+    origin: Vec4,
+    #[uniform(0)]
+    ring: Vec4,
+    /// The air itself; see `systems/air.rs`.
+    #[uniform(0)]
+    air: AirUniform,
 }
 
 impl Material for StarsMaterial {
@@ -392,6 +423,10 @@ fn spawn(
         MeshMaterial3d(stars.add(StarsMaterial {
             background: SPACE.to_linear(),
             sun: SUN_DIRECTION.extend(0.0),
+            to_stars: Vec4::W,
+            origin: Vec4::ZERO,
+            ring: Vec4::ZERO,
+            air: AirUniform::default(),
         })),
     ));
 }
