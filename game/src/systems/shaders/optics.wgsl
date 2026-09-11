@@ -132,14 +132,17 @@ fn through_ring_air(colour: vec3<f32>, air: Air, at: vec3<f32>, to_eye: vec3<f32
     // walked from the eye toward the point, which is the way the air is met
     let eye = at + to_eye * held;
     let dir = -to_eye;
+    // read once rather than per sun: a uniform read inside this loop makes llvmpipe emit a
+    // load from a null buffer, which brings the software renderer down
+    let ambient = bounce();
     var out = colour;
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
-        let crossed = air_crossed(air, eye, dir, held, ring, sunlight(i), l, bounce());
+        let crossed = air_crossed(air, eye, dir, held, ring, sunlight(i), l, ambient);
         out = out * crossed.left + crossed.turned;
     }
     if (lights.n_directional_lights == 0u) {
-        let crossed = air_crossed(air, eye, dir, held, ring, vec3(0.0), vec3(0.0, 1.0, 0.0), bounce());
+        let crossed = air_crossed(air, eye, dir, held, ring, vec3(0.0), vec3(0.0, 1.0, 0.0), ambient);
         out = out * crossed.left + crossed.turned;
     }
     return out;
