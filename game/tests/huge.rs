@@ -10,7 +10,7 @@ use game::core::avatar::{self, Gyros};
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::{Metres, Radians, Seconds};
 use game::systems::air::Air;
-use game::systems::drum::Ring;
+use game::systems::drum::{Place, Ring, Round};
 use game::systems::scene::SUN_DIRECTION;
 use game::systems::settings::Settings;
 use game::systems::sim::{Simulation, standing_spin};
@@ -21,10 +21,14 @@ const HEIGHT: u32 = 720;
 
 fn spot(sim: &Simulation, [arc, y, height]: [f64; 3]) -> [f64; 3] {
     let drum = &sim.drum;
-    let radius = drum.ring.radius.0 as f64;
-    let phi = arc / radius;
-    let ground = drum.landscape.sample(phi, y).0;
-    let on = drum.wall_point(phi - drum.site.phi, y - drum.site.y);
+    let grid = drum.landscape.grid();
+    let at = Place {
+        round: Round::default().on(arc, grid),
+        along: y,
+    };
+    let ground = drum.landscape.sample(at).0;
+    let turn = drum.site.round.arc_to(at.round, grid) / drum.ring.radius.0 as f64;
+    let on = drum.wall_point(turn, y - drum.site.y);
     let (_, out) = drum.depth_and_outward(on);
     let lift = ground + height;
     [

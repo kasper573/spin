@@ -12,7 +12,6 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 
 use super::resolution::canonical;
 use super::{MAX_PARTICLES, Resolution};
-use crate::core::math::Vec3d;
 use crate::core::units::Metres;
 
 /// A particle's splat reaches two blocks along each axis, so a drop on its own marks eight, and
@@ -41,13 +40,10 @@ pub struct SurfaceParams {
     pub max_blocks: u32,
     pub table_mask: u32,
     pub cell_mask: u32,
-    /// The cell the vertices come out relative to.
-    pub anchor: IVec3,
 }
 
 impl SurfaceParams {
-    pub fn new(resolution: Resolution, anchor: Vec3d) -> Self {
-        let cell = cell(resolution) as f64;
+    pub fn new() -> Self {
         SurfaceParams {
             cell: CELL,
             inv_r2: 1.0 / (SPLAT_RADIUS * SPLAT_RADIUS),
@@ -57,27 +53,12 @@ impl SurfaceParams {
             max_blocks: MAX_BLOCKS as u32,
             table_mask: TABLE_SLOTS as u32 - 1,
             cell_mask: CELL_SLOTS as u32 - 1,
-            anchor: IVec3::new(
-                (anchor[0] / cell).round() as i32,
-                (anchor[1] / cell).round() as i32,
-                (anchor[2] / cell).round() as i32,
-            ),
         }
-    }
-
-    /// The point of the vessel's frame the vertices are relative to, in metres.
-    pub fn origin(&self, resolution: Resolution) -> Vec3d {
-        let cell = cell(resolution) as f64;
-        [
-            self.anchor.x as f64 * cell,
-            self.anchor.y as f64 * cell,
-            self.anchor.z as f64 * cell,
-        ]
     }
 }
 
-/// How far from the vessel's centre the grid reaches along each axis: a block's key holds ten
-/// bits per axis about the centre.
+/// How far from the origin of the water's frame the grid reaches along each axis: a block's
+/// key holds ten bits per axis about it.
 pub fn grid_reach(resolution: Resolution) -> Metres {
     Metres(512.0 * 4.0 * cell(resolution))
 }

@@ -21,7 +21,7 @@ struct Water {
     ring: vec4<f32>,
     ground: vec4<f32>,
     background: vec4<f32>,
-    anchor: vec4<f32>,
+    units: vec4<f32>,
     clock: vec4<f32>,
     absorption: vec4<f32>,
     scatter: vec4<f32>,
@@ -89,7 +89,7 @@ fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) instance: u32)
         out.world_position = world.xyz;
         out.world_normal = mesh_normal_local_to_world(v.normal.xyz, instance);
         out.foam = v.position.w;
-        out.wheel_position = (v.position.xyz + water.anchor.xyz) * water.anchor.w;
+        out.wheel_position = v.position.xyz * water.units.x;
         out.wheel_velocity = v.velocity.xyz * water.clock.y;
         out.sheet = v.velocity.w;
         return out;

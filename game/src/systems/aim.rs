@@ -8,9 +8,8 @@ use bevy::prelude::*;
 use crate::core::avatar;
 use crate::core::math::mat3mul;
 use crate::core::units::Metres;
-use crate::core::vessel::Vessel;
-use crate::systems::controls;
-use crate::systems::drum::Drum;
+use crate::systems::controls::BRUSH_SIZE;
+use crate::systems::drum::{Drum, PATCH, Place, Round};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -20,9 +19,14 @@ const EPS: f64 = 1e-9;
 const OUTLINE_LEAST: usize = 48;
 const OUTLINE_MOST: usize = 512;
 const OUTLINE_PER_FEATURE: f64 = 2.0;
-/// The finest the terrain is marched at; a big ring's landscape is coarser, and is marched at a
-/// quarter of its own segments.
-const MARCH_STEP: f64 = 0.1;
+/// The shortest step the ray is marched in, as a share of the ground's cells, and how many
+/// times the step it crossed the ground in is halved to find where.
+const FINEST_STEP: f64 = 0.125;
+const HALVINGS: usize = 12;
+/// The widest turn round the axis a stretch of sculpted ground is found over at once: the ray
+/// is between two turns where it is past the half plane of the one and short of the other's,
+/// which holds only while they are less than half a turn apart.
+const QUARTER_TURN: f64 = std::f64::consts::FRAC_PI_2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AimPoint {
@@ -118,7 +122,8 @@ pub fn cast(origin: DVec3, dir: DVec3, drum: &Drum) -> Option<AimPoint> {
 /// what a brush of that size would touch; on a cap it lies flat on the cap.
 pub fn outline(drum: &Drum, at: AimPoint, radius: f64, lift: f64) -> Vec<DVec3> {
     let landscape = &drum.landscape;
-    let feature = landscape.segment_arc().min(landscape.row_spacing());
+    let grid = landscape.grid();
+    let feature = grid.arc.min(grid.along);
     let points = ((std::f64::consts::TAU * radius / feature * OUTLINE_PER_FEATURE) as usize)
         .clamp(OUTLINE_LEAST, OUTLINE_MOST);
     let angles = (0..points).map(|k| k as f64 / points as f64 * std::f64::consts::TAU);
@@ -136,7 +141,11 @@ pub fn outline(drum: &Drum, at: AimPoint, radius: f64, lift: f64) -> Vec<DVec3> 
         .map(|a| {
             let turn = turn + a.cos() * radius / ring_radius;
             let y = (axial + a.sin() * radius).clamp(-half_width, half_width);
-            let height = landscape.sample(drum.site.phi + turn, y).0 + lift;
+            let place = Place {
+                round: drum.site.round.on(turn * ring_radius, grid),
+                along: y,
+            };
+            let height = landscape.sample(place).0 + lift;
             let on_glass = drum.wall_point(turn, y - drum.site.y);
             let (_, outward) = drum.depth_and_outward(on_glass);
             DVec3::from_array(on_glass) - DVec3::from_array(outward) * height
@@ -159,7 +168,7 @@ fn marker(aim: Res<Aim>, sim: Res<Simulation>, viewpoint: Res<Viewpoint>, mut gi
     };
     let radius = match aim.brush {
         Some(brush) => brush.0 as f64,
-        None => controls::brush(&sim.drum.landscape).0 as f64 * MARKER_SHARE,
+        None => BRUSH_SIZE.0 as f64 * MARKER_SHARE,
     };
     let colour = if aim.engaged {
         Color::srgba(1.0, 1.0, 1.0, 0.9)
@@ -171,41 +180,183 @@ fn marker(aim: Res<Aim>, sim: Res<Simulation>, viewpoint: Res<Viewpoint>, mut gi
     gizmos.linestrip(closed.map(|p| viewpoint.local(p.to_array())), colour);
 }
 
-fn penetration_at(origin: DVec3, dir: DVec3, t: f64, drum: &Drum) -> (f64, [f64; 3]) {
-    let p = origin + dir * t;
-    drum.penetrations(p.to_array())
-        .iter()
-        .next()
-        .map_or((-1.0, [0.0; 3]), |pen| (pen.depth, pen.normal))
-}
-
-/// Fixed-step march along the ray, refined by bisection at the first terrain crossing.
+/// The first crossing of the ground along the ray between `t0` and `t1`. Bare ground lies at
+/// the depth it was laid with, a cylinder the ray is crossed with outright; sculpted ground
+/// differs from that only over its patches, so only the stretches of the ray over them are
+/// traced, however far the ray runs over bare ground on its way.
 fn march_terrain(origin: DVec3, dir: DVec3, t0: f64, t1: f64, drum: &Drum) -> Option<AimPoint> {
-    if penetration_at(origin, dir, t0, drum).0 > 0.0 {
+    if clearance(origin, dir, t0, drum).0 < 0.0 {
         return None;
     }
-    let step = MARCH_STEP.max(drum.landscape.segment_arc() / 4.0);
-    let mut t_prev = t0;
-    let mut t = t0 + step;
+    let hit = |t: f64| {
+        let point = origin + dir * t;
+        AimPoint {
+            point,
+            normal: DVec3::from_array(drum.ground_normal(point.to_array())),
+        }
+    };
+    let bare = below(origin, dir, t0, drum.landscape.base() as f64, drum).filter(|t| *t <= t1);
+    let stretches = over_sculpted(origin, dir, t0, t1, drum);
+    for &(start, end) in &stretches {
+        if let Some(t) = bare
+            && t < start
+        {
+            return Some(hit(t));
+        }
+        if let Some(t) = trace(origin, dir, start, end, drum) {
+            return Some(hit(t));
+        }
+    }
+    bare.filter(|t| stretches.last().is_none_or(|(_, end)| t > end))
+        .map(hit)
+}
+
+/// How high the ray stands over the ground under it at `t`, and over the glass.
+fn clearance(origin: DVec3, dir: DVec3, t: f64, drum: &Drum) -> (f64, f64) {
+    let p = (origin + dir * t).to_array();
+    let height = drum.height_above_glass(p);
+    (height - drum.ground(p), height)
+}
+
+/// Where from `t0` on the ray first stands no higher than `depth` over the glass: where it
+/// leaves the cylinder that depth in from the glass, worked out without forming the ring's
+/// radius squared.
+fn below(origin: DVec3, dir: DVec3, t0: f64, depth: f64, drum: &Drum) -> Option<f64> {
+    let radius = drum.ring.radius.0 as f64;
+    let a = dir.x * dir.x + dir.z * dir.z;
+    let b = 2.0 * ((radius + origin.x) * dir.x + origin.z * dir.z);
+    let c = 2.0 * radius * (origin.x + depth) + origin.x * origin.x + origin.z * origin.z
+        - depth * depth;
+    let disc = b * b - 4.0 * a * c;
+    if a <= EPS || disc < 0.0 {
+        return (c >= 0.0).then_some(t0);
+    }
+    let q = -0.5 * (b + b.signum() * disc.sqrt());
+    let (r0, r1) = if q != 0.0 { (q / a, c / q) } else { (0.0, 0.0) };
+    let (inside, leaves) = (r0.min(r1), r0.max(r1));
+    Some(if t0 > inside && t0 < leaves {
+        leaves
+    } else {
+        t0
+    })
+}
+
+/// The stretches of the ray between `t0` and `t1` over sculpted ground, and the cell round it
+/// the ground is drawn up or down to it over, in order and not overlapping.
+fn over_sculpted(origin: DVec3, dir: DVec3, t0: f64, t1: f64, drum: &Drum) -> Vec<(f64, f64)> {
+    let grid = drum.landscape.grid();
+    let radius = drum.ring.radius.0 as f64;
+    let site = drum.site;
+    let patch = PATCH as f64;
+    let span = (patch + 1.0) * grid.arc / radius;
+    let pieces = (span / QUARTER_TURN).ceil().max(1.0);
+    let mut stretches: Vec<(f64, f64)> = Vec::new();
+    for (round, along) in drum.landscape.patches() {
+        let first = (along as f64 * patch - 1.0) * grid.along - site.y;
+        let last = (along as f64 * patch + patch) * grid.along - site.y;
+        let Some((lo, hi)) = between(origin.y, dir.y, first, last) else {
+            continue;
+        };
+        let (lo, hi) = (lo.max(t0), hi.min(t1));
+        if lo > hi {
+            continue;
+        }
+        let start = Round {
+            cell: grid.wrap(round as i128 * PATCH as i128 - 1),
+            across: 0.0,
+        };
+        let from = site.round.arc_to(start, grid) / radius;
+        for k in 0..pieces as usize {
+            let a = from + span * k as f64 / pieces;
+            let b = from + span * (k + 1) as f64 / pieces;
+            if let Some((ta, tb)) = within_turns(origin, dir, radius, a, b)
+                && ta.max(lo) <= tb.min(hi)
+            {
+                stretches.push((ta.max(lo), tb.min(hi)));
+            }
+        }
+    }
+    stretches.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(stretches.len());
+    for (start, end) in stretches {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Where along the ray a coordinate that starts at `at` and changes by `rate` per unit of the
+/// ray lies between `first` and `last`.
+fn between(at: f64, rate: f64, first: f64, last: f64) -> Option<(f64, f64)> {
+    if rate.abs() <= EPS {
+        return (first..=last)
+            .contains(&at)
+            .then_some((f64::NEG_INFINITY, f64::INFINITY));
+    }
+    let (a, b) = ((first - at) / rate, (last - at) / rate);
+    Some((a.min(b), a.max(b)))
+}
+
+/// Where along the ray it is between two turns round the axis from the site, less than half a
+/// turn apart: on the spinward side of the half plane at the one and the far side of the other.
+fn within_turns(origin: DVec3, dir: DVec3, radius: f64, a: f64, b: f64) -> Option<(f64, f64)> {
+    let (x, z) = (radius + origin.x, origin.z);
+    let (sa, ca) = a.sin_cos();
+    let (sb, cb) = b.sin_cos();
+    let past_a = ahead(ca * z - sa * x, ca * dir.z - sa * dir.x)?;
+    let short_of_b = ahead(sb * x - cb * z, sb * dir.x - cb * dir.z)?;
+    let (lo, hi) = (past_a.0.max(short_of_b.0), past_a.1.min(short_of_b.1));
+    (lo <= hi).then_some((lo, hi))
+}
+
+/// Where along the ray a quantity that starts at `at` and changes by `rate` per unit of the ray
+/// is not negative.
+fn ahead(at: f64, rate: f64) -> Option<(f64, f64)> {
+    if rate.abs() <= EPS {
+        return (at >= 0.0).then_some((f64::NEG_INFINITY, f64::INFINITY));
+    }
+    let root = -at / rate;
+    Some(if rate > 0.0 {
+        (root, f64::INFINITY)
+    } else {
+        (f64::NEG_INFINITY, root)
+    })
+}
+
+/// The first crossing of the ground between `t0` and `t1`, traced in steps no longer than the
+/// ground could rise to meet the ray in: how high the ray stands over the ground under it, over
+/// how steeply the ground rises anywhere, and the step it crossed in halved down to where it
+/// crossed.
+fn trace(origin: DVec3, dir: DVec3, t0: f64, t1: f64, drum: &Drum) -> Option<f64> {
+    let grid = drum.landscape.grid();
+    let finest = FINEST_STEP * grid.arc.min(grid.along);
+    let steepest = drum.landscape.steepest();
+    let radius = drum.ring.radius.0 as f64;
+    let (mut c, mut height) = clearance(origin, dir, t0, drum);
+    if c < 0.0 {
+        return Some(t0);
+    }
+    let mut t = t0;
     while t < t1 {
-        if penetration_at(origin, dir, t, drum).0 > 0.0 {
-            let (mut lo, mut hi) = (t_prev, t);
-            for _ in 0..8 {
-                let mid = (lo + hi) / 2.0;
-                if penetration_at(origin, dir, mid, drum).0 > 0.0 {
+        // the ground under a point off the glass passes under it faster than the glass does
+        let under = radius / (radius - height).max(EPS * radius);
+        let next = (t + (c / (1.0 + steepest * under)).max(finest)).min(t1);
+        let (after, rise) = clearance(origin, dir, next, drum);
+        if after < 0.0 {
+            let (mut lo, mut hi) = (t, next);
+            for _ in 0..HALVINGS {
+                let mid = 0.5 * (lo + hi);
+                if clearance(origin, dir, mid, drum).0 < 0.0 {
                     hi = mid;
                 } else {
                     lo = mid;
                 }
             }
-            let (_, n) = penetration_at(origin, dir, lo, drum);
-            return Some(AimPoint {
-                point: origin + dir * lo,
-                normal: DVec3::from_array(n),
-            });
+            return Some(lo);
         }
-        t_prev = t;
-        t += step;
+        (t, c, height) = (next, after, rise);
     }
     None
 }

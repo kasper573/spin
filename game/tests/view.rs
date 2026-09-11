@@ -34,8 +34,8 @@ fn the_ring_is_seen_from_far_away() {
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             sim.avatar_mut().solid = false;
             let slant = distance / 2f64.sqrt();
-            let eye = sim.drum.from_water([slant, slant, 0.0]);
-            let axis = sim.drum.from_water([0.0, 0.0, 0.0]);
+            let axis = [-(sim.drum.ring.radius.0 as f64), -sim.drum.site.y, 0.0];
+            let eye = [axis[0] + slant, axis[1] + slant, 0.0];
             Player.teleport(&mut sim, eye, axis);
         }
         let image = testing::render_to_image(&mut app, width, height);

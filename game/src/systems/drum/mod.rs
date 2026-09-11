@@ -1,19 +1,20 @@
 //! The glass drum: a solid cylinder spinning about its axis, with a sculptable landscape on the
 //! inside of its floor that starts as a layer of ground around the whole ring. Implements the
 //! vessel the fluid and the bodies live in. Its size is a setting: the ring can be made wider
-//! or narrower and its landscape stretches to fit.
+//! or narrower, and what was sculpted keeps its shape and its place on the wall.
 //!
 //! The bodies live in the drum's own turning frame, about a site on its wall that follows the
 //! viewer: x points out through the glass, y along the axis and z spinward round the ring, and
 //! everything is measured from there. The drum's geometry is worked out from those small
 //! coordinates and its radius without ever forming a large number, so a ring of any size is
-//! exact where the viewer is. The water lives in the same frame about the drum's own centre.
+//! exact where the viewer is. The water lives in a frame of the same kind about a site of its
+//! own, where it was first put, so it is exact where it is.
 mod gpu;
 mod landscape;
 mod render;
 
 pub use gpu::{DrumFrame, DrumUniform};
-pub use landscape::{Flood, Landscape, wheel_angle};
+pub use landscape::{CELL, Flood, Grid, Ground, Landscape, PATCH, Patch, Place, Round};
 pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 
 use serde::{Deserialize, Serialize};
@@ -76,38 +77,48 @@ impl Ring {
 pub const PANE: f64 = 1.0;
 pub const TILE: f64 = 2.0;
 
-/// A point of the drum's wall: its wheel angle round the ring and its place along the axis,
-/// and where it lies in the patterns fixed to the wheel, kept exactly as the site moves so
-/// that the patterns never shift however large the ring: its arc round the ring within one
-/// circumference, and the cap grid's offset from it along the frame's outward and spinward
-/// axes, within one pane.
+/// A point of the drum's wall: where it is round the ring, exactly, and as a wheel angle, its
+/// place along the axis, and where it lies in the cap grid fixed to the wheel: the grid's
+/// offset from it along the frame's outward and spinward axes, within one pane, kept exactly as
+/// the site moves so that the grid never shifts however large the ring.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Site {
+    pub round: Round,
+    #[serde(skip)]
     pub phi: f64,
     pub y: f64,
-    #[serde(skip)]
-    pub arc: f64,
     #[serde(skip)]
     pub cap: [f64; 2],
 }
 
 impl Site {
-    /// The site at a wheel angle and axial place, with its place in the patterns worked out
-    /// from the angle: exact enough to lay the patterns unless the ring is astronomically
-    /// large, when the patterns are laid afresh from here.
+    /// The site at a wheel angle and axial place.
     pub fn at(phi: f64, y: f64, ring: Ring) -> Site {
+        Site::on(Round::at_angle(phi, Grid::of(ring)), y, ring)
+    }
+
+    /// The site at a place round the ring and along it, with its place in the cap grid worked
+    /// out from its angle: exact enough to lay the grid unless the ring is astronomically
+    /// large, when the grid is laid afresh from here.
+    pub fn on(round: Round, y: f64, ring: Ring) -> Site {
         let radius = ring.radius.0 as f64;
-        let phi = phi.rem_euclid(std::f64::consts::TAU);
+        let phi = round.angle(Grid::of(ring));
         let (sin, cos) = phi.sin_cos();
         Site {
+            round,
             phi,
             y,
-            arc: (phi * radius).rem_euclid(std::f64::consts::TAU * radius),
             cap: [
                 (radius * cos).rem_euclid(PANE),
                 (radius * sin).rem_euclid(PANE),
             ],
         }
+    }
+
+    /// How far round the ring the site is from wheel angle zero, which is where it lies in the
+    /// patterns laid round the ring.
+    pub fn arc(&self, ring: Ring) -> f64 {
+        self.round.arc(Grid::of(ring))
     }
 }
 
@@ -127,8 +138,9 @@ pub struct Drum {
     /// How far the drum has turned from the world's frame; the glass at wheel angle φ sits at
     /// world angle φ − angle.
     pub angle: Radians,
-    /// The point of the wall the bodies' frame sits at.
+    /// The point of the wall the bodies' frame sits at, and the one the water's frame sits at.
     pub site: Site,
+    pub water: Site,
     pub landscape: Landscape,
 }
 
@@ -148,21 +160,29 @@ impl Drum {
             spin_rate: RadiansPerSecondSquared(0.0),
             angle: Radians(0.0),
             site: Site::at(0.0, 0.0, ring),
+            water: Site::at(0.0, 0.0, ring),
             landscape: Landscape::flat(ring, GROUND_DEPTH),
         }
     }
 
-    /// Make the drum another size; the landscape stretches with it and the site stays on the
-    /// wall.
-    pub fn resize(&mut self, ring: Ring) {
-        self.ring = ring;
+    /// Make the drum another size. The site stays at its angle round the ring, and the ground
+    /// and the water's site keep where they were from it; returns how a point of the frame
+    /// that stays where it was about the axis is carried, which the frame's shift along the
+    /// axis and its wall's move toward or away from the axis make of it.
+    pub fn resize(&mut self, ring: Ring) -> Vec3d {
+        let old = self.landscape.grid();
+        let (before, from) = (self.ring.radius.0 as f64, self.site);
         let half_width = ring.half_width.0 as f64;
-        self.site = Site::at(
-            self.site.phi,
-            self.site.y.clamp(-half_width, half_width),
-            ring,
-        );
-        self.landscape.resize(ring);
+        self.ring = ring;
+        self.site = Site::at(from.phi, from.y.clamp(-half_width, half_width), ring);
+        let apart = old.short_way(self.water.round.cell as i128 - from.round.cell as i128);
+        let water = Round {
+            cell: Grid::of(ring).wrap(self.site.round.cell as i128 + apart as i128),
+            across: self.water.round.across,
+        };
+        self.water = Site::on(water, self.water.y.clamp(-half_width, half_width), ring);
+        self.landscape.resize(ring, from.round, self.site.round);
+        [before - ring.radius.0 as f64, from.y - self.site.y, 0.0]
     }
 
     /// Spin up or down toward the target and turn; the angle is kept to one turn so that its
@@ -190,6 +210,7 @@ impl Drum {
             arc: turn * radius,
             axial: y - self.site.y,
         };
+        let grid = self.landscape.grid();
         let site = &mut self.site;
         // the site's chord moves the cap grid by the chord turned to the middle of the turn
         let chord = 2.0 * radius * (turn / 2.0).sin();
@@ -198,8 +219,8 @@ impl Drum {
             (site.cap[0] - chord * sin_mid).rem_euclid(PANE),
             (site.cap[1] + chord * cos_mid).rem_euclid(PANE),
         ];
-        site.arc = (site.arc + shift.arc).rem_euclid(std::f64::consts::TAU * radius);
-        site.phi = (site.phi + turn).rem_euclid(std::f64::consts::TAU);
+        site.round = site.round.on(shift.arc, grid);
+        site.phi = site.round.angle(grid);
         site.y = y;
         shift
     }
@@ -224,9 +245,34 @@ impl Drum {
         p[2].atan2(self.ring.radius.0 as f64 + p[0])
     }
 
-    /// The wheel angle of a point of the frame.
-    pub fn wheel_angle_of(&self, p: Vec3d) -> f64 {
-        self.site.phi + self.turn_to(p)
+    /// The point of the ground a point of the frame stands over.
+    pub fn place(&self, p: Vec3d) -> Place {
+        self.place_from(&self.site, p)
+    }
+
+    /// How high the ground stands over the glass under a point of the frame.
+    pub fn ground(&self, p: Vec3d) -> f64 {
+        self.landscape.sample(self.place(p)).0
+    }
+
+    /// Which way the ground under a point of the frame faces, inward.
+    pub fn ground_normal(&self, p: Vec3d) -> Vec3d {
+        self.terrain_penetration(p, 0.0).1
+    }
+
+    /// Raise (or, by a negative amount, lower) the ground within `radius` of a point of the
+    /// frame.
+    pub fn sculpt(&mut self, p: Vec3d, radius: f64, amount: f64) {
+        let at = self.place(p);
+        self.landscape.sculpt(at, radius, amount);
+    }
+
+    /// Put the water's site on the wall under a point of the frame, which is only done while
+    /// there is no water to be carried with it.
+    pub fn settle_water(&mut self, p: Vec3d) {
+        let half_width = self.ring.half_width.0 as f64;
+        let at = self.place(p);
+        self.water = Site::on(at.round, at.along.clamp(-half_width, half_width), self.ring);
     }
 
     /// A point of the wall, `turn` round the ring from the site and `axial` along the axis
@@ -273,31 +319,31 @@ impl Drum {
         self.height_above_glass(p) > 0.0 && self.axial(p).abs() < self.ring.half_width.0 as f64
     }
 
-    /// A point of the frame in the water's frame, about the drum's centre.
+    /// A point of the frame in the water's frame.
     pub fn to_water(&self, p: Vec3d) -> Vec3d {
         self.water_frame().to_water(p)
     }
 
     /// A point of the water's frame in the bodies' frame.
     pub fn from_water(&self, w: Vec3d) -> Vec3d {
-        let radius = self.ring.radius.0 as f64;
-        let (s, c) = self.site.phi.sin_cos();
-        let d = [w[0] - radius * c, w[1] - self.site.y, w[2] - radius * s];
-        rotate_y(&d, self.site.phi)
+        let frame = self.water_frame();
+        let o = frame.origin;
+        frame.vector_from_water([w[0] - o[0], w[1] - o[1], w[2] - o[2]])
     }
 
     /// Pull a point of the water's frame inside the drum, `margin` clear of the caps and above
     /// the landscape.
     pub fn place_inside(&self, p: Vec3d, margin: f64) -> Vec3d {
         let room = self.ring.room_along(margin);
-        let y = p[1].clamp(-room, room);
-        let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
-        let (h, _, _) = self.landscape.sample(p[2].atan2(p[0]), y);
-        let limit = self.ring.radius.0 as f64 - margin - h;
-        if r > limit && r > 0.0 {
-            [p[0] * limit / r, y, p[2] * limit / r]
+        let along = (self.water.y + p[1]).clamp(-room, room);
+        let q = [p[0], along - self.water.y, p[2]];
+        let (height, outward) = self.depth_and_outward(q);
+        let ground = self.landscape.sample(self.place_from(&self.water, q)).0;
+        let lift = ground + margin - height;
+        if lift > 0.0 {
+            [q[0] - outward[0] * lift, q[1], q[2] - outward[2] * lift]
         } else {
-            [p[0], y, p[2]]
+            q
         }
     }
 
@@ -322,7 +368,8 @@ impl Drum {
         if r2 < 1e-12 {
             return (-radius, [0.0; 3]);
         }
-        let (h, dphi, dy) = self.landscape.sample(self.wheel_angle_of(p), self.axial(p));
+        let (h, round, dy) = self.landscape.sample(self.place(p));
+        let dphi = round * radius;
         let f = -height + h + margin;
         let g = [
             outward[0] - dphi * p[2] / r2,
@@ -406,13 +453,29 @@ impl Drum {
     }
 }
 
+impl Drum {
+    /// The point of the ground a point of a frame on the wall at `site` stands over.
+    fn place_from(&self, site: &Site, p: Vec3d) -> Place {
+        let radius = self.ring.radius.0 as f64;
+        Place {
+            round: site
+                .round
+                .on(self.turn_to(p) * radius, self.landscape.grid()),
+            along: site.y + p[1],
+        }
+    }
+}
+
 impl Vessel for Drum {
     fn water_frame(&self) -> WaterFrame {
-        let radius = self.ring.radius.0 as f64;
-        let (s, c) = self.site.phi.sin_cos();
+        let arc = self
+            .water
+            .round
+            .arc_to(self.site.round, self.landscape.grid());
+        let turn = arc / self.ring.radius.0 as f64;
         WaterFrame {
-            origin: [radius * c, self.site.y, radius * s],
-            rotation: quat_about_y(-self.site.phi),
+            origin: self.wall_point(turn, self.site.y - self.water.y),
+            rotation: quat_about_y(-turn),
         }
     }
 

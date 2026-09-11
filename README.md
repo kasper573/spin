@@ -5,7 +5,7 @@ Live: https://kasper573.github.io/spin/
 A browser simulation of a ring world: a glass drum spinning in zero g with ground all the way
 round its inside, spun at exactly the rate that gives you your Earth weight on that ground. You
 are a body in it, flown on thrusters, and you can flood it with water and sculpt the landscape,
-then resize the ring and watch it all stretch to fit. The water is a position-based fluid solved in compute shaders and drawn as an isosurface
+then resize the ring, whose wall keeps the ground and the water where they lie on it. The water is a position-based fluid solved in compute shaders and drawn as an isosurface
 the GPU extracts every frame; the amount of water and the size of the ring are only limited by
 the dials.
 

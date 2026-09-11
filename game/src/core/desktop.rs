@@ -9,11 +9,21 @@ pub fn primary_window() -> Window {
     }
 }
 
-pub fn storage_load(_key: &str) -> Option<String> {
-    None
+pub fn storage_open() {}
+
+pub fn storage_opened() -> Option<Vec<(String, String)>> {
+    Some(Vec::new())
 }
 
-pub fn storage_save(_key: &str, _value: &str) {}
+pub fn storage_write(_clear: bool, _puts: &[(String, String)], _deletes: &[String]) {}
+
+pub fn storage_committed() -> u32 {
+    0
+}
+
+pub fn storage_failed() -> u32 {
+    0
+}
 
 pub fn sync_window(_window: &mut Window) {}
 

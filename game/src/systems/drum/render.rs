@@ -19,9 +19,9 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
-use super::gpu::COLUMN_FIXED;
-use super::landscape::{ROWS, SEGMENTS};
-use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Ring, Site, TILE};
+use super::gpu::{COLUMN_FIXED, Columns, GroundLayout, SURVEY_SLOTS};
+use super::landscape::PATCH;
+use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Round, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::systems::air::{Air, AirUniform};
@@ -66,6 +66,9 @@ const FINE_CHORDS: f64 = 25.0;
 /// A step of the grid over its distance from the site, at most, and the finest step over the
 /// viewer's distance from the wall.
 const GROWTH: f64 = 0.5;
+/// The same for sculpted ground, down to its own cells: it is sampled this much finer than
+/// bare ground, so what was sculpted keeps its shape out to some way off.
+const DETAIL: f64 = GROWTH / 4.0;
 const RIM_SIDES: usize = 8;
 const RIM_RADIUS: f64 = 0.15;
 const RIM_OFFSET: f64 = 0.2;
@@ -170,19 +173,20 @@ struct TerrainMaterial {
     grass_dark: LinearRgba,
     #[uniform(0)]
     bed: LinearRgba,
-    /// The site everything is drawn about: its place round the ring in segments of the grid,
-    /// its place along the axis and the glass radius, in metres.
+    /// The site everything is drawn about, from the water's: how far round the ring and along
+    /// the axis, in metres; the glass radius; and the mask of the survey's table.
     #[uniform(0)]
     site: Vec4,
     /// Where the point everything is drawn about lies in the site's frame, in metres.
     #[uniform(0)]
     origin: Vec4,
-    /// The landscape grid's angle per segment, its row spacing and the drum's half width, in
-    /// metres, and the depth of water each particle surveyed over a column adds to it.
+    /// A surveyed column's arc round the ring and width along the axis, and the drum's half
+    /// width, in metres, and the depth of water each particle surveyed over a column adds.
     #[uniform(0)]
     grid: Vec4,
-    /// x: seconds; z: metres per second per unit of a surveyed column's flow; w: the grid's
-    /// rows and segments, packed.
+    /// x: seconds; y: metres per unit of a surveyed column's height; z: metres per second per
+    /// unit of its flow; w: how many columns there are round the ring, or 0 when there are too
+    /// many for the water to reach round it.
     #[uniform(0)]
     clock: Vec4,
     #[uniform(0)]
@@ -341,8 +345,8 @@ fn rebuild(
             commands.entity(entity).despawn();
         }
         if !landscape.is_empty() {
-            let columns = columns(ring, standoff);
-            let rows = ground_rows(drum, &spans(drum, standoff));
+            let columns = ground_columns(drum, standoff);
+            let rows = ground_rows(drum, standoff);
             commands.spawn((
                 Terrain,
                 Placed([0.0; 3]),
@@ -405,28 +409,32 @@ fn wet(
     material.air = air.uniform(sim.drum.spin);
     let drum = &sim.drum;
     let resolution = fluid.resolution();
-    let dphi = std::f64::consts::TAU / SEGMENTS as f64;
+    let arc = drum
+        .water
+        .round
+        .arc_to(drum.site.round, drum.landscape.grid());
     material.site = Vec4::new(
-        (drum.site.phi / dphi).rem_euclid(SEGMENTS as f64) as f32,
-        drum.site.y as f32,
+        arc as f32,
+        (drum.site.y - drum.water.y) as f32,
         drum.ring.radius.0,
-        0.0,
+        (SURVEY_SLOTS - 1) as f32,
     );
     let [x, y, z] = viewpoint.origin;
     material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
-    let footprint = drum.landscape.segment_arc() * drum.landscape.row_spacing();
+    let columns = Columns::of(drum.ring, resolution);
+    let (across, along) = (columns.arc(resolution), resolution.length());
     let particle = resolution.length().powi(3);
     material.grid = Vec4::new(
-        std::f32::consts::TAU / SEGMENTS as f32,
-        drum.landscape.row_spacing() as f32,
+        across as f32,
+        along as f32,
         drum.ring.half_width.0,
-        (particle / footprint) as f32,
+        (particle / (across * along)) as f32,
     );
     material.clock = Vec4::new(
         sim.time.0,
         (resolution.length() / COLUMN_FIXED) as f32,
         (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
-        (ROWS * 4096 + SEGMENTS) as f32,
+        columns.round as f32,
     );
 }
 
@@ -470,16 +478,95 @@ fn samples(standoff: f64, reach: f64, limit: impl Fn(f64) -> f64) -> Vec<f64> {
     out
 }
 
-/// The rows the ground is sampled at: the spans, and every row of the landscape, so nothing
-/// sculpted is skipped.
-fn ground_rows(drum: &Drum, spans: &[f64]) -> Vec<f64> {
+/// The turns round the ring the ground is sampled at: as the glass is, and finer over sculpted
+/// ground.
+fn ground_columns(drum: &Drum, standoff: f64) -> Vec<f64> {
+    let ring = drum.ring;
+    let radius = ring.radius.0 as f64;
+    let grid = drum.landscape.grid();
+    let reach = PATCH as f64 * grid.arc;
+    let starts = drum.landscape.patches().map(|(round, _)| {
+        let start = Round {
+            cell: round * PATCH,
+            across: 0.0,
+        };
+        drum.site.round.arc_to(start, grid)
+    });
+    let Sculpted { behind, ahead } = sculpted(starts, reach);
+    let half = std::f64::consts::PI * radius;
+    let side = |spans: &[(f64, f64)]| {
+        samples(standoff, half, |arc| {
+            chord(ring, standoff, arc).min(finer(spans, arc, grid.arc))
+        })
+    };
+    let mut turns: Vec<f64> = side(&behind).iter().rev().map(|a| -a / radius).collect();
+    turns.extend(side(&ahead).iter().skip(1).map(|a| a / radius));
+    turns
+}
+
+/// The places along the axis, from the site, the ground is sampled at, cap to cap: as the glass
+/// is, and finer over sculpted ground.
+fn ground_rows(drum: &Drum, standoff: f64) -> Vec<f64> {
     let half_width = drum.ring.half_width.0 as f64;
-    let dy = drum.landscape.row_spacing();
-    let mut rows = spans.to_vec();
-    rows.extend((0..ROWS).map(|j| -half_width + j as f64 * dy - drum.site.y));
-    rows.sort_by(|a, b| a.total_cmp(b));
-    rows.dedup_by(|a, b| (*a - *b).abs() < 1e-9 * dy);
+    let grid = drum.landscape.grid();
+    let reach = PATCH as f64 * grid.along;
+    let starts = drum
+        .landscape
+        .patches()
+        .map(|(_, along)| (along * PATCH) as f64 * grid.along - drum.site.y);
+    let Sculpted {
+        behind: below,
+        ahead: above,
+    } = sculpted(starts, reach);
+    let side =
+        |room: f64, spans: &[(f64, f64)]| samples(standoff, room, |d| finer(spans, d, grid.along));
+    let mut rows: Vec<f64> = side(half_width + drum.site.y, &below)
+        .iter()
+        .rev()
+        .map(|d| -d)
+        .collect();
+    rows.extend(side(half_width - drum.site.y, &above).iter().skip(1));
     rows
+}
+
+/// Stretches of sculpted ground on either side of the site, as distances from it where each
+/// starts and ends.
+struct Sculpted {
+    behind: Vec<(f64, f64)>,
+    ahead: Vec<(f64, f64)>,
+}
+
+/// Stretches of sculpted ground, each `reach` long from where it starts.
+fn sculpted(starts: impl Iterator<Item = f64>, reach: f64) -> Sculpted {
+    let mut starts: Vec<f64> = starts.collect();
+    starts.sort_by(f64::total_cmp);
+    starts.dedup();
+    let (mut behind, mut ahead) = (Vec::new(), Vec::new());
+    for start in starts {
+        let end = start + reach;
+        if end > 0.0 {
+            ahead.push((start.max(0.0), end));
+        }
+        if start < 0.0 {
+            behind.push(((-end).max(0.0), -start));
+        }
+    }
+    Sculpted { behind, ahead }
+}
+
+/// The longest step from `d` that neither misses the start of a stretch of sculpted ground nor
+/// crosses one faster than its cells allow, which are sampled down to one `cell` apart close by
+/// and a share of their distance farther off.
+fn finer(spans: &[(f64, f64)], d: f64, cell: f64) -> f64 {
+    let mut limit = f64::INFINITY;
+    for &(start, end) in spans {
+        if d + cell >= start && d <= end + cell {
+            limit = limit.min(cell.max(DETAIL * d));
+        } else if start > d {
+            limit = limit.min(start - d);
+        }
+    }
+    limit
 }
 
 /// A whole number of panes round the glass, so the grid closes on itself.
@@ -510,6 +597,7 @@ fn glass_mesh(drum: &Drum, phase: Site, columns: &[f64], spans: &[f64], depths: 
     let ring = drum.ring;
     let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
     let pane = pane_round(ring);
+    let phase_arc = phase.arc(ring);
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut uvs = Vec::new();
@@ -521,7 +609,7 @@ fn glass_mesh(drum: &Drum, phase: Site, columns: &[f64], spans: &[f64], depths: 
             positions.push(single(at));
             normals.push(single(outward));
             uvs.push([
-                cells(turn * radius, phase.arc, pane),
+                cells(turn * radius, phase_arc, pane),
                 cells(y, phase.y, PANE),
             ]);
         }
@@ -685,8 +773,10 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
     let mut uvs = Vec::with_capacity(columns.len() * across);
     let mut heights = Vec::with_capacity(columns.len() * across);
     let mut raised = Vec::with_capacity(columns.len() * across);
+    let grid = landscape.grid();
+    let phase_arc = phase.arc(ring);
     for &turn in columns {
-        let phi = drum.site.phi + turn;
+        let round = drum.site.round.on(turn * radius, grid);
         let mut push = |height: f64, y: f64| {
             let room = drum.ring.room_along(GLASS_INSET);
             let y = y.clamp(-room - drum.site.y, room - drum.site.y);
@@ -699,7 +789,7 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
                 at[2] - outward[2] * lift,
             ]));
             uvs.push([
-                cells(turn * radius, phase.arc, tile),
+                cells(turn * radius, phase_arc, tile),
                 cells(y, phase.y, TILE),
             ]);
             heights.push([height as f32, 0.0]);
@@ -707,7 +797,11 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
         };
         push(0.0, rows[0]);
         for &y in rows {
-            push(landscape.sample(phi, y + drum.site.y).0, y);
+            let at = Place {
+                round,
+                along: y + drum.site.y,
+            };
+            push(landscape.sample(at).0, y);
         }
         push(0.0, rows[rows.len() - 1]);
     }
@@ -728,34 +822,34 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
     mesh
 }
 
-/// Hand the water the drum's state for every substep taken this frame and the landscape when it
-/// changed.
+/// Hand the water the drum's state for every substep taken this frame, what changed of the
+/// sculpted ground, and how the survey's columns lie.
 fn feed_water(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     mut frame: ResMut<DrumFrame>,
-    mut images: ResMut<Assets<Image>>,
-    mut uploaded: Local<Option<u64>>,
+    mut layout: Local<GroundLayout>,
 ) {
+    let drum = &sim.drum;
+    layout.update(drum, &mut frame);
     let resolution = fluid.resolution();
+    frame.survey = Columns::of(drum.ring, resolution);
+    let shape = frame.shape;
     frame.states.clear();
     for record in &sim.substeps {
         frame.states.push(DrumUniform::new(
-            &sim.drum,
+            drum,
             record.spin,
             record.spin_rate,
             resolution,
+            &shape,
         ));
     }
     frame.states.push(DrumUniform::new(
-        &sim.drum,
-        sim.drum.spin,
-        sim.drum.spin_rate,
+        drum,
+        drum.spin,
+        drum.spin_rate,
         resolution,
+        &shape,
     ));
-    let version = sim.drum.landscape.version();
-    if *uploaded != Some(version) {
-        *uploaded = Some(version);
-        super::gpu::upload_heights(&sim.drum, &frame, &mut images);
-    }
 }

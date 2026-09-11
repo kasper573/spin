@@ -5,9 +5,8 @@
 //! across the screen and space beyond that; the sun glinting off it; foam where the water
 //! churns; and ripples riding on the flow. The droplets the extraction leaves out of the
 //! surface are drawn the same way from their own list, each as a sphere of its volume. Both
-//! come out in the water's frame, about the drum's centre, relative to an anchor cell near the
-//! viewer and in the water's own units, so the meshes are scaled to metres, turned and placed
-//! into the bodies' frame about the viewer.
+//! come out in the water's frame and in the water's own units, so the meshes are scaled to
+//! metres, turned and placed into the bodies' frame about the viewer.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
@@ -56,13 +55,7 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .add_systems(Startup, spawn)
-            .add_systems(
-                Update,
-                (
-                    anchor.after(scene::locate).before(SimSet::Command),
-                    (tick, submerge).in_set(SimSet::Observe),
-                ),
-            );
+            .add_systems(Update, (tick, submerge).in_set(SimSet::Observe));
     }
 }
 
@@ -82,9 +75,8 @@ struct WaterUniform {
     /// The ground's colour as seen from across the ring.
     ground: Vec4,
     background: Vec4,
-    /// xyz: the anchor cell the vertices are relative to, in the water's units; w: metres per
-    /// unit.
-    anchor: Vec4,
+    /// x: metres per unit of the water's length.
+    units: Vec4,
     /// x: simulated seconds; y: metres per second per unit of the water's velocity; z: a
     /// droplet's radius in metres.
     clock: Vec4,
@@ -153,11 +145,6 @@ pub struct WaterMesh;
 /// the scene that lets it through.
 const ORDER: f32 = 1.0e6;
 
-/// The surface is extracted about the site, so its vertices stay small near the viewer.
-fn anchor(sim: Res<Simulation>, mut fluid: ResMut<Fluid>) {
-    fluid.set_anchor(sim.drum.to_water([0.0; 3]));
-}
-
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
@@ -171,7 +158,7 @@ fn spawn(
         ring: Vec4::ZERO,
         ground: bed_albedo().to_vec4(),
         background: SPACE.to_linear().to_vec4(),
-        anchor: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        units: Vec4::new(1.0, 0.0, 0.0, 0.0),
         clock: Vec4::new(0.0, 1.0, 0.0, 0.0),
         absorption: ABSORPTION.extend(0.0),
         scatter: SCATTERING.extend(0.0),
@@ -241,8 +228,7 @@ fn tick(
             if enclosed { 1.0 } else { 0.0 },
             0.0,
         );
-        let anchor = fluid.surface().anchor.as_vec3() * fluid.surface().cell;
-        uniform.anchor = anchor.extend(metres_per_unit as f32);
+        uniform.units = Vec4::new(metres_per_unit as f32, 0.0, 0.0, 0.0);
         uniform.clock = Vec4::new(
             sim.time.0,
             (metres_per_unit / resolution.time()) as f32,
@@ -250,10 +236,9 @@ fn tick(
             0.0,
         );
     }
-    let (origin, _) = fluid.surface_origin();
     for mut transform in &mut meshes {
         *transform = viewpoint
-            .place(sim.drum.from_water(origin))
+            .place(sim.drum.from_water([0.0; 3]))
             .with_rotation(rotation)
             .with_scale(Vec3::splat(metres_per_unit as f32));
     }

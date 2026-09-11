@@ -11,7 +11,7 @@ use game::core::avatar::{self, Gyros};
 use game::core::fluid::Fluid;
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::{Metres, Radians, Seconds};
-use game::systems::drum::{DEFAULT_RING, Ring};
+use game::systems::drum::{DEFAULT_RING, Place, Ring, Round};
 use game::systems::scene::SUN_DIRECTION;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_spin};
@@ -35,10 +35,10 @@ const ADAPTING_STEPS: usize = 15;
 /// `y` along the axis and `height` over the ground there, out through the glass when negative.
 fn spot(sim: &Simulation, [arc, y, height]: [f64; 3]) -> [f64; 3] {
     let drum = &sim.drum;
-    let radius = drum.ring.radius.0 as f64;
-    let phi = arc / radius;
-    let ground = drum.landscape.sample(phi, y).0;
-    let on = drum.wall_point(phi - drum.site.phi, y - drum.site.y);
+    let at = place(sim, arc, y);
+    let ground = drum.landscape.sample(at).0;
+    let turn = drum.site.round.arc_to(at.round, drum.landscape.grid()) / drum.ring.radius.0 as f64;
+    let on = drum.wall_point(turn, y - drum.site.y);
     let (_, out) = drum.depth_and_outward(on);
     let lift = ground + height;
     [
@@ -46,6 +46,15 @@ fn spot(sim: &Simulation, [arc, y, height]: [f64; 3]) -> [f64; 3] {
         on[1] - out[1] * lift,
         on[2] - out[2] * lift,
     ]
+}
+
+/// The point of the ground `arc` metres round the ring from wheel angle zero and `y` along the
+/// axis from the middle.
+fn place(sim: &Simulation, arc: f64, y: f64) -> Place {
+    Place {
+        round: Round::default().on(arc, sim.drum.landscape.grid()),
+        along: y,
+    }
 }
 
 /// Hold the viewer as a ghost with its eye at `eye` looking at `at`, upright on the ring.
@@ -105,8 +114,9 @@ fn settle_the_eye(app: &mut App, eye: [f64; 3], at: [f64; 3], daylight: bool) {
 fn inject(app: &mut App, at: [f64; 3], count: u32) {
     app.world_mut()
         .resource_scope(|world, mut fluid: Mut<Fluid>| {
-            let sim = world.resource::<Simulation>();
-            sim.inject(&mut fluid, spot(sim, at), count)
+            let mut sim = world.resource_mut::<Simulation>();
+            let centre = spot(&sim, at);
+            sim.inject(&mut fluid, centre, count)
         });
 }
 
@@ -125,13 +135,11 @@ fn fill_half(app: &mut App) {
 fn pool(app: &mut App) {
     {
         let mut sim = app.world_mut().resource_mut::<Simulation>();
-        let radius = sim.drum.ring.radius.0 as f64;
         for crest in [8.0, -12.0] {
             for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
+                let at = place(&sim, crest, y);
                 for _ in 0..20 {
-                    sim.drum
-                        .landscape
-                        .sculpt(crest / radius, y, 8.0, 1.4 / 20.0);
+                    sim.drum.landscape.sculpt(at, 8.0, 1.4 / 20.0);
                 }
             }
         }

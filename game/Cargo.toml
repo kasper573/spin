@@ -48,7 +48,19 @@ hound = "3"
 console_error_panic_hook = "0.1"
 wasm-bindgen = "=0.2.126"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Storage"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+] }
 num-complex = "0.4"
 
 # Native-only: the windowing backend the client needs to compile natively, and the lint's parser.

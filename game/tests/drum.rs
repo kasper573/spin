@@ -1,13 +1,13 @@
 //! The drum's wall and the patterns fixed to it.
 use game::core::units::{Metres, Seconds};
-use game::systems::drum::{PANE, Ring, Site};
+use game::systems::drum::{Grid, PANE, Ring, Site};
 use game::systems::settings::Settings;
 use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
 
-/// The site's place in the patterns, worked out afresh from its angle.
+/// The site's place in the patterns, worked out afresh from its place round the ring.
 fn laid_afresh(site: Site, ring: Ring) -> Site {
-    Site::at(site.phi, site.y, ring)
+    Site::on(site.round, site.y, ring)
 }
 
 fn same_place(a: Site, b: Site, ring: Ring, tolerance: f64) -> bool {
@@ -15,9 +15,15 @@ fn same_place(a: Site, b: Site, ring: Ring, tolerance: f64) -> bool {
         let d = (x - y).rem_euclid(period);
         d.min(period - d) < tolerance
     };
+    let grid = Grid::of(ring);
     (a.phi - b.phi).abs() < 1e-12
         && (a.y - b.y).abs() < 1e-12
-        && wrapped(a.arc, b.arc, std::f64::consts::TAU * ring_radius(ring))
+        && a.round.arc_to(b.round, grid).abs() < tolerance
+        && wrapped(
+            a.arc(ring),
+            b.arc(ring),
+            std::f64::consts::TAU * ring_radius(ring),
+        )
         && wrapped(a.cap[0], b.cap[0], PANE)
         && wrapped(a.cap[1], b.cap[1], PANE)
 }

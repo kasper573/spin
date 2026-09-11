@@ -21,8 +21,8 @@ use game::core::units::{
 };
 use game::systems::aim::Aim;
 use game::systems::air::{Air, Suspension};
-use game::systems::controls::{self, BRUSH_RATE, INJECT_DEPTH};
-use game::systems::drum::Ring;
+use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
+use game::systems::drum::{Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::scene::{SUN_DIRECTION, Sky};
 use game::systems::settings::{Dial, Settings};
@@ -95,14 +95,24 @@ struct View {
     ashore: bool,
 }
 
-/// Where the shots are measured from: the wheel angle and the place along the axis a pool was
+/// Where the shots are measured from: the place round the ring and along the axis a pool was
 /// laid in, or wherever a script marked, which the site leaves behind as the avatar moves.
 #[derive(Resource, Clone, Copy)]
 struct Mark {
-    phi: f64,
+    round: Round,
     y: f64,
-    /// How far round the ring from `phi` the water's edge lies, once a sea stands in the ring.
+    /// How far round the ring from the mark the water's edge lies, once a sea stands in the ring.
     shore: f64,
+}
+
+impl Mark {
+    /// The point of the ground `arc` metres round the ring from the mark and `y` along the axis.
+    fn place(self, sim: &Simulation, arc: f64, y: f64) -> Place {
+        Place {
+            round: self.round.on(arc, sim.drum.landscape.grid()),
+            along: self.y + y,
+        }
+    }
 }
 
 /// A stretch of the script: how long it lasts and the thrusters held, at what level.
@@ -1073,7 +1083,7 @@ fn cue(app: &mut App, cue: Cue) {
             app.world_mut().resource_mut::<Settings>().collisions = false;
             let site = app.world().resource::<Simulation>().drum.site;
             app.world_mut().insert_resource(Mark {
-                phi: site.phi,
+                round: site.round,
                 y: site.y,
                 shore: 0.0,
             });
@@ -1082,7 +1092,7 @@ fn cue(app: &mut App, cue: Cue) {
             for k in 0..30 {
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                        let sim = world.resource::<Simulation>();
+                        let mut sim = world.resource_mut::<Simulation>();
                         let radius = sim.drum.ring.radius.0 as f64;
                         let turn = (-7.0 + (k % 3) as f64 * 1.5 - 1.5) / radius;
                         let on = sim.drum.wall_point(turn, (k % 5) as f64 - 2.0);
@@ -1107,20 +1117,22 @@ fn cue(app: &mut App, cue: Cue) {
             let pool = {
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 let site = sim.drum.site;
-                let radius = sim.drum.ring.radius.0 as f64;
+                let here = Mark {
+                    round: site.round,
+                    y: site.y,
+                    shore: 0.0,
+                };
                 // two broad ridges across the ring, a valley between them for the pool
                 for crest in [RIDGE_NEAR, RIDGE_FAR] {
-                    let phi = site.phi + crest / radius;
                     for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
+                        let at = here.place(&sim, crest, y);
                         for _ in 0..20 {
-                            sim.drum
-                                .landscape
-                                .sculpt(phi, site.y + y, 8.0, RIDGE_HEIGHT / 20.0);
+                            sim.drum.landscape.sculpt(at, 8.0, RIDGE_HEIGHT / 20.0);
                         }
                     }
                 }
                 Mark {
-                    phi: site.phi,
+                    round: site.round,
                     y: site.y,
                     shore: 0.0,
                 }
@@ -1131,10 +1143,10 @@ fn cue(app: &mut App, cue: Cue) {
             for k in 0..15 {
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                        let sim = world.resource::<Simulation>();
+                        let mut sim = world.resource_mut::<Simulation>();
                         let arc = -1.5 - (k % 3) as f64 * 2.5;
                         let y = (k / 3) as f64 * 1.5 - 3.0;
-                        let centre = spot(sim, pool, [arc, y, HEAP_CLEARANCE]);
+                        let centre = spot(&sim, pool, [arc, y, HEAP_CLEARANCE]);
                         sim.inject(&mut fluid, centre, POOL_PARTICLES / 15)
                     });
                 // each heap settles before the next lands beside it
@@ -1163,22 +1175,20 @@ fn cue(app: &mut App, cue: Cue) {
                 // metres across and the sea in it four deep, so the terrace can only be so
                 // wide before it is the ring: a shore here is steep, as a shore on a small
                 // island is.
+                let at = Place {
+                    round: site.round,
+                    along: site.y,
+                };
                 for _ in 0..20 {
-                    sim.drum.landscape.sculpt(
-                        site.phi,
-                        site.y,
-                        HEADLAND_SPREAD,
-                        HEADLAND_HEIGHT / 20.0,
-                    );
-                    sim.drum.landscape.sculpt(
-                        site.phi,
-                        site.y,
-                        TERRACE_SPREAD,
-                        TERRACE_HEIGHT / 20.0,
-                    );
+                    sim.drum
+                        .landscape
+                        .sculpt(at, HEADLAND_SPREAD, HEADLAND_HEIGHT / 20.0);
+                    sim.drum
+                        .landscape
+                        .sculpt(at, TERRACE_SPREAD, TERRACE_HEIGHT / 20.0);
                 }
                 Mark {
-                    phi: site.phi,
+                    round: site.round,
                     y: site.y,
                     shore: 0.0,
                 }
@@ -1196,7 +1206,7 @@ fn cue(app: &mut App, cue: Cue) {
             for k in 0..SEA_HEAPS {
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                        let sim = world.resource::<Simulation>();
+                        let mut sim = world.resource_mut::<Simulation>();
                         let turn = k as f64 / SEA_HEAPS as f64 * std::f64::consts::TAU;
                         let y = ((k % 5) as f64 - 2.0) * sim.drum.ring.half_width.0 as f64 * 0.4;
                         let on = sim.drum.wall_point(turn, y);
@@ -1220,10 +1230,9 @@ fn cue(app: &mut App, cue: Cue) {
                 let litres = app.world().resource::<Fluid>().litres().0 as f64;
                 let sim = app.world().resource::<Simulation>();
                 let level = sim.drum.landscape.flooded(litres / 1000.0).level.0 as f64;
-                let radius = sim.drum.ring.radius.0 as f64;
                 let mut arc = 0.0;
                 while arc < TERRACE_SPREAD * 2.0
-                    && sim.drum.landscape.sample(pool.phi + arc / radius, pool.y).0 > level
+                    && sim.drum.landscape.sample(pool.place(sim, arc, 0.0)).0 > level
                 {
                     arc += SHORE_STEP;
                 }
@@ -1254,15 +1263,20 @@ fn cue(app: &mut App, cue: Cue) {
         Cue::Hills => {
             let mut sim = app.world_mut().resource_mut::<Simulation>();
             let site = sim.drum.site;
+            let here = Mark {
+                round: site.round,
+                y: site.y,
+                shore: 0.0,
+            };
             for (k, (arc, y, height)) in [(-6.0, 1.0, 0.6), (-9.0, -1.5, 1.2), (-12.0, 2.5, 2.0)]
                 .into_iter()
                 .enumerate()
             {
-                let phi = site.phi + arc / sim.drum.ring.radius.0 as f64;
+                let at = here.place(&sim, arc, y);
                 for _ in 0..20 {
                     sim.drum
                         .landscape
-                        .sculpt(phi, site.y + y, 1.5 + k as f64 * 0.5, height / 20.0);
+                        .sculpt(at, 1.5 + k as f64 * 0.5, height / 20.0);
                 }
             }
         }
@@ -1308,10 +1322,10 @@ const DAY: f32 = 2.5;
 fn spot(sim: &Simulation, pool: Mark, [arc, y, height]: [f64; 3]) -> [f64; 3] {
     let drum = &sim.drum;
     let radius = drum.ring.radius.0 as f64;
-    let phi = pool.phi + arc / radius;
-    let axial = pool.y + y;
-    let ground = drum.landscape.sample(phi, axial).0;
-    let on = drum.wall_point(phi - drum.site.phi, axial - drum.site.y);
+    let at = pool.place(sim, arc, y);
+    let ground = drum.landscape.sample(at).0;
+    let turn = drum.site.round.arc_to(at.round, drum.landscape.grid()) / radius;
+    let on = drum.wall_point(turn, at.along - drum.site.y);
     let (_, out) = drum.depth_and_outward(on);
     let lift = ground + height;
     [
@@ -1393,7 +1407,7 @@ fn main() {
                 let target = app.world().resource::<Aim>().target;
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 sim.avatar_input = player.input(phase.pilot);
-                let brush = controls::brush(&sim.drum.landscape);
+                let brush = BRUSH_SIZE;
                 if phase.sculpting
                     && let Some(target) = target
                 {
@@ -1411,7 +1425,7 @@ fn main() {
                         let settings = world.resource::<Settings>();
                         let count = settings.flow.0 * frame_time.0
                             / fluid.resolution().litres_per_particle().0;
-                        let sim = world.resource::<Simulation>();
+                        let mut sim = world.resource_mut::<Simulation>();
                         sim.inject(&mut fluid, at.to_array(), count.round() as u32)
                     });
             }

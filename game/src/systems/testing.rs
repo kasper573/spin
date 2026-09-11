@@ -23,6 +23,7 @@ use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::app;
 use crate::systems::controls::pilot;
+use crate::systems::drum::{Place, Round};
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
@@ -112,7 +113,9 @@ pub struct ScriptStatus {
     pub worst_frame: Seconds,
     pub sim_rate: f32,
     pub landscape_max: f32,
-    /// Saves written to storage so far.
+    /// How many patches of the ground have been sculpted.
+    pub sculpted: usize,
+    /// Saves storage has kept so far.
     pub saves: u32,
     /// The avatar's weight in g as the ground pushes back, zero when nothing does.
     pub weight: f32,
@@ -152,7 +155,12 @@ impl Plugin for TestingPlugin {
                 Update,
                 (drain, steer).chain().in_set(SimSet::Command).after(pilot),
             )
-            .add_systems(Update, publish.in_set(SimSet::Observe));
+            .add_systems(
+                Update,
+                publish
+                    .in_set(SimSet::Observe)
+                    .run_if(persistence::restored),
+            );
     }
 }
 
@@ -170,7 +178,7 @@ fn execute(world: &mut World, command: ScriptCommand) {
     match command {
         ScriptCommand::Inject { x, y, z, count } => {
             world.resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource::<Simulation>().inject(
+                world.resource_mut::<Simulation>().inject(
                     &mut fluid,
                     [x as f64, y as f64, z as f64],
                     count,
@@ -182,11 +190,14 @@ fn execute(world: &mut World, command: ScriptCommand) {
             y,
             radius,
             amount,
-        } => world
-            .resource_mut::<Simulation>()
-            .drum
-            .landscape
-            .sculpt(phi, y, radius, amount),
+        } => {
+            let mut sim = world.resource_mut::<Simulation>();
+            let at = Place {
+                round: Round::at_angle(phi, sim.drum.landscape.grid()),
+                along: y,
+            };
+            sim.drum.landscape.sculpt(at, radius, amount);
+        }
         ScriptCommand::Spin { value } => {
             world.resource_mut::<Settings>().spin = RadiansPerSecond(value);
             world.resource_mut::<Simulation>().drum.target_spin = RadiansPerSecond(value);
@@ -280,6 +291,7 @@ fn publish(
         worst_frame: fps.worst,
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
+        sculpted: sim.drum.landscape.patches().count(),
         saves: saves.completed,
         weight: footing.weight,
         ground_speed: footing.ground_speed,

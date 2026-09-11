@@ -22,9 +22,9 @@ use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::Shader;
 
-use crate::core::math::{Rng, Vec3d};
+use crate::core::math::{Rng, Vec3d, norm};
 use crate::core::rigid::{Body, BodyShape, WaterCoupling};
-use crate::core::units::{Litres, MetresPerSecond, Seconds};
+use crate::core::units::{Litres, Metres, MetresPerSecond, Seconds};
 use crate::core::vessel::WaterFrame;
 
 mod frame;
@@ -34,7 +34,7 @@ mod surface;
 
 pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
 pub use gpu::{FluidBuffers, FluidStep};
-pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_AXIS, STEP_RATE, canonical};
+pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_ORIGIN, STEP_RATE, canonical};
 pub use surface::{
     MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_VERTICES, SurfaceBuffers, SurfaceParams, grid_reach,
 };
@@ -152,10 +152,12 @@ pub struct Particle {
 #[derive(Resource)]
 pub struct Fluid {
     resolution: Resolution,
-    /// The finest the water may be, set by the size of its vessel.
+    /// The finest the water may be, set by its reach.
     floor: Resolution,
-    /// The point in the vessel's frame the surface is extracted about.
-    anchor: Vec3d,
+    /// How far from its frame's origin the water has been put, or been seen to reach, in metres.
+    reach: f64,
+    /// How many times the water has been emptied.
+    emptied: u32,
     count: u32,
     /// The particle count before a thinning this frame and their resolution, if one is due.
     thin: Option<(u32, Resolution)>,
@@ -212,7 +214,8 @@ impl Default for Fluid {
         Fluid {
             resolution: Resolution::FINEST,
             floor: Resolution::FINEST,
-            anchor: [0.0; 3],
+            reach: 0.0,
+            emptied: 0,
             count: 0,
             thin: None,
             pending: Vec::new(),
@@ -261,25 +264,37 @@ impl Fluid {
 
     /// The surface extraction's parameters for the water as it is.
     pub fn surface(&self) -> SurfaceParams {
-        SurfaceParams::new(self.resolution, self.anchor)
+        SurfaceParams::new()
     }
 
-    /// The point in the vessel's frame the surface's vertices are relative to, and the metres
-    /// each unit of them is.
-    pub fn surface_origin(&self) -> (Vec3d, f64) {
-        (
-            self.surface().origin(self.resolution),
-            self.resolution.length(),
-        )
+    /// How far from its frame's origin the water has been put, or been seen to reach.
+    pub fn reach(&self) -> Metres {
+        Metres(self.reach as f32)
     }
 
-    /// Extract the surface about this point of the vessel's frame from now on, so that its
-    /// vertices are small near it.
-    pub fn set_anchor(&mut self, anchor: Vec3d) {
-        let origin = |anchor| SurfaceParams::new(self.resolution, anchor).origin(self.resolution);
-        if origin(self.anchor) != origin(anchor) {
-            self.anchor = anchor;
-            self.changed = true;
+    /// Water has been seen this far from its frame's origin. Single precision holds the water
+    /// only so many of its spacings out, so water reaching farther is made coarser.
+    pub fn reached(&mut self, distance: Metres) {
+        let distance = distance.0 as f64;
+        if distance > self.reach {
+            self.reach = distance;
+            self.floor = Resolution::finest_for(Metres(distance as f32));
+        }
+    }
+
+    /// How many times the water has been emptied, which tells one water from the next.
+    pub fn emptied(&self) -> u32 {
+        self.emptied
+    }
+
+    /// Make the water coarser, a step a frame, while it is finer than its reach allows.
+    pub fn keep_floor(&mut self) {
+        if self.resolution.spacing.0 < self.floor.spacing.0 {
+            if self.count == 0 {
+                self.set_resolution(self.floor);
+            } else if self.thin.is_none() {
+                self.coarsen();
+            }
         }
     }
 
@@ -289,6 +304,7 @@ impl Fluid {
         if !self.reserve() {
             return false;
         }
+        self.reached(Metres(norm(&p.position) as f32));
         self.pending.push(p);
         true
     }
@@ -319,6 +335,10 @@ impl Fluid {
         let offered = (count as usize * SITES_PER_PARTICLE)
             .max(LEAST_SITES)
             .min(room);
+        if let Some(farthest) = lattice_ball().iter().take(offered).next_back() {
+            let spacings = norm(&farthest.map(|x| x as f64)) + 1.0;
+            self.reached(Metres((norm(&centre) + spacings * length) as f32));
+        }
         let mut added = 0;
         if offered >= count as usize {
             while added < count && self.reserve() {
@@ -360,9 +380,9 @@ impl Fluid {
         true
     }
 
-    /// Remove all water; what comes next starts out as fine as the vessel allows.
+    /// Remove all water; what comes next starts out as fine as water can be.
     pub fn clear(&mut self) {
-        self.restore(self.floor);
+        self.restore(Resolution::FINEST);
     }
 
     /// Remove all water and take this resolution for what is added next, as when saved water
@@ -373,20 +393,10 @@ impl Fluid {
         self.pending.clear();
         self.joining = 0;
         self.sites.clear();
-        self.set_resolution(resolution.at_least(self.floor));
-    }
-
-    /// The finest the water may be from now on. Water finer than that is made coarser, a step
-    /// a frame, until it is not.
-    pub fn set_floor(&mut self, floor: Resolution) {
-        self.floor = floor;
-        if self.resolution.spacing.0 < floor.spacing.0 {
-            if self.count == 0 {
-                self.set_resolution(floor);
-            } else if self.thin.is_none() {
-                self.coarsen();
-            }
-        }
+        self.reach = 0.0;
+        self.floor = Resolution::FINEST;
+        self.emptied = self.emptied.wrapping_add(1);
+        self.set_resolution(resolution);
     }
 
     /// The bodies' shapes, whose boundary samples the water couples to. Bodies name them by

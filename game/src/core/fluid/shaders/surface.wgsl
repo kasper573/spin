@@ -8,8 +8,7 @@
 // own, or with only a couple of others, is a droplet rather than a body of water: the grid is
 // too coarse to draw the blob its splat makes, so it is left out of the field and listed to
 // be drawn as the drop of water it is. Vertices come out in the vessel's frame, in the water's
-// own units, relative to an anchor cell, so they stay small near the viewer however far the
-// vessel reaches, and the mesh turns with the vessel between extractions.
+// own units, and the mesh turns with the vessel between extractions.
 #import fluid_common::{params, coords_of, cell_key, cell_slot, neighbour_cell}
 #import vessel::{landscape_penetration, vessel_confine}
 
@@ -22,8 +21,6 @@ struct SurfaceParams {
     max_blocks: u32,
     table_mask: u32,
     cell_mask: u32,
-    // the cell the vertices come out relative to
-    anchor: vec3<i32>,
 }
 
 struct Vertex {
@@ -226,7 +223,7 @@ fn mark(@builtin(global_invocation_id) id: vec3<u32>) {
     if (is_lone(i)) {
         lone[i] = 1u;
         let slot = atomicAdd(&counters[COUNTER_DROPLETS], 1u);
-        droplets[slot] = vec4(s.xyz - vec3<f32>(surface.anchor) * surface.cell, s.w);
+        droplets[slot] = s;
         return;
     }
     lone[i] = 0u;
@@ -356,9 +353,9 @@ fn inside(p: vec3<f32>) -> vec3<f32> {
 /// out. The water's underside rests on the ground however deep the water over it stands, so it
 /// says nothing about the thickness and is taken as deep.
 fn sheet_at(p: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let up = -normalize(vec3(p.x, 0.0, p.z));
-    let clear = max(-landscape_penetration(p, 0.0).depth, 0.0) / surface.cell;
-    return mix(DEEP, clear, clamp(dot(normal, up), 0.0, 1.0));
+    let ground = landscape_penetration(p, 0.0);
+    let clear = max(-ground.depth, 0.0) / surface.cell;
+    return mix(DEEP, clear, clamp(dot(normal, ground.normal), 0.0, 1.0));
 }
 
 fn corner_at(c: vec3<i32>) -> f32 {
@@ -423,7 +420,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
         return;
     }
     let within = vec3<f32>(b * BLOCK + cell) + sum / crossings;
-    let p = inside(within * surface.cell) - vec3<f32>(surface.anchor) * surface.cell;
+    let p = inside(within * surface.cell);
     let at = probe(within * surface.cell);
     var gradient = at.gradient;
     if (dot(gradient, gradient) < 1e-12) {
@@ -567,9 +564,8 @@ fn smoothed(i: u32, from_polished: bool) -> Vertex {
     }
     var out = vertex;
     if (count > 0.0) {
-        let anchor = vec3<f32>(surface.anchor) * surface.cell;
         let drawn = mix(vertex.position.xyz, sum / count, POLISH);
-        out.position = vec4(inside(drawn + anchor) - anchor, vertex.position.w);
+        out.position = vec4(inside(drawn), vertex.position.w);
         let n = normalize(mix(vertex.normal.xyz, normal / count, POLISH));
         out.normal = vec4(n, vertex.normal.w);
     }

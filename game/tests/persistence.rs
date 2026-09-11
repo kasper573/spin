@@ -1,10 +1,11 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
-use game::core::units::{RadiansPerSecond, Seconds};
+use game::core::units::{Metres, RadiansPerSecond, Seconds};
+use game::systems::drum::Ring;
 use game::systems::persistence::{Snapshot, apply, snapshot};
 use game::systems::player::Player;
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::Simulation;
+use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
 
 #[test]
@@ -13,13 +14,14 @@ fn snapshot_round_trips_through_json() {
     {
         let mut sim = app.world_mut().resource_mut::<Simulation>();
         sim.drum.target_spin = RadiansPerSecond(1.5);
-        sim.drum.landscape.sculpt(0.3, 0.1, 1.5, 0.2);
+        let at = sim.drum.wall_point(0.3, 0.1);
+        sim.drum.sculpt(at, 1.5, 0.2);
     }
     app.world_mut()
         .resource_scope(|world, mut fluid: Mut<Fluid>| {
-            world
-                .resource::<Simulation>()
-                .inject(&mut fluid, [7.0, 0.1, 0.0], 40)
+            let mut sim = world.resource_mut::<Simulation>();
+            let axis = sim.drum.ring.radius.0 as f64;
+            sim.inject(&mut fluid, [7.0 - axis, 0.1, 0.0], 40)
         });
     testing::run(&mut app, Seconds(1.0));
     let particles = testing::particles(&mut app);
@@ -36,11 +38,12 @@ fn snapshot_round_trips_through_json() {
 
     let json = serde_json::to_string(&snapshot(&settings, sim, fluid)).unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
-    let (shuttle, attitude, angle, heights) = (
+    let (shuttle, attitude, angle, ground, water) = (
         sim.avatar().p,
         sim.avatar().q,
         sim.drum.angle.0,
-        sim.drum.landscape.heights().to_vec(),
+        sim.drum.landscape.ground(),
+        sim.drum.water,
     );
 
     let mut settings2 = Settings::default();
@@ -50,7 +53,12 @@ fn snapshot_round_trips_through_json() {
 
     assert_eq!(settings2, settings);
     assert_eq!(fluid2.len(), 40);
-    assert_eq!(sim2.drum.landscape.heights(), heights);
+    assert!(!ground.patches.is_empty());
+    assert_eq!(sim2.drum.landscape.ground(), ground);
+    assert_eq!(
+        (sim2.drum.water.round, sim2.drum.water.y),
+        (water.round, water.y)
+    );
     assert!((sim2.drum.angle.0 - angle).abs() < 1e-9);
     assert_eq!(sim2.avatar().p, shuttle);
     for (a, b) in sim2.avatar().q.iter().zip(attitude) {
@@ -62,6 +70,80 @@ fn snapshot_round_trips_through_json() {
     }
     assert_eq!(restored.fluid.len(), 40 * 7);
     assert_eq!(restored.fluid[0], particles[0].position[0] as f32);
+}
+
+/// A ring kilometres across keeps what was sculpted on it and where its water lies, far round
+/// it from where the wheel's angles start.
+#[test]
+fn a_big_ring_keeps_its_ground_and_its_water_through_a_save() {
+    let ring = Ring {
+        radius: Metres(5000.0),
+        half_width: Metres(500.0),
+    };
+    let mut app = testing::headless();
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        settings.diameter = Metres(ring.radius.0 * 2.0);
+        settings.width = Metres(ring.half_width.0 * 2.0);
+        settings.spin = standing_spin(ring);
+        settings.equalize_thrust();
+    }
+    app.insert_resource(Simulation::new(ring));
+    testing::run(&mut app, Seconds(0.2));
+    let (turn, y) = (2.0, 120.0);
+    {
+        let mut sim = app.world_mut().resource_mut::<Simulation>();
+        let at = sim.drum.wall_point(turn, y);
+        for _ in 0..10 {
+            sim.drum.sculpt(at, 2.0, 0.2);
+        }
+    }
+    app.world_mut()
+        .resource_scope(|world, mut fluid: Mut<Fluid>| {
+            let mut sim = world.resource_mut::<Simulation>();
+            let on = sim.drum.wall_point(turn, y);
+            let (_, out) = sim.drum.depth_and_outward(on);
+            let lift = sim.drum.ground(on) + 1.5;
+            let above = [on[0] - out[0] * lift, on[1], on[2] - out[2] * lift];
+            sim.inject(&mut fluid, above, 40)
+        });
+    testing::run(&mut app, Seconds(0.5));
+    testing::particles(&mut app);
+    let world = app.world_mut();
+    let sim = world.resource::<Simulation>();
+    let json = serde_json::to_string(&snapshot(
+        world.resource::<Settings>(),
+        sim,
+        world.resource::<Fluid>(),
+    ))
+    .unwrap();
+    let restored: Snapshot = serde_json::from_str(&json).unwrap();
+    let (ground, water) = (sim.drum.landscape.ground(), sim.drum.water);
+    let mut settings = Settings::default();
+    let mut sim = Simulation::default();
+    world.resource_scope(|_, mut fluid: Mut<Fluid>| {
+        apply(&restored, &mut settings, &mut sim, &mut fluid);
+        assert_eq!(fluid.len(), 40);
+    });
+    assert!(!ground.patches.is_empty());
+    assert_eq!(sim.drum.landscape.ground(), ground);
+    assert_eq!(
+        (sim.drum.water.round, sim.drum.water.y),
+        (water.round, water.y)
+    );
+    app.insert_resource(settings);
+    app.insert_resource(sim);
+    testing::run(&mut app, Seconds(0.1));
+    let particles = testing::particles(&mut app);
+    let sim = app.world().resource::<Simulation>();
+    for p in &particles {
+        let at = sim.drum.from_water(p.position);
+        let over = sim.drum.height_above_glass(at) - sim.drum.ground(at);
+        assert!(
+            over > 0.0 && over < 3.0,
+            "a particle came back {over} m over the ground under it"
+        );
+    }
 }
 
 #[test]

@@ -24,6 +24,12 @@ fn state_mut(app: &mut App) -> Mut<'_, Simulation> {
     app.world_mut().resource_mut::<Simulation>()
 }
 
+/// A point given about the drum's axis: across it, toward the site and spinward, and along it
+/// from the middle.
+fn about_axis(sim: &Simulation, [x, y, z]: Vec3d) -> Vec3d {
+    [x - sim.drum.ring.radius.0 as f64, y - sim.drum.site.y, z]
+}
+
 /// How high the avatar's centre is above the glass.
 fn altitude(sim: &Simulation) -> f64 {
     sim.drum.height_above_glass(sim.avatar().p)
@@ -259,7 +265,7 @@ fn a_ghost_in_the_drum_is_carried_round_and_flung_out() {
     {
         let mut sim = state_mut(&mut app);
         sim.drum.spin = RadiansPerSecond(1.0);
-        let inside = sim.drum.from_water([6.0, 0.0, 0.0]);
+        let inside = about_axis(&sim, [6.0, 0.0, 0.0]);
         sim.avatar_mut().place(inside, [0.0, 0.0, 0.0, 1.0]);
         sim.avatar_mut().v = sim.drum.star_velocity(inside);
     }
@@ -310,8 +316,8 @@ fn a_ghost_outside_is_untouched_by_the_ring_however_it_spins() {
     ghost(&mut app);
     {
         let mut sim = state_mut(&mut app);
-        let outside = sim.drum.from_water([40.0, 3.0, 0.0]);
-        let axis = sim.drum.from_water([0.0, 3.0, 0.0]);
+        let outside = about_axis(&sim, [40.0, 3.0, 0.0]);
+        let axis = about_axis(&sim, [0.0, 3.0, 0.0]);
         Player.teleport(&mut sim, outside, axis);
     }
     testing::run(&mut app, Seconds(6.0));
@@ -491,10 +497,11 @@ fn flood(app: &mut App) {
         let a = k as f64 * 0.52;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                let sim = world.resource::<Simulation>();
-                let at =
-                    sim.drum
-                        .from_water([a.cos() * 7.0, (k % 3) as f64 * 3.0 - 3.0, a.sin() * 7.0]);
+                let mut sim = world.resource_mut::<Simulation>();
+                let at = about_axis(
+                    &sim,
+                    [a.cos() * 7.0, (k % 3) as f64 * 3.0 - 3.0, a.sin() * 7.0],
+                );
                 sim.inject(&mut fluid, at, 1500)
             });
         testing::run(app, Seconds(0.2));
@@ -630,9 +637,16 @@ fn a_bigger_ring_weighs_more_until_the_thrusters_are_equalized() {
 /// Where the avatar is and which way it faces about the drum's axis, which a ghost outside
 /// the ring keeps whatever happens to the ring.
 fn about_the_axis(sim: &Simulation) -> (Vec3d, Quatd) {
-    let frame = sim.drum.water_frame();
+    let site = sim.drum.site;
+    let radius = sim.drum.ring.radius.0 as f64;
     let body = sim.avatar();
-    (frame.to_water(body.p), quat_mul(&frame.rotation, &body.q))
+    let turned = quat_about_y(-site.phi);
+    let p = quat_rotate(&turned, &body.p);
+    let (sin, cos) = site.phi.sin_cos();
+    (
+        [radius * cos + p[0], site.y + p[1], radius * sin + p[2]],
+        quat_mul(&turned, &body.q),
+    )
 }
 
 fn angle_between(a: &Quatd, b: &Quatd) -> f64 {
@@ -650,8 +664,8 @@ fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
     {
         let mut sim = state_mut(&mut app);
         let mut player = Player;
-        let outside = sim.drum.from_water([30.0, 5.0, 0.0]);
-        let axis = sim.drum.from_water([0.0, 5.0, 0.0]);
+        let outside = about_axis(&sim, [30.0, 5.0, 0.0]);
+        let axis = about_axis(&sim, [0.0, 5.0, 0.0]);
         player.teleport(&mut sim, outside, axis);
     }
     testing::run(&mut app, Seconds(0.5));

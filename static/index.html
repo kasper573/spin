@@ -75,9 +75,9 @@
         };
       })();
     </script>
+    <script>
       // With ?probe, time what the page's listeners and timers do outside the frames, and what the
       // browser reports for each input event, before the app installs its own listeners.
-    <script>
       (function () {
         if (!new URLSearchParams(location.search).has("probe")) return;
         const probe = (window.__probe = { timers: [], handlers: [], audio: [], resumes: [], events: {}, since: { audio: 0, key: 0, mouse: 0, save: 0 } });
@@ -109,10 +109,10 @@
           }
           return listen.call(this, type, wrapped, ...rest);
         };
-        const setItem = Storage.prototype.setItem;
-        Storage.prototype.setItem = function (...args) {
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (...args) {
           probe.since.save++;
-          return setItem.apply(this, args);
+          return put.apply(this, args);
         };
         // The browser's own account of each input event: how long it waited, how long the
         // handlers took, and how long until the next paint.

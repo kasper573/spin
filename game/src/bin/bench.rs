@@ -14,14 +14,15 @@ fn main() {
         let a = round as f64 * 0.5;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                let sim = world.resource::<Simulation>();
+                let mut sim = world.resource_mut::<Simulation>();
+                let axis = sim.drum.ring.radius.0 as f64;
                 sim.inject(
                     &mut fluid,
-                    sim.drum.from_water([
-                        a.cos() * 8.0,
+                    [
+                        a.cos() * 8.0 - axis,
                         ((round % 3) as f64 - 1.0) * 3.0,
                         a.sin() * 8.0,
-                    ]),
+                    ],
                     500,
                 )
             });
@@ -34,14 +35,15 @@ fn main() {
         let a = round as f64 * 0.7 + 0.3;
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                let sim = world.resource::<Simulation>();
+                let mut sim = world.resource_mut::<Simulation>();
+                let axis = sim.drum.ring.radius.0 as f64;
                 sim.inject(
                     &mut fluid,
-                    sim.drum.from_water([
-                        a.cos() * 7.0,
+                    [
+                        a.cos() * 7.0 - axis,
                         ((round % 5) as f64 - 2.0) * 2.0,
                         a.sin() * 7.0,
-                    ]),
+                    ],
                     600,
                 )
             });

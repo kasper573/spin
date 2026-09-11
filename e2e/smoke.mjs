@@ -88,7 +88,6 @@ const waitForApp = async () => {
 };
 
 try {
-  await evaluate("localStorage.clear(); 1").catch(() => {});
   await send("Page.navigate", { url });
   check("app starts", await waitForApp());
   const fresh = await status();
@@ -164,8 +163,19 @@ try {
   await send("Page.reload");
   check("app restarts", await waitForApp());
   const restored = await status();
-  check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, spin: restored.spin }));
+  check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && restored.sculpted === live.sculpted && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, sculpted: [live.sculpted, restored.sculpted], spin: restored.spin }));
   await screenshot("restored");
+
+  await command({ cmd: "sculpt", phi: 2.8, y: 3, radius: 2.0, amount: 0.5 });
+  await command({ cmd: "advance", seconds: 0.5 });
+  const more = await status();
+  const saved = more.saves;
+  await command({ cmd: "save" });
+  await waitFor(async () => (await status()).saves > saved, "the second save to land");
+  await send("Page.reload");
+  check("app restarts again", await waitForApp());
+  const again = await status();
+  check("a save keeps what was sculpted since the last", more.sculpted > restored.sculpted && again.sculpted === more.sculpted && again.particles === more.particles && Math.abs(again.landscape_max - more.landscape_max) < 1e-4, JSON.stringify({ sculpted: [restored.sculpted, more.sculpted, again.sculpted], land: [more.landscape_max, again.landscape_max], particles: again.particles }));
 
   const errors = [...new Set(logs.filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];
   check("no errors in the console", errors.length === 0, errors.join(" | ").slice(0, 1500));

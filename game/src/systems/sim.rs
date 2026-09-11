@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
-    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME, Resolution,
+    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
 use crate::core::math::{Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
@@ -158,30 +158,26 @@ impl Simulation {
         }
     }
 
-    /// Make the ring another size. The water and the landscape stretch to fit on their own;
-    /// whatever body the new walls would cut through is pulled inside them.
     /// Raise (or, by a negative amount, lower) the ground within `radius` of a point of the
     /// frame.
     pub fn sculpt(&mut self, at: Vec3d, radius: f64, amount: f64) {
-        let phi = self.drum.wheel_angle_of(at);
-        let y = self.drum.axial(at);
-        self.drum.landscape.sculpt(phi, y, radius, amount);
+        self.drum.sculpt(at, radius, amount);
     }
 
     /// Change the ring's size about every body, which stays where it was about the axis: the
-    /// wall moves, not the bodies, except that solid ones are kept inside it.
+    /// wall moves, not the bodies, except that solid ones are kept inside it. The ground and
+    /// the water stay where they were on the wall.
     pub fn resize(&mut self, ring: Ring) {
         if ring == self.drum.ring {
             return;
         }
-        let about_the_axis: Vec<Vec3d> = self
-            .bodies
-            .iter()
-            .map(|body| self.drum.to_water(body.p))
-            .collect();
-        self.drum.resize(ring);
-        for (body, p) in self.bodies.iter_mut().zip(about_the_axis) {
-            body.p = self.drum.from_water(p);
+        let carried = self.drum.resize(ring);
+        for body in &mut self.bodies {
+            body.p = [
+                body.p[0] + carried[0],
+                body.p[1] + carried[1],
+                body.p[2] + carried[2],
+            ];
             if body.solid {
                 let reach = self.shapes[body.shape].reach();
                 body.p = self.drum.place_sphere_inside(body.p, reach);
@@ -308,12 +304,12 @@ impl Simulation {
     }
 
     /// Back to the initial ring world of the same size, but the settings, the target spin, the
-    /// thrusters' power, the site and the avatar stay as they are.
+    /// thrusters' power, the sites of the bodies and the water, and the avatar stay as they are.
     pub fn reset(&mut self) {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
         let target = self.drum.target_spin;
-        let site = self.drum.site;
+        let (site, water) = (self.drum.site, self.drum.water);
         let power = self.thrusters.power;
         let gyros = self.gyros;
         let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
@@ -322,6 +318,7 @@ impl Simulation {
         self.body_params = body_params;
         self.drum.target_spin = target;
         self.drum.site = site;
+        self.drum.water = water;
         self.thrusters.power = power;
         self.gyros = gyros;
         self.bodies[0] = avatar;
@@ -384,7 +381,12 @@ impl Simulation {
     }
 
     /// Add up to `count` particles of water around a point of the frame, at rest in the drum.
-    pub fn inject(&self, fluid: &mut Fluid, centre: Vec3d, count: u32) -> u32 {
+    /// Water put where there is none has its frame set down on the wall under it, so that it is
+    /// as fine as water can be wherever it is put.
+    pub fn inject(&mut self, fluid: &mut Fluid, centre: Vec3d, count: u32) -> u32 {
+        if fluid.is_empty() {
+            self.drum.settle_water(centre);
+        }
         let drum = &self.drum;
         let margin = fluid.resolution().margin().0 as f64;
         fluid.inject(drum.to_water(centre), count, |p| {
@@ -421,7 +423,7 @@ fn step(
     if !ready.get() {
         return;
     }
-    fluid.set_floor(Resolution::finest_for(sim.drum.ring.reach()));
+    fluid.keep_floor();
     sim.advance(Seconds(time.delta_secs()), &mut fluid);
     let substeps: Vec<(Seconds, Bodies)> = sim
         .substeps

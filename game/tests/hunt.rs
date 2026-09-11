@@ -19,8 +19,9 @@ use game::core::units::{
     EARTH_GRAVITY, KilogramsPerCubicMetre, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
 };
 use game::systems::air::{Air, Suspension};
+use game::systems::controls::BRUSH_SIZE;
 use game::systems::drum::GROUND_DEPTH;
-use game::systems::drum::Ring;
+use game::systems::drum::{Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::Settings;
 use game::systems::sim::{Simulation, standing_spin};
@@ -64,7 +65,8 @@ struct Case {
     carrying: Suspension,
     /// How much water the ring holds, as a share of what would drown the whole of it.
     sea: f64,
-    /// How rough the ground is, as a share of the ring's radius.
+    /// How rough the ground is about where the eye stands: how far the viewer's brush has
+    /// raised or lowered it here and there, in metres.
     hills: f64,
     /// Where the eye stands, measured on the ring itself rather than from the site, which moves
     /// under it: how far round the wheel, how far along the axis, how far in from the wall.
@@ -189,7 +191,7 @@ fn walking_any_ring_leaves_it_standing() {
             sim.gyros = Gyros::holding(sim.avatar());
             let here = sim.avatar().p;
             sim.resite(here);
-            let brush = (diameter as f64 / 40.0).max(2.0);
+            let brush = BRUSH_SIZE.0 as f64;
             for k in 0..4 {
                 let at = sim
                     .drum
@@ -211,7 +213,7 @@ fn walking_any_ring_leaves_it_standing() {
         };
         app.world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                let sim = world.resource::<Simulation>();
+                let mut sim = world.resource_mut::<Simulation>();
                 sim.inject(&mut fluid, centre, 4_000);
             });
         testing::run(&mut app, Seconds(1.0));
@@ -450,7 +452,7 @@ fn cases(count: usize) -> Vec<Case> {
             },
             hills: match rng.random_range(0..3) {
                 0 => 0.0,
-                _ => rng.random_range(0.0..0.02),
+                _ => rng.random_range(0.0..4.0),
             },
             eye,
             look: gaze(&mut rng, ring, eye),
@@ -615,16 +617,18 @@ impl Hunt {
             sim.avatar_mut().solid = false;
         }
         if case.hills > 0.0 {
-            let radius = case.ring.radius.0 as f64;
+            let half_width = case.ring.half_width.0 as f64;
             let mut rng = SmallRng::seed_from_u64(case.angle.0.to_bits());
-            for _ in 0..6 {
-                let phi = rng.random_range(-0.4..0.4);
-                let y = case.ring.half_width.0 as f64 * rng.random_range(-0.9..0.9);
-                let brush = radius * rng.random_range(0.005..0.05);
-                let raise = radius * case.hills * rng.random_range(-1.0..1.0);
-                let mut sim = self.app.world_mut().resource_mut::<Simulation>();
-                let at = sim.drum.wall_point(phi, y);
-                sim.sculpt(at, brush, raise);
+            let mut sim = self.app.world_mut().resource_mut::<Simulation>();
+            let grid = sim.drum.landscape.grid();
+            for _ in 0..12 {
+                let at = Place {
+                    round: Round::default().on(case.eye[0] + rng.random_range(-20.0..20.0), grid),
+                    along: (case.eye[1] + rng.random_range(-20.0..20.0))
+                        .clamp(-half_width, half_width),
+                };
+                let raise = case.hills * rng.random_range(-1.0..1.0);
+                sim.drum.landscape.sculpt(at, BRUSH_SIZE.0 as f64, raise);
             }
         }
         if case.sea > 0.0 {
@@ -636,7 +640,7 @@ impl Hunt {
             self.app
                 .world_mut()
                 .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                    let sim = world.resource::<Simulation>();
+                    let mut sim = world.resource_mut::<Simulation>();
                     sim.inject(&mut fluid, centre, count);
                 });
         }
@@ -651,9 +655,14 @@ impl Hunt {
         sim.avatar_mut().solid = false;
         let radius = sim.drum.ring.radius.0 as f64;
         let (arc, axial, height) = (case.eye[0], case.eye[1], case.eye[2]);
-        let on = sim
+        let grid = sim.drum.landscape.grid();
+        let turn = sim
             .drum
-            .wall_point(arc / radius - sim.drum.site.phi, axial - sim.drum.site.y);
+            .site
+            .round
+            .arc_to(Round::default().on(arc, grid), grid)
+            / radius;
+        let on = sim.drum.wall_point(turn, axial - sim.drum.site.y);
         let (_, out) = sim.drum.depth_and_outward(on);
         let at = [
             on[0] - out[0] * height,
@@ -707,9 +716,14 @@ impl Hunt {
             .chain(avatar.w.iter())
             .all(|c| c.is_finite())
             && avatar.q.iter().all(|c| c.is_finite());
+        let grid = sim.drum.landscape.grid();
         let ground = (0..16).all(|k| {
             let phi = k as f64 * std::f64::consts::TAU / 16.0;
-            sim.drum.landscape.sample(phi, 0.0).0.is_finite()
+            let at = Place {
+                round: Round::at_angle(phi, grid),
+                along: 0.0,
+            };
+            sim.drum.landscape.sample(at).0.is_finite()
         });
         body && ground
     }

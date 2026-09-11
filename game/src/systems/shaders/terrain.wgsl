@@ -22,16 +22,17 @@ struct Terrain {
     grass: vec4<f32>,
     grass_dark: vec4<f32>,
     bed: vec4<f32>,
-    // the site everything is drawn about: its place round the ring in segments of the grid,
-    // its place along the axis and the glass radius, in metres
+    // the site everything is drawn about, from the water's: how far round the ring and along
+    // the axis, in metres; the glass radius; and the mask of the survey's table
     site: vec4<f32>,
     // where the point everything is drawn about lies in the site's frame, in metres
     origin: vec4<f32>,
-    // the landscape grid: its angle per segment, its row spacing, the drum's half width, in
-    // metres, and the water each particle of a column adds over its footprint
+    // a surveyed column's arc round the ring and width along the axis, the drum's half width,
+    // in metres, and the water each particle of a column adds over its footprint
     grid: vec4<f32>,
     // x: seconds; y: metres per unit of a column's height; z: metres per second per unit of
-    // a column's flow; w: how many rows and segments the grid has, packed
+    // a column's flow; w: how many columns there are round the ring, or 0 when there are too
+    // many for the water to reach round it
     clock: vec4<f32>,
     absorption: vec4<f32>,
     scatter: vec4<f32>,
@@ -39,7 +40,8 @@ struct Terrain {
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> terrain: Terrain;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> columns: array<vec4<u32>>;
+// the water surveyed over the ground: see `columns.wgsl`
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> columns: array<u32>;
 
 const PI: f32 = 3.14159265;
 // water's index against the air it is seen through rather than against vacuum
@@ -50,9 +52,13 @@ const SHARPEST: f32 = 0.4;
 // wet ground is darker, once this many particles' worth of water lies over a column of it
 const WET: f32 = 0.35;
 const WET_BY: f32 = 4.0;
-// the widest the survey is ever gathered, in cells: water coarser than this is read as if its
-// grain were this wide, which costs it a little smoothing rather than an unbounded gather
-const GATHER: f32 = 4.0;
+// how the survey's table is laid out: see `columns.wgsl`
+const HEADER: u32 = 4u;
+const WORDS: u32 = 5u;
+const USED: u32 = 0x80000000u;
+const MOST_PROBES: u32 = 64u;
+const KEYED_ROUND: i32 = 16384;
+const KEYED_ALONG: i32 = 32768;
 // water standing this deep has laid its bed down over the ground and drowned what grew there,
 // over a stretch of shore rather than at a line, since a shore is never a line
 const BED_BY: f32 = 0.9;
@@ -98,83 +104,79 @@ struct Column {
     flow: vec3<f32>,
 }
 
-/// One column of the survey: the water's thickness over it in metres, the flow in it, and
-/// how high above the glass its water reaches.
-fn column_at(segment: i32, row: i32) -> vec4<f32> {
-    let segments = i32(terrain.clock.w % 4096.0);
-    let rows = i32(floor(terrain.clock.w / 4096.0));
-    let i = ((segment + segments) % segments) * rows + clamp(row, 0, rows - 1);
-    let c = columns[i];
-    let count = f32(c.y);
-    // the water over the column is its particles' volume over the column's footprint
-    let thickness = count * terrain.grid.w;
-    var flow = vec2(0.0);
-    if (c.y > 0u) {
-        flow = vec2(f32(bitcast<i32>(c.z)), f32(bitcast<i32>(c.w))) * terrain.clock.z / count;
+/// One column of the survey, by where it is from the water's site: the water's thickness over it
+/// in metres, the flow in it, and how high above the glass its water reaches.
+fn column_at(round: i32, along: i32) -> vec4<f32> {
+    var r = round;
+    let n = i32(terrain.clock.w);
+    if (n > 0) {
+        r = ((r + n / 2) % n + n) % n - n / 2;
     }
-    return vec4(thickness, flow.x, flow.y, f32(c.x) * terrain.clock.y);
+    if (r < -KEYED_ROUND || r >= KEYED_ROUND || along < -KEYED_ALONG || along >= KEYED_ALONG) {
+        return vec4(0.0);
+    }
+    let key = USED | ((u32(r) & 0x7fffu) << 16u) | (u32(along) & 0xffffu);
+    let mask = u32(terrain.site.w);
+    var slot = ((key * 2654435761u) >> 12u) & mask;
+    for (var probe = 0u; probe < MOST_PROBES; probe++) {
+        let c = HEADER + slot * WORDS;
+        let found = columns[c];
+        if (found == 0u) {
+            break;
+        }
+        if (found == key) {
+            let count = f32(columns[c + 2u]);
+            // the water over the column is its particles' volume over the column's footprint
+            let thickness = count * terrain.grid.w;
+            let flow = vec2(f32(bitcast<i32>(columns[c + 3u])), f32(bitcast<i32>(columns[c + 4u])))
+                * terrain.clock.z / count;
+            return vec4(thickness, flow.x, flow.y, f32(columns[c + 1u]) * terrain.clock.y);
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return vec4(0.0);
 }
 
-/// The survey read at a point of the site's frame. The point's place round the ring is its turn
-/// from the site, which is small however big the ring is, on top of the site's own.
+/// The survey read at a point of the site's frame. The point's place from the water's site is
+/// the site's own place from it, and the point's from the site, which is small however big the
+/// ring is.
 ///
-/// A column holds the particles standing over one cell of the grid, and the cells are finer
-/// than the water is grained: over shallow water a cell catches one particle or none, so its
-/// count steps between whole particles and its top jumps by a particle's width. Reading a
-/// single cell puts those steps into the ground, as a pattern in the grid's own shape, which
-/// is the grid showing rather than the water. The field is gathered over the water's grain
-/// instead, since nothing about the water's surface is known finer than the particles it is
-/// made of, and what is gathered is smooth to the width of one of them.
+/// A column holds the particles standing over it, and the columns are as far apart as the
+/// particles, so over shallow water a column catches one particle or none, its count stepping
+/// between whole particles and its top jumping by a particle's width. Nothing about the water's
+/// surface is known finer than that, so the field is gathered over the four columns round the
+/// point, which is smooth to the width of one of them.
 fn column_over(p: vec3<f32>) -> Column {
-    let segments = terrain.clock.w % 4096.0;
-    let turn = atan2(p.z, terrain.site.z + p.x);
-    let u = (terrain.site.x + turn / terrain.grid.x + segments) % segments - 0.5;
-    let v = (p.y + terrain.site.y + terrain.grid.z) / terrain.grid.y - 0.5;
-    let i = floor(u);
-    let j = floor(v);
-    let fu = u - i;
-    let fv = v - j;
-    // how wide a cell is on the ground, and how far apart the water's particles stand: a
-    // particle's water spread over a cell is the depth one of them adds there, so the cube
-    // root of that depth times the cell's area is the spacing they sit at
-    let across = terrain.site.z * terrain.grid.x;
-    let along = terrain.grid.y;
-    let grain = pow(terrain.grid.w * across * along, 1.0 / 3.0);
-    let reach = clamp(vec2(grain / across, grain / along), vec2(1.0), vec2(GATHER));
-    // only the cells within a reach of the point carry any weight, so those are the ones read:
-    // where the water is no coarser than the grid, that is the four cells round it and no more
-    let first = vec2<i32>(ceil(vec2(fu, fv) - reach));
-    let last = vec2<i32>(floor(vec2(fu, fv) + reach));
-    // how much water stands over a cell is a density, and gathers by area. How high it reaches
-    // and which way it flows belong to the water that is there rather than to the cell, so they
-    // gather weighted by it: a cell with no water in it has no height to lend its neighbours.
+    let arc = terrain.site.x + terrain.site.z * atan2(p.z, terrain.site.z + p.x);
+    let u = arc / terrain.grid.x - 0.5;
+    let v = (terrain.site.y + p.y) / terrain.grid.y - 0.5;
+    let i = i32(floor(u));
+    let j = i32(floor(v));
+    let fu = u - floor(u);
+    let fv = v - floor(v);
+    // how much water stands over a column is a density, and gathers by area. How high it
+    // reaches and which way it flows belong to the water that is there rather than to the
+    // column, so they gather weighted by it: a column with no water in it has no height to lend
+    // its neighbours.
     var thickness = 0.0;
-    var area = 0.0;
     var carried = vec2(0.0);
     var top = 0.0;
-    var held = 0.0;
-    for (var dj = first.y; dj <= last.y; dj++) {
-        let wv = max(1.0 - abs(f32(dj) - fv) / reach.y, 0.0);
-        for (var di = first.x; di <= last.x; di++) {
-            let w = max(1.0 - abs(f32(di) - fu) / reach.x, 0.0) * wv;
-            let cell = column_at(i32(i) + di, i32(j) + dj);
-            thickness += cell.x * w;
-            area += w;
-            carried += cell.yz * (cell.x * w);
-            top += cell.w * (cell.x * w);
-            held += cell.x * w;
+    for (var dj = 0; dj <= 1; dj++) {
+        let wv = select(1.0 - fv, fv, dj == 1);
+        for (var di = 0; di <= 1; di++) {
+            let w = select(1.0 - fu, fu, di == 1) * wv;
+            let column = column_at(i + di, j + dj);
+            thickness += column.x * w;
+            carried += column.yz * (column.x * w);
+            top += column.w * (column.x * w);
         }
     }
-    let c = vec4(
-        thickness / max(area, 1e-6),
-        carried / max(held, 1e-6),
-        top / max(held, 1e-6),
-    );
     var out: Column;
-    out.depth = c.x;
-    out.top = c.w;
+    out.depth = thickness;
+    out.top = top / max(thickness, 1e-6);
+    let flow = carried / max(thickness, 1e-6);
     let spinward = normalize(vec3(-p.z, 0.0, terrain.site.z + p.x));
-    out.flow = spinward * c.y + vec3(0.0, c.z, 0.0);
+    out.flow = spinward * flow.x + vec3(0.0, flow.y, 0.0);
     return out;
 }
 
