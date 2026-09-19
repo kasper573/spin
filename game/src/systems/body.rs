@@ -7,7 +7,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use crate::core::avatar;
-use crate::systems::figure::Mirrored;
+use crate::systems::figure::{Mirrored, MirroredFinish};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -38,18 +38,20 @@ fn spawn(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let enamel = materials.add(StandardMaterial {
+    let mut finish =
+        |material: StandardMaterial| (MirroredFinish::of(&material), materials.add(material));
+    let enamel = finish(StandardMaterial {
         base_color: ENAMEL,
         perceptual_roughness: 0.45,
         ..default()
     });
-    let dark_glass = materials.add(StandardMaterial {
+    let dark_glass = finish(StandardMaterial {
         base_color: DARK_GLASS,
         perceptual_roughness: 0.08,
         reflectance: 0.6,
         ..default()
     });
-    let graphite = materials.add(StandardMaterial {
+    let graphite = finish(StandardMaterial {
         base_color: GRAPHITE,
         metallic: 0.85,
         perceptual_roughness: 0.35,
@@ -61,34 +63,26 @@ fn spawn(
         .id();
     let spheres = &sim.shapes()[sim.avatar().shape].hull.spheres;
     for (k, sphere) in spheres.iter().enumerate() {
-        let (material, colour) = if k == 0 {
-            (&enamel, ENAMEL)
-        } else {
-            (&dark_glass, DARK_GLASS)
-        };
-        let radius = sphere.radius as f32;
+        let (mirrored, material) = if k == 0 { &enamel } else { &dark_glass };
+        let ball = Sphere::new(sphere.radius as f32);
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(radius))),
+            Mirrored::of(&ball, *mirrored),
+            Mesh3d(meshes.add(ball)),
             MeshMaterial3d(material.clone()),
             Transform::from_translation(DVec3::from_array(sphere.centre).as_vec3()),
-            Mirrored::matte(Vec3::ZERO, Vec3::ZERO, radius, colour),
             ChildOf(body),
         ));
     }
     let foot = DVec3::from_array(spheres[0].centre).as_vec3();
     let top = DVec3::from_array(avatar::eye_offset()).as_vec3() - Vec3::Y * NECK_SHORT_OF_EYE;
     let length = foot.distance(top);
+    let neck = Capsule3d::new(NECK_RADIUS, length);
     commands.spawn((
-        Mesh3d(meshes.add(Capsule3d::new(NECK_RADIUS, length))),
-        MeshMaterial3d(graphite),
+        Mirrored::of(&neck, graphite.0),
+        Mesh3d(meshes.add(neck)),
+        MeshMaterial3d(graphite.1),
         Transform::from_translation((foot + top) / 2.0)
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, (top - foot) / length)),
-        Mirrored::matte(
-            Vec3::NEG_Y * length / 2.0,
-            Vec3::Y * length / 2.0,
-            NECK_RADIUS,
-            GRAPHITE,
-        ),
         ChildOf(body),
     ));
 }

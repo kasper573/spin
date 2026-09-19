@@ -48,21 +48,12 @@ impl Workbench<'_, '_, '_> {
                 ChildOf(ring),
             ))
             .id();
-        self.commands.entity(ring).insert((
-            MuzzleLight {
-                firing: false,
-                colour,
-                level: 0.0,
-                lamp,
-            },
-            Mirrored {
-                from: Vec3::ZERO,
-                to: Vec3::ZERO,
-                radius: barrel + TUBE,
-                colour: Color::BLACK,
-                glow: LinearRgba::NONE,
-            },
-        ));
+        self.commands.entity(ring).insert(MuzzleLight {
+            firing: false,
+            colour,
+            level: 0.0,
+            lamp,
+        });
         ring
     }
 }
@@ -109,7 +100,7 @@ fn glow(
         }
         ring.level = level;
         let given_off = ring.colour.to_linear() * (LUMINANCE * level);
-        mirrored.glow = given_off;
+        mirrored.finish.glow = given_off;
         if let Some(mut material) = materials.get_mut(&material.0) {
             material.emissive = given_off;
         }

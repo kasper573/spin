@@ -9,7 +9,6 @@ use bevy::prelude::*;
 
 use crate::core::units::{LitresPerSecond, Metres};
 use crate::systems::aim::Aim;
-use crate::systems::figure::Mirrored;
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::tools::muzzle::MuzzleLight;
@@ -148,12 +147,6 @@ impl Tool for LandTool {
             let ring =
                 bench.muzzle_light(barrel.colour(), BARREL + 0.004, Vec3::new(x, BORE, -MUZZLE));
             bench.commands.entity(ring).insert(barrel);
-            bench.mirrored(Mirrored::matte(
-                Vec3::new(x, BORE, -BREECH),
-                Vec3::new(x, BORE, -MUZZLE),
-                SHROUD.y / 2.0,
-                FRAME,
-            ));
         }
 
         bench.dial_screen(
@@ -162,19 +155,6 @@ impl Tool for LandTool {
             SCREEN,
             lying_on(DECK_TOP, DECK_FOOT, FLUSH),
         );
-
-        bench.mirrored(Mirrored::matte(
-            Vec3::new(0.0, 0.01, 0.06),
-            Vec3::new(0.0, 0.01, -BREECH + 0.06),
-            0.06,
-            PLATING,
-        ));
-        bench.mirrored(Mirrored::matte(
-            HANDLE + Vec3::new(0.0, 0.04, -0.012),
-            HANDLE - Vec3::new(0.0, 0.04, -0.012),
-            0.022,
-            FRAME,
-        ));
     }
 }
 

@@ -8,7 +8,6 @@ use bevy::prelude::*;
 use crate::core::fluid::Fluid;
 use crate::core::units::Metres;
 use crate::systems::aim::Aim;
-use crate::systems::figure::Mirrored;
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::tools::muzzle::MuzzleLight;
@@ -129,31 +128,6 @@ impl Tool for WaterTool {
             SCREEN,
             lying_on(DECK_TOP, DECK_FOOT, FLUSH),
         );
-
-        bench.mirrored(Mirrored::matte(
-            Vec3::new(0.0, 0.02, 0.08),
-            Vec3::new(0.0, 0.02, -BREECH + 0.04),
-            0.045,
-            SHELL,
-        ));
-        bench.mirrored(Mirrored::matte(
-            Vec3::new(0.0, BORE, -BREECH),
-            Vec3::new(0.0, BORE, -MUZZLE),
-            BARREL,
-            FRAME,
-        ));
-        bench.mirrored(Mirrored::matte(
-            Vec3::new(0.0, TANK_HEIGHT, -TANK.0),
-            Vec3::new(0.0, TANK_HEIGHT, -TANK.1),
-            TANK_RADIUS,
-            TANK_BLUE,
-        ));
-        bench.mirrored(Mirrored::matte(
-            HANDLE + Vec3::new(0.0, 0.04, -0.012),
-            HANDLE - Vec3::new(0.0, 0.04, -0.012),
-            0.022,
-            FRAME,
-        ));
     }
 }
 

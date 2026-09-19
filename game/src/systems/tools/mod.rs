@@ -14,7 +14,7 @@ use crate::core::avatar::{self, WALK_SPEED};
 use crate::core::math::{mat3mul, quat_conjugate, quat_rotate};
 use crate::core::units::{Metres, Seconds};
 use crate::systems::aim::{self, Aim};
-use crate::systems::figure::Mirrored;
+use crate::systems::figure::{Mirrored, MirroredFinish, MirroredSolid};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -100,6 +100,13 @@ impl Toolbelt {
     }
 }
 
+/// What a tool's parts are made of: the material they are drawn in, and what the mirrors are
+/// told of it, whatever the shape.
+pub struct Finish {
+    material: Handle<StandardMaterial>,
+    mirrored: MirroredFinish,
+}
+
 /// What a tool is put together with.
 pub struct Workbench<'a, 'w, 's> {
     pub commands: &'a mut Commands<'w, 's>,
@@ -141,36 +148,31 @@ impl Workbench<'_, '_, '_> {
         self.handle = handle;
     }
 
-    pub fn finish(&mut self, material: StandardMaterial) -> Handle<StandardMaterial> {
-        self.materials.add(material)
+    pub fn finish(&mut self, material: StandardMaterial) -> Finish {
+        Finish {
+            mirrored: MirroredFinish::of(&material),
+            material: self.materials.add(material),
+        }
     }
 
+    /// A part of the tool: a shape in a finish, which the mirrors are told of as it is.
     pub fn part(
         &mut self,
-        mesh: impl Into<Mesh>,
-        material: &Handle<StandardMaterial>,
+        shape: impl MirroredSolid + Into<Mesh>,
+        finish: &Finish,
         at: Transform,
     ) -> Entity {
-        let mesh = self.meshes.add(mesh);
+        let mirrored = Mirrored::of(&shape, finish.mirrored);
+        let mesh = self.meshes.add(shape);
         self.commands
             .spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(material.clone()),
+                MeshMaterial3d(finish.material.clone()),
+                mirrored,
                 at.with_translation(at.translation - self.handle),
                 ChildOf(self.model),
             ))
             .id()
-    }
-
-    /// What the water and the glass are to show of the tool where they mirror it: its parts
-    /// are too fine for them, so it tells them of its bulk apart.
-    pub fn mirrored(&mut self, limb: Mirrored) {
-        self.commands.spawn((
-            limb,
-            Transform::from_translation(-self.handle),
-            Visibility::default(),
-            ChildOf(self.model),
-        ));
     }
 }
 

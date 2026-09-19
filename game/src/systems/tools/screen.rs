@@ -73,7 +73,7 @@ impl Workbench<'_, '_, '_> {
                 ),
             ],
         ));
-        let panel = self.finish(StandardMaterial {
+        let mut panel = self.finish(StandardMaterial {
             base_color: Color::BLACK,
             emissive: LinearRgba::WHITE * LUMINANCE,
             emissive_exposure_weight: 1.0,
@@ -81,6 +81,8 @@ impl Workbench<'_, '_, '_> {
             perceptual_roughness: 0.15,
             ..default()
         });
+        // a mirror is too far off to read the screen in: it shows its light, all in one
+        panel.mirrored.glow = Color::WHITE.mix(&accent, 0.5).to_linear() * (LUMINANCE * LIT);
         self.part(Rectangle::new(size.x, size.y), &panel, at);
     }
 }
@@ -101,8 +103,10 @@ impl Plugin for ScreenPlugin {
 const PIXELS_ACROSS: u32 = 256;
 const SMALL_LETTERS: f32 = 24.0;
 const LARGE_LETTERS: f32 = 54.0;
-/// What white on a screen gives off: enough to read in full sun.
+/// What white on a screen gives off: enough to read in full sun. About this much of a screen
+/// is lit, lettering and ground taken together.
 const LUMINANCE: f32 = 60_000.0;
+const LIT: f32 = 0.15;
 
 /// The camera that draws the screen of the tool in a slot.
 #[derive(Component)]
