@@ -4,9 +4,12 @@
 //! it, rendered headless frame by frame into `target/record/` as PNGs beside the thrusters'
 //! voices as a WAV and an SRT with the avatar's readouts, for ffmpeg to stitch (see `just record`).
 //! The body turns to look, so looking round is a matter of the turning thrusters. Run with
-//! `marker` as its argument, it records the crosshair's marker wrapping the ground instead, and
+//! `marker` as its argument, it records the crosshair's marker wrapping the ground instead;
 //! with `water`, the water: poured in, waded through, seen from under and from above, set
-//! flowing by a change of spin, and poured from the crosshair.
+//! flowing by a change of spin, and poured from the crosshair; and with `tools`, the tools:
+//! brought out and put away, worked with the mouse as a player works them, and seen with the
+//! avatar's body in the glass and the water. The tools are worked through the keys, buttons
+//! and wheel a player would use.
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -19,15 +22,14 @@ use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::{
     KilogramsPerCubicMetre, Litres, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
 };
-use game::systems::aim::Aim;
 use game::systems::air::{Air, Suspension};
-use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
 use game::systems::drum::{Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::scene::{SUN_DIRECTION, Sky};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
+use game::systems::tools::Toolbelt;
 
 const FPS: u32 = 30;
 /// The video's size, and the factor the frames are drawn larger by before they are scaled down
@@ -79,6 +81,10 @@ enum Cue {
     Spin(f32),
     /// Measure the shots that follow from where the avatar stands.
     Here,
+    /// Stand the avatar in its body a little way in from a cap of the ring, facing the glass.
+    FaceCap,
+    /// Let this many seconds pass unrecorded.
+    Settle(f32),
 }
 
 /// A viewpoint of the survey: where the eye is and what it looks at, each a place about the
@@ -124,13 +130,53 @@ struct Phase {
     pilot: PilotInput,
     caption: &'static str,
     cue: Cue,
-    /// Whether the sculpting brush is held on the crosshair throughout.
-    sculpting: bool,
-    /// Whether water is poured at the crosshair throughout.
-    pouring: bool,
+    /// What is done with the tools throughout.
+    work: Work,
     /// A viewpoint the eye is held at for the whole stretch: a ghost let go of falls out
     /// through the ring within a second, taking the view with it.
     hold: Option<View>,
+}
+
+/// What a stretch of the script does with the tools: which one is out, by its slot on the
+/// belt, which mouse buttons are held, and how many clicks the wheel is turned over the
+/// stretch, up when positive.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Work {
+    tool: Option<usize>,
+    left: bool,
+    right: bool,
+    wheel: i32,
+}
+
+/// The tools' slots on the belt.
+const WATER_TOOL: usize = 0;
+const LAND_TOOL: usize = 1;
+
+impl Work {
+    const WATER_TOOL_OUT: Work = Work {
+        tool: Some(WATER_TOOL),
+        left: false,
+        right: false,
+        wheel: 0,
+    };
+    const POURING: Work = Work {
+        left: true,
+        ..Work::WATER_TOOL_OUT
+    };
+    const LAND_TOOL_OUT: Work = Work {
+        tool: Some(LAND_TOOL),
+        left: false,
+        right: false,
+        wheel: 0,
+    };
+    const RAISING: Work = Work {
+        left: true,
+        ..Work::LAND_TOOL_OUT
+    };
+    const LOWERING: Work = Work {
+        right: true,
+        ..Work::LAND_TOOL_OUT
+    };
 }
 
 /// The time the turning thrusters at `level` take to turn the body by `radians`.
@@ -147,8 +193,7 @@ fn script() -> Vec<Phase> {
         pilot: PilotInput::firing(held),
         caption,
         cue: Cue::None,
-        sculpting: false,
-        pouring: false,
+        work: Work::default(),
         hold: None,
     };
     let eased = |seconds, held: &[Thruster], level: f32, caption| {
@@ -260,7 +305,7 @@ fn script() -> Vec<Phase> {
 /// with the brush and with the marker at rest.
 fn marker_script() -> Vec<Phase> {
     use Thruster::*;
-    let eased = |seconds, held: &[Thruster], level: f32, sculpting, caption| {
+    let eased = |seconds, held: &[Thruster], level: f32, raising: bool, caption| {
         let mut pilot = PilotInput::default();
         for thruster in held {
             pilot.levels[*thruster as usize] = level;
@@ -271,8 +316,11 @@ fn marker_script() -> Vec<Phase> {
             pilot,
             caption,
             cue: Cue::None,
-            sculpting,
-            pouring: false,
+            work: if raising {
+                Work::RAISING
+            } else {
+                Work::LAND_TOOL_OUT
+            },
             hold: None,
         }
     };
@@ -298,7 +346,7 @@ fn marker_script() -> Vec<Phase> {
             &[YawRight],
             sweep,
             true,
-            "right mouse held: the brush raises a ridge, and its outline wraps what it raises",
+            "the land tool's left barrel (2, LMB): the brush raises a ridge, and its outline wraps what it raises",
         ),
         eased(
             turn_time(1.8, pan),
@@ -357,6 +405,210 @@ fn marker_script() -> Vec<Phase> {
     ]
 }
 
+/// The tools, worked as a player works them: with none out, then the water tool brought out
+/// by its key, poured, its flow turned up and down with the wheel; the land tool in its stead,
+/// each barrel fired and its flow turned up; the tool put away again and the buttons
+/// idle; and then the avatar's own body and the tool floating before it, seen in the glass of
+/// a cap and in water it stands over, with the muzzle's light in both.
+fn tools_script() -> Vec<Phase> {
+    use Thruster::*;
+    let phase = |seconds, held: &[Thruster], level: f32, work: Work, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            pace: 1.0,
+            seconds,
+            pilot,
+            caption,
+            cue: Cue::None,
+            work,
+            hold: None,
+        }
+    };
+    let wheel = |clicks: i32, work: Work| Work {
+        wheel: clicks,
+        ..work
+    };
+    let (glance, pan) = (0.5, 0.25);
+    vec![
+        phase(
+            2.5,
+            &[],
+            0.0,
+            Work::default(),
+            "no tool out: the squares in the corner are the tools there are, in the order of their number keys",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work::WATER_TOOL_OUT,
+            "1: the water tool comes up, its square turns orange, and the mouse is now its to answer",
+        ),
+        phase(
+            turn_time(0.3, glance),
+            &[PitchDown],
+            glance,
+            Work::WATER_TOOL_OUT,
+            "looking down at the ground ahead (mouse down)",
+        ),
+        phase(
+            3.5,
+            &[],
+            0.0,
+            Work::POURING,
+            "left button: water, put straight where the crosshair rests; the ring round the muzzle lights while it pours, and lights what is near it",
+        ),
+        phase(
+            2.5,
+            &[],
+            0.0,
+            wheel(8, Work::WATER_TOOL_OUT),
+            "mouse wheel up: the flow goes up, on the tool's own screen",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work::POURING,
+            "and the same button pours that much more",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            wheel(-8, Work::WATER_TOOL_OUT),
+            "mouse wheel down: back to where it was",
+        ),
+        phase(
+            2.5,
+            &[],
+            0.0,
+            Work::LAND_TOOL_OUT,
+            "2: the water tool goes down and the land tool comes up: two barrels, an arrow painted on each",
+        ),
+        phase(
+            turn_time(0.9, pan),
+            &[YawLeft],
+            pan,
+            Work::RAISING,
+            "left button, the left barrel, blue, its arrow pointing out: land is put down",
+        ),
+        phase(
+            turn_time(0.9, pan),
+            &[YawRight],
+            pan,
+            Work::LOWERING,
+            "right button, the right barrel, red, its arrow pointing in: land is taken up",
+        ),
+        phase(
+            2.5,
+            &[],
+            0.0,
+            wheel(14, Work::LAND_TOOL_OUT),
+            "mouse wheel up: more land a second, on the tool's own screen, under a wider brush, marked on the ground",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work::RAISING,
+            "and the left barrel now raises a hill in the time it took to raise a bump",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            wheel(-14, Work::LAND_TOOL_OUT),
+            "mouse wheel down: back to where it was",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work::default(),
+            "2 again: the land tool is put away, and no tool is out",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work {
+                left: true,
+                right: true,
+                ..Work::default()
+            },
+            "with no tool out the buttons do nothing",
+        ),
+        Phase {
+            cue: Cue::FaceCap,
+            ..phase(
+                4.0,
+                &[],
+                0.0,
+                Work::WATER_TOOL_OUT,
+                "before the glass of a cap: the avatar's body is a thing in the ring like any other, and sees itself, hull, head and the tool floating before it",
+            )
+        },
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work::POURING,
+            "pouring at the glass: the muzzle's light in the mirror, and on the glass itself",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work::LAND_TOOL_OUT,
+            "the land tool in the mirror",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work {
+                left: true,
+                right: true,
+                ..Work::LAND_TOOL_OUT
+            },
+            "both barrels at once: blue and red",
+        ),
+        Phase {
+            cue: Cue::Flood,
+            ..phase(0.1, &[], 0.0, Work::LAND_TOOL_OUT, "the ring flooded")
+        },
+        Phase {
+            cue: Cue::Settle(25.0),
+            ..phase(
+                turn_time(1.0, glance),
+                &[PitchDown],
+                glance,
+                Work::WATER_TOOL_OUT,
+                "over still water, looking down into it (mouse down)",
+            )
+        },
+        phase(
+            4.0,
+            &[],
+            0.0,
+            Work::WATER_TOOL_OUT,
+            "water mirrors a fiftieth of what stands straight over it, and that the body's shaded underside: there, but faint by day",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work::POURING,
+            "what glows shows plainly in it: the muzzle's light, while it pours",
+        ),
+        phase(3.0, &[], 0.0, Work::WATER_TOOL_OUT, "the pour settling"),
+    ]
+}
+
 /// The water: poured in all round the ring and left to settle, looked into and across, waded
 /// into until the eye is under it, looked at from below, flown out of and looked down on,
 /// set flowing by spinning the ring up, and poured from the crosshair.
@@ -373,8 +625,7 @@ fn water_script() -> Vec<Phase> {
             pilot,
             caption,
             cue: Cue::None,
-            sculpting: false,
-            pouring: false,
+            work: Work::default(),
             hold: None,
         }
     };
@@ -426,15 +677,18 @@ fn water_script() -> Vec<Phase> {
             )
         },
         Phase {
-            pouring: true,
+            work: Work::POURING,
             ..phase(
                 4.0,
                 &[],
                 0.0,
-                "pouring water from the crosshair (LMB): foam where it churns, ripples riding the flow",
+                "pouring water with the water tool (1, LMB): foam where it churns, ripples riding the flow",
             )
         },
-        phase(4.0, &[], 0.0, "the pour settling"),
+        Phase {
+            work: Work::WATER_TOOL_OUT,
+            ..phase(4.0, &[], 0.0, "the pour settling")
+        },
         {
             let view = View {
                 eye: [-2.0, -10.0, 2.0],
@@ -491,8 +745,7 @@ fn sea_script() -> Vec<Phase> {
             pilot,
             caption,
             cue: Cue::None,
-            sculpting: false,
-            pouring: false,
+            work: Work::default(),
             hold: None,
         }
     };
@@ -746,8 +999,7 @@ fn air_script() -> Vec<Phase> {
         pilot: PilotInput::default(),
         caption,
         cue: Cue::Steady(view),
-        sculpting: false,
-        pouring: false,
+        work: Work::default(),
         hold: Some(view),
     };
     let set = |cue: Cue| Phase {
@@ -756,8 +1008,7 @@ fn air_script() -> Vec<Phase> {
         pilot: PilotInput::default(),
         caption: "",
         cue,
-        sculpting: false,
-        pouring: false,
+        work: Work::default(),
         hold: None,
     };
     let mut script = vec![
@@ -878,7 +1129,7 @@ fn air_script() -> Vec<Phase> {
         ground,
         "the ground of a ring this size is coarse: the brush the crosshair outlines is as wide as the smallest thing that ground can hold, sixty metres of it",
     );
-    working.sculpting = true;
+    working.work = Work::RAISING;
     script.push(working);
     script
 }
@@ -955,8 +1206,7 @@ fn survey_script() -> Vec<Phase> {
         pilot: PilotInput::default(),
         caption: "the pool laid in",
         cue: Cue::Basin,
-        sculpting: false,
-        pouring: false,
+        work: Work::default(),
         hold: None,
     }];
     for daylight in [false, true] {
@@ -972,8 +1222,7 @@ fn survey_script() -> Vec<Phase> {
                     daylight,
                     ashore: false,
                 }),
-                sculpting: false,
-                pouring: false,
+                work: Work::default(),
                 hold: None,
             });
         }
@@ -1079,6 +1328,21 @@ fn cue(app: &mut App, cue: Cue) {
             sim.drum.spin = RadiansPerSecond(rate);
             sim.drum.target_spin = RadiansPerSecond(rate);
         }
+        Cue::FaceCap => {
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            let site = sim.drum.site;
+            let here = Mark {
+                round: site.round,
+                y: 0.0,
+                shore: 0.0,
+            };
+            let reach = sim.drum.ring.half_width.0 as f64;
+            let height = avatar::EYE_HEIGHT.0 as f64;
+            let eye = spot(&sim, here, [0.0, reach - CAP_STANDOFF, height]);
+            let glass = spot(&sim, here, [0.0, reach - 0.1, height]);
+            stand(&mut sim, eye, glass);
+        }
+        Cue::Settle(seconds) => testing::run(app, Seconds(seconds)),
         Cue::Here => {
             app.world_mut().resource_mut::<Settings>().collisions = false;
             let site = app.world().resource::<Simulation>().drum.site;
@@ -1283,6 +1547,9 @@ fn cue(app: &mut App, cue: Cue) {
     }
 }
 
+/// How far in from a cap the avatar stands to look at itself in the glass.
+const CAP_STANDOFF: f64 = 2.4;
+
 /// The water demo's pool: the flat floor between two ridges across the ring, each a row of
 /// broad mounds this tall, holding this many particles laid in heaps this far clear of the
 /// ground; the avatar starts on its bed at the near ridge's foot.
@@ -1375,6 +1642,9 @@ fn main() {
     let _ = fs::remove_dir_all(out);
     fs::create_dir_all(out).expect("create target/record");
     let mut app = testing::headless();
+    // the film shows the HUD as the game does, its lettering as large on the finished frame
+    app.world_mut().resource_mut::<Settings>().help = true;
+    app.insert_resource(UiScale(SUPERSAMPLE as f32));
     let image = testing::render_to_image(&mut app, WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE);
     testing::watch(&mut app, Seconds(0.5));
 
@@ -1383,52 +1653,27 @@ fn main() {
     let mut soundtrack = Soundtrack::new(out.join("thrusters.wav"));
     let script = match std::env::args().nth(1).as_deref() {
         None => script(),
-        Some("marker") => {
-            app.world_mut().resource_mut::<Aim>().engaged = true;
-            marker_script()
-        }
+        Some("marker") => marker_script(),
         Some("water") => water_script(),
+        Some("tools") => tools_script(),
         Some("survey") => survey_script(),
         Some("sea") => sea_script(),
         Some("air") => air_script(),
         Some(other) => {
             panic!(
-                "unknown script {other:?}: the others are `marker`, `water`, `survey`, `sea` and `air`"
+                "unknown script {other:?}: the others are `marker`, `water`, `tools`, `survey`, `sea` and `air`"
             )
         }
     };
     let mut frame = 0u32;
+    let mut hands = Hands::default();
     for phase in script {
         cue(&mut app, phase.cue);
         let frames = (phase.seconds * FPS as f32).round() as u32;
-        for _ in 0..frames {
-            {
-                let player = *app.world().resource::<Player>();
-                let target = app.world().resource::<Aim>().target;
-                let mut sim = app.world_mut().resource_mut::<Simulation>();
-                sim.avatar_input = player.input(phase.pilot);
-                let brush = BRUSH_SIZE;
-                if phase.sculpting
-                    && let Some(target) = target
-                {
-                    let amount = BRUSH_RATE.0 * frame_time.0 * phase.pace;
-                    sim.sculpt(target.point.to_array(), brush.0 as f64, amount as f64);
-                }
-                app.world_mut().resource_mut::<Aim>().brush = phase.sculpting.then_some(brush);
-            }
-            if phase.pouring
-                && let Some(target) = app.world().resource::<Aim>().target
-            {
-                let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
-                app.world_mut()
-                    .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                        let settings = world.resource::<Settings>();
-                        let count = settings.flow.0 * frame_time.0
-                            / fluid.resolution().litres_per_particle().0;
-                        let mut sim = world.resource_mut::<Simulation>();
-                        sim.inject(&mut fluid, at.to_array(), count.round() as u32)
-                    });
-            }
+        for k in 0..frames {
+            let player = *app.world().resource::<Player>();
+            app.world_mut().resource_mut::<Simulation>().avatar_input = player.input(phase.pilot);
+            hands.work(&mut app, phase.work, k, frames);
             if let Some(view) = phase.hold {
                 hold(&mut app, view);
             }
@@ -1474,6 +1719,40 @@ fn main() {
     fs::write(out.join("readout.srt"), srt).expect("write readout.srt");
     soundtrack.finish();
     println!("{frame} frames in {}", out.display());
+}
+
+/// The script's hands on the keyboard and the mouse: which buttons it is holding down, so that
+/// a stretch of the script only reports what changes from the last.
+#[derive(Default)]
+struct Hands {
+    left: bool,
+    right: bool,
+}
+
+impl Hands {
+    /// Do with the tools what frame `k` of a stretch `frames` long asks: bring out the tool it
+    /// wants, or put away the one that is out, by its number key; press or let go of the
+    /// mouse buttons; and turn the wheel a click whenever its share of the stretch is up.
+    fn work(&mut self, app: &mut App, work: Work, k: u32, frames: u32) {
+        let out = app.world().resource::<Toolbelt>().wielded();
+        if let Some(slot) = work.tool.or(out).filter(|_| out != work.tool) {
+            testing::tap(app, Toolbelt::key(slot));
+        }
+        for (button, held, wanted) in [
+            (MouseButton::Left, &mut self.left, work.left),
+            (MouseButton::Right, &mut self.right, work.right),
+        ] {
+            if *held != wanted {
+                testing::button(app, button, wanted);
+                *held = wanted;
+            }
+        }
+        let turned = |k: u32| (k as i32 * work.wheel) / frames.max(1) as i32;
+        let clicks = turned(k + 1) - turned(k);
+        if clicks != 0 {
+            testing::wheel(app, clicks);
+        }
+    }
 }
 
 /// The thrusters' voices, each heard from where it sits around the head, mixed down a frame at a

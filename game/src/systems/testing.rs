@@ -6,6 +6,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::diagnostic::{DiagnosticsStore, FrameCount};
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
+use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -21,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
+use crate::systems::aim::Aim;
 use crate::systems::app;
 use crate::systems::controls::pilot;
 use crate::systems::drum::{Place, Round};
@@ -29,6 +34,7 @@ use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SUBSTEP_RATE, SimSet, Simulation};
+use crate::systems::tools::Toolbelt;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -115,6 +121,8 @@ pub struct ScriptStatus {
     pub landscape_max: f32,
     /// How many patches of the ground have been sculpted.
     pub sculpted: usize,
+    /// The slot of the tool that is out, if one is.
+    pub tool: Option<usize>,
     /// Saves storage has kept so far.
     pub saves: u32,
     /// The avatar's weight in g as the ground pushes back, zero when nothing does.
@@ -271,9 +279,11 @@ fn steer(thrust: Res<ScriptedThrust>, player: Res<Player>, mut sim: ResMut<Simul
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
+    belt: Res<Toolbelt>,
     saves: Res<Saves>,
     fps: Res<FrameRate>,
     frame: Res<FrameCount>,
@@ -292,6 +302,7 @@ fn publish(
         sim_rate: sim.rate,
         landscape_max: sim.drum.landscape.max_height(),
         sculpted: sim.drum.landscape.patches().count(),
+        tool: belt.wielded(),
         saves: saves.completed,
         weight: footing.weight,
         ground_speed: footing.ground_speed,
@@ -317,7 +328,9 @@ fn publish(
 
 /// The simulation with rendering into nothing, stepped by hand. No wall-clock time passes in it:
 /// the simulation advances only by `run`, so what a test observes never depends on how fast the
-/// machine is. One such app exists at a time in a process, and they all draw with the process's
+/// machine is. Whoever steps it is at its controls, and it starts with every tool put away and
+/// the HUD's list folded, so that what is seen of the world is the world alone until a tool is
+/// asked for. One such app exists at a time in a process, and they all draw with the process's
 /// one GPU device.
 pub fn headless() -> Headless {
     let turn = GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -327,7 +340,48 @@ pub fn headless() -> Headless {
     app.finish();
     app.cleanup();
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
+    app.world_mut().resource_mut::<Aim>().engaged = true;
+    app.world_mut().resource_mut::<Toolbelt>().put_away();
+    app.world_mut().resource_mut::<Settings>().help = false;
     Headless { app, _turn: turn }
+}
+
+/// Press a key and let go of it, as the keyboard would report it over the coming frame.
+pub fn tap(app: &mut App, key: KeyCode) {
+    for state in [ButtonState::Pressed, ButtonState::Released] {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+}
+
+/// Press a mouse button and keep it down, or let go of it, as the mouse would report it.
+pub fn button(app: &mut App, button: MouseButton, down: bool) {
+    app.world_mut().write_message(MouseButtonInput {
+        button,
+        state: if down {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        },
+        window: Entity::PLACEHOLDER,
+    });
+}
+
+/// Turn the mouse wheel by this many clicks, up when positive, over the coming frame.
+pub fn wheel(app: &mut App, clicks: i32) {
+    app.world_mut().write_message(MouseWheel {
+        unit: MouseScrollUnit::Line,
+        x: 0.0,
+        y: clicks as f32,
+        window: Entity::PLACEHOLDER,
+        phase: TouchPhase::Moved,
+    });
 }
 
 /// A headless app and its turn on the GPU, which it keeps until it is dropped.

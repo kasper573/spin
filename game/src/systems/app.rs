@@ -10,10 +10,10 @@ use bevy::winit::WinitPlugin;
 use crate::core::fluid::FluidPlugin;
 use crate::core::web;
 use crate::systems::{
-    aim::AimPlugin, controls::ControlsPlugin, drum::DrumPlugin, hud::HudPlugin,
-    persistence::PersistencePlugin, player::PlayerPlugin, scene::ScenePlugin,
-    settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin,
-    thrusters::ThrustersPlugin, water::WaterPlugin,
+    aim::AimPlugin, body::BodyPlugin, controls::ControlsPlugin, drum::DrumPlugin,
+    figure::FigurePlugin, hud::HudPlugin, persistence::PersistencePlugin, player::PlayerPlugin,
+    scene::ScenePlugin, settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin,
+    thrusters::ThrustersPlugin, tools::ToolsPlugin, water::WaterPlugin,
 };
 
 pub fn build() -> App {
@@ -26,7 +26,6 @@ pub fn build() -> App {
     simulation(&mut app);
     app.add_plugins((
         ControlsPlugin,
-        HudPlugin,
         PersistencePlugin,
         TestingPlugin,
         RenderDiagnosticsPlugin,
@@ -68,6 +67,10 @@ fn simulation(app: &mut App) {
         PlayerPlugin,
         ThrustersPlugin,
         AimPlugin,
+        FigurePlugin,
+        BodyPlugin,
+        ToolsPlugin,
+        HudPlugin,
     ));
 }
 

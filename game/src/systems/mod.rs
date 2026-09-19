@@ -1,8 +1,10 @@
 pub mod aim;
 pub mod air;
 pub mod app;
+pub mod body;
 pub mod controls;
 pub mod drum;
+pub mod figure;
 pub mod hud;
 pub mod persistence;
 pub mod player;
@@ -11,6 +13,7 @@ pub mod settings;
 pub mod sim;
 pub mod testing;
 pub mod thrusters;
+pub mod tools;
 pub mod water;
 
 use bevy::asset::embedded_asset;
@@ -28,6 +31,7 @@ pub fn embed_shaders(app: &mut App) {
     embedded_asset!(app, "shaders/optics.wgsl");
     embedded_asset!(app, "shaders/air.wgsl");
     embedded_asset!(app, "shaders/ring.wgsl");
+    embedded_asset!(app, "shaders/figure.wgsl");
     embedded_asset!(app, "drum/shaders/drum.wgsl");
     embedded_asset!(app, "drum/shaders/columns.wgsl");
 }

@@ -25,6 +25,7 @@ use crate::core::fluid::{FluidBuffers, MAX_DROPLETS, MAX_INDICES};
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
+use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::{self, SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
@@ -55,7 +56,8 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .add_systems(Startup, spawn)
-            .add_systems(Update, (tick, submerge).in_set(SimSet::Observe));
+            .add_systems(Update, (tick, submerge).in_set(SimSet::Observe))
+            .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
 }
 
@@ -104,6 +106,9 @@ struct WaterMaterial {
     counters: Handle<ShaderBuffer>,
     #[storage(4, read_only)]
     droplets: Handle<ShaderBuffer>,
+    /// The viewer's own figure, for the water to mirror; see `systems/figure.rs`.
+    #[uniform(10)]
+    figure: FigureUniform,
 }
 
 impl Material for WaterMaterial {
@@ -171,6 +176,7 @@ fn spawn(
         indices: buffers.surface.indices.clone(),
         counters: buffers.surface.counters.clone(),
         droplets: buffers.surface.droplets.clone(),
+        figure: FigureUniform::default(),
     });
     // the mesh only fixes how many vertices are drawn, the surface's and then the droplets'
     // squares; the vertex shader fetches each one
@@ -241,6 +247,12 @@ fn tick(
             .place(sim.drum.from_water([0.0; 3]))
             .with_rotation(rotation)
             .with_scale(Vec3::splat(metres_per_unit as f32));
+    }
+}
+
+fn mirror(figure: Res<Figure>, water: Res<Water>, mut materials: ResMut<Assets<WaterMaterial>>) {
+    if let Some(mut material) = materials.get_mut(&water.0) {
+        material.figure = figure.0.clone();
     }
 }
 

@@ -1,5 +1,5 @@
 //! What the thrusters look and sound like. The widget is a three-axis cross in the bottom-left of
-//! the view, in the frame the thrusters sit in: up, down, left and right arms at full length,
+//! the view, over the HUD's tools, in the frame the thrusters sit in: up, down, left and right arms at full length,
 //! the forward and back arms receding diagonally. Each arm is a pushing thruster where it is
 //! mounted, and fills from the centre outward as that thruster spools up: pushing forward lights
 //! the arm at the back. Each pushing thruster also has a voice, a jet heard from where it sits
@@ -19,6 +19,7 @@ use crate::core::audio::{self, Fader, Placement, Voice};
 use crate::core::avatar::{self, Thruster};
 use crate::core::units::Seconds;
 use crate::systems::controls::Controls;
+use crate::systems::hud;
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
@@ -31,8 +32,10 @@ const ARM: f32 = 0.17;
 /// other arms' length; the back arm comes out the opposite way.
 const RECEDING: Vec2 = Vec2::new(0.707, 0.707);
 const RECEDING_LENGTH: f32 = 0.85;
-/// How far the cross's centre keeps from the view's edge, as a multiple of the arm length.
+/// How far the cross's centre keeps from the view's left edge, and from the top of the HUD's
+/// tools under it, as multiples of the arm length.
 const MARGIN: f32 = 1.85;
+const CLEARANCE: f32 = 1.4;
 const STEREO: ChannelCount = NonZero::new(2).unwrap();
 const IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.9);
 const FIRING: Color = Color::srgb(1.0, 0.32, 0.04);
@@ -94,10 +97,10 @@ fn draw(
     let half_height = DEPTH * (lens.fov / 2.0).tan();
     let half_width = half_height * lens.aspect_ratio;
     let arm = ARM * half_height;
-    let margin = MARGIN * arm;
+    let over_tools = hud::TOOLS_REACH * 2.0 * half_height + CLEARANCE * arm;
     let centre = view.translation + view.forward() * DEPTH
-        - view.right() * (half_width - margin)
-        - view.up() * (half_height - margin);
+        - view.right() * (half_width - MARGIN * arm)
+        - view.up() * (half_height - over_tools);
     let place = |p: Vec2| centre + view.right() * (p.x * arm) + view.up() * (p.y * arm);
     for thruster in Thruster::ALL {
         if thruster.turns() {

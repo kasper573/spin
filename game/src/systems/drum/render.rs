@@ -25,6 +25,7 @@ use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Ro
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::systems::air::{Air, AirUniform};
+use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
 use crate::systems::scene::{SPACE, Sky, Viewpoint};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
@@ -91,7 +92,8 @@ impl Plugin for DrumPlugin {
             (rebuild, place, light, wet, feed_water)
                 .chain()
                 .in_set(SimSet::Observe),
-        );
+        )
+        .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
 }
 
@@ -139,6 +141,9 @@ struct GlassMaterial {
     /// The air between the eye and the glass; see `systems/air.rs`.
     #[uniform(0)]
     air: AirUniform,
+    /// The viewer's own figure, for the glass to mirror; see `systems/figure.rs`.
+    #[uniform(10)]
+    figure: FigureUniform,
 }
 
 impl Material for GlassMaterial {
@@ -259,6 +264,7 @@ fn spawn(
             ring: Vec4::new(0.0, 0.0, 1.0, 1.0),
             ground: ground_albedo(),
             air: AirUniform::default(),
+            figure: FigureUniform::default(),
         }),
         metal: standard.add(StandardMaterial {
             base_color: Color::srgb(0.16, 0.17, 0.2),
@@ -390,6 +396,16 @@ fn light(
             if enclosed { 1.0 } else { 0.0 },
             medium,
         );
+    }
+}
+
+fn mirror(
+    figure: Res<Figure>,
+    materials: Res<WheelMaterials>,
+    mut glass: ResMut<Assets<GlassMaterial>>,
+) {
+    if let Some(mut material) = glass.get_mut(&materials.glass) {
+        material.figure = figure.0.clone();
     }
 }
 

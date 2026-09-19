@@ -299,10 +299,11 @@ struct StarSphere;
 
 /// The shader modules the materials share, kept loaded: space, for the stars and whatever
 /// reflects them; the ring as a shape rays are cast against; the optics of smooth surfaces,
-/// for the water and the glass; the air between the eye and everything in the ring; and the
-/// ripples, for the water and the ground they cast their light on.
+/// for the water and the glass; the air between the eye and everything in the ring; the
+/// ripples, for the water and the ground they cast their light on; and the viewer's own
+/// figure, for whatever mirrors it.
 #[derive(Resource)]
-struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 5]);
+struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 6]);
 
 fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SharedShaders([
@@ -311,6 +312,7 @@ fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
         assets.load("embedded://game/systems/shaders/optics.wgsl"),
         assets.load("embedded://game/systems/shaders/air.wgsl"),
         assets.load("embedded://game/systems/shaders/ripples.wgsl"),
+        assets.load("embedded://game/systems/shaders/figure.wgsl"),
     ]));
 }
 
@@ -403,6 +405,7 @@ fn spawn(
         Msaa::Sample4,
         DepthPrepass,
         ShadowFilteringMethod::Gaussian,
+        IsDefaultUiCamera,
         PlayerCamera,
     ));
     commands.spawn((

@@ -4,14 +4,16 @@ Live: https://kasper573.github.io/spin/
 
 A browser simulation of a ring world: a glass drum spinning in zero g with ground all the way
 round its inside, spun at exactly the rate that gives you your Earth weight on that ground. You
-are a body in it, flown on thrusters, and you can flood it with water and sculpt the landscape,
+are a body in it, flown on thrusters, with a tool floating before you: a number key brings one
+out and puts it away again, and with them you can flood it with water and sculpt the landscape,
 then resize the ring, whose wall keeps the ground and the water where they lie on it. The water is a position-based fluid solved in compute shaders and drawn as an isosurface
 the GPU extracts every frame; the amount of water and the size of the ring are only limited by
 the dials.
 
 Built in Rust on Bevy, for WebGPU. It runs in a current Chrome, Edge, Safari or Firefox; Chrome
 on Linux only offers a GPU adapter with `chrome://flags/#enable-vulkan` turned on. Every control
-and setting is listed on screen, with its current value.
+and setting that is not a tool's is listed on screen, with its current value; a tool shows its
+own on the screen in its back, and answers to the mouse buttons and the wheel while it is out.
 
 ## Working in the repo
 
@@ -40,7 +42,8 @@ One crate, `game/`, in two layers plus thin binaries:
   voices, units and the browser page glue. Core may not reference `systems/`; `just lint`
   checks.
 - `src/systems/` — the simulation itself: the drum and its landscape, the stepped world, water
-  rendering, the player's camera, controls, settings, HUD, persistence, and the script
+  rendering, the player's camera and body, the tools and what the mirrors show of them,
+  controls, settings, HUD, persistence, and the script
   commands and status the tests and the page's `?probe` mode drive it through.
 - `src/bin/` — the browser client, the bench, the recorder and the layering lint.
 - `tests/` — contract tests against the public API, run headless.

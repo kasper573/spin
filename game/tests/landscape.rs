@@ -3,13 +3,13 @@ use game::core::fluid::Fluid;
 use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::controls::BRUSH_SIZE;
 use game::systems::drum::{
     DEFAULT_RING, Drum, Ground, Landscape, PATCH, Patch, Place, Ring, Round, Site,
 };
 use game::systems::settings::Settings;
 use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
+use game::systems::tools::land_tool::brush;
 
 fn at_angle(land: &Landscape, phi: f64, along: f64) -> Place {
     Place {
@@ -38,7 +38,7 @@ fn sculpting_raises_ground_under_the_brush_only() {
 /// on a ring of any size, it raises the same mound, as tall in the middle and as wide.
 #[test]
 fn a_brush_raises_the_same_mound_on_a_ring_of_any_size() {
-    let brush = BRUSH_SIZE.0 as f64;
+    let brush = brush(Settings::default().build).0 as f64;
     let offsets = [0.0, 0.3, 0.6, 0.9, 1.1];
     let mut first: Option<Vec<f64>> = None;
     for radius in [10.5f64, 100.0, 5_000.0, 1e6, 1e9] {

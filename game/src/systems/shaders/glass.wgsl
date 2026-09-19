@@ -10,7 +10,8 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import optics::through_water
 #endif
-#import optics::{mirrored, ring_seen, seen_through, fresnel, glint, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
+#import optics::{ring_seen, seen_through, fresnel, glint, lamp_glint_at, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
+#import figure::mirrored
 #import ring::ring_up
 #import air::Air
 
@@ -131,16 +132,14 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
     let reflected = reflect(-v, face);
     // from outside the drum the screen shows the far sides of everything the mirror would
     // show the near sides of, so only the ring itself is mirrored there
-    var mirror = ring_seen(glass.air, p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb, spread);
-    if (glass.ring.z > 0.5) {
-        mirror = mirrored(p, reflected, mirror);
-    }
+    let mirror = mirrored(p, reflected, ring_seen(glass.air, p + glass.origin.xyz, reflected, glass.ring.xy, glass.ground.rgb, glass.to_stars, glass.background.rgb, spread), p + glass.origin.xyz, glass.ring.xy, glass.ring.z > 0.5);
     var colour = mix(passed, mirror, mirrored_share);
+    let pixel = view.viewport.xy + uv * view.viewport.zw;
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
-        let pixel = view.viewport.xy + uv * view.viewport.zw;
         colour += sunlight(i) * glint(face, v, l, ROUGHNESS, f0) * sun_shadow(i, p, face, pixel);
     }
+    colour += lamp_glint_at(p, face, v, ROUGHNESS, f0, pixel);
     return colour;
 }
 

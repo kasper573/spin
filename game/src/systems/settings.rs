@@ -17,12 +17,17 @@ const FINE_STEPS: f32 = 100.0;
 #[serde(default)]
 pub struct Settings {
     pub spin: RadiansPerSecond,
+    /// How much water the water tool pours.
     pub flow: LitresPerSecond,
+    /// How much land the land tool puts down, or takes up.
+    pub build: LitresPerSecond,
     pub viscosity: f32,
     pub wall_friction: f32,
     pub air: bool,
     /// Whether the avatar is solid to the drum and the water, or a ghost.
     pub collisions: bool,
+    /// Whether the HUD lists the keys and the readouts, or only how to bring them back.
+    pub help: bool,
     /// The ring's size across and along its axis.
     pub diameter: Metres,
     pub width: Metres,
@@ -36,10 +41,12 @@ impl Default for Settings {
         Settings {
             spin,
             flow: LitresPerSecond(20_000.0),
+            build: LitresPerSecond(4_000.0),
             viscosity: 0.15,
             wall_friction: 0.5,
             air: true,
             collisions: true,
+            help: true,
             diameter: Metres(DEFAULT_RING.radius.0 * 2.0),
             width: Metres(DEFAULT_RING.half_width.0 * 2.0),
             thrust: avatar::equalized_thrust(standing_gravity(spin, DEFAULT_RING)),
@@ -89,6 +96,7 @@ impl Settings {
 pub enum Dial {
     Spin,
     Flow,
+    Build,
     Viscosity,
     WallFriction,
     Diameter,
@@ -97,9 +105,10 @@ pub enum Dial {
 }
 
 impl Dial {
-    pub const ALL: [Dial; 7] = [
+    pub const ALL: [Dial; 8] = [
         Dial::Spin,
         Dial::Flow,
+        Dial::Build,
         Dial::Viscosity,
         Dial::WallFriction,
         Dial::Diameter,
@@ -107,34 +116,32 @@ impl Dial {
         Dial::Thrust,
     ];
 
-    pub fn key(self) -> KeyCode {
+    /// The key that, held, puts the mouse wheel on the dial. The dials a tool carries have none:
+    /// they are turned with the tool in hand.
+    pub fn key(self) -> Option<KeyCode> {
         match self {
-            Dial::Spin => KeyCode::F1,
-            Dial::Flow => KeyCode::F2,
-            Dial::Viscosity => KeyCode::F3,
-            Dial::WallFriction => KeyCode::F4,
-            Dial::Diameter => KeyCode::F5,
-            Dial::Width => KeyCode::F6,
-            Dial::Thrust => KeyCode::F7,
+            Dial::Spin => Some(KeyCode::F1),
+            Dial::Viscosity => Some(KeyCode::F2),
+            Dial::WallFriction => Some(KeyCode::F3),
+            Dial::Diameter => Some(KeyCode::F4),
+            Dial::Width => Some(KeyCode::F5),
+            Dial::Thrust => Some(KeyCode::F6),
+            Dial::Flow | Dial::Build => None,
         }
     }
 
-    pub fn key_label(self) -> &'static str {
-        match self {
-            Dial::Spin => "F1",
-            Dial::Flow => "F2",
-            Dial::Viscosity => "F3",
-            Dial::WallFriction => "F4",
-            Dial::Diameter => "F5",
-            Dial::Width => "F6",
-            Dial::Thrust => "F7",
-        }
+    /// The dial whose key is held, if one is.
+    pub fn held(keys: &ButtonInput<KeyCode>) -> Option<Dial> {
+        Dial::ALL
+            .into_iter()
+            .find(|dial| dial.key().is_some_and(|key| keys.pressed(key)))
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Dial::Spin => "spin",
             Dial::Flow => "flow",
+            Dial::Build => "build",
             Dial::Viscosity => "viscosity",
             Dial::WallFriction => "wall friction",
             Dial::Diameter => "ring diameter",
@@ -145,7 +152,12 @@ impl Dial {
 
     pub fn min(self) -> f32 {
         match self {
-            Dial::Spin | Dial::Flow | Dial::Viscosity | Dial::WallFriction | Dial::Thrust => 0.0,
+            Dial::Spin
+            | Dial::Flow
+            | Dial::Build
+            | Dial::Viscosity
+            | Dial::WallFriction
+            | Dial::Thrust => 0.0,
             Dial::Diameter => 6.0,
             Dial::Width => 2.0,
         }
@@ -156,7 +168,7 @@ impl Dial {
     pub fn max(self) -> f32 {
         match self {
             Dial::Spin | Dial::Thrust => 999.0,
-            Dial::Flow => 999_000.0,
+            Dial::Flow | Dial::Build => 999_000.0,
             Dial::Viscosity | Dial::WallFriction => 1.0,
             Dial::Diameter | Dial::Width => f32::MAX,
         }
@@ -167,6 +179,7 @@ impl Dial {
         match self {
             Dial::Spin => 0.05,
             Dial::Flow => 5000.0,
+            Dial::Build => 500.0,
             Dial::Viscosity | Dial::WallFriction => 0.05,
             Dial::Diameter | Dial::Width => 1.0,
             Dial::Thrust => 0.5,
@@ -186,6 +199,7 @@ impl Dial {
         match self {
             Dial::Spin => s.spin.0,
             Dial::Flow => s.flow.0,
+            Dial::Build => s.build.0,
             Dial::Viscosity => s.viscosity,
             Dial::WallFriction => s.wall_friction,
             Dial::Diameter => s.diameter.0,
@@ -199,6 +213,7 @@ impl Dial {
         match self {
             Dial::Spin => s.spin = RadiansPerSecond(value),
             Dial::Flow => s.flow = LitresPerSecond(value),
+            Dial::Build => s.build = LitresPerSecond(value),
             Dial::Viscosity => s.viscosity = value,
             Dial::WallFriction => s.wall_friction = value,
             Dial::Diameter => s.diameter = Metres(value),
@@ -219,25 +234,41 @@ impl Dial {
         self.set(s, steps * step);
     }
 
-    pub fn value_text(self, s: &Settings) -> String {
+    /// The dial's value as a number of its unit.
+    pub fn number(self, s: &Settings) -> String {
         let v = self.get(s);
         match self {
-            Dial::Spin => format!(
-                "{v:.3} rad/s ({:.2} g standing)",
-                s.standing_gravity().0 / EARTH_GRAVITY.0
-            ),
-            Dial::Flow => format!("{:.1} m3/s", v / 1000.0),
+            Dial::Spin => format!("{v:.3}"),
+            Dial::Flow | Dial::Build => format!("{:.1}", v / 1000.0),
+            Dial::Thrust => format!("{v:.1}"),
             Dial::Viscosity | Dial::WallFriction => format!("{v:.2}"),
-            Dial::Diameter | Dial::Width => format!("{v:.0} m"),
-            Dial::Thrust => {
-                let standing = s.standing_gravity().0;
-                if standing > 0.01 {
-                    format!("{v:.1} m/s2 ({:.2} g standing)", s.thrust.0 / standing)
-                } else {
-                    format!("{v:.1} m/s2")
-                }
-            }
+            Dial::Diameter | Dial::Width => format!("{v:.0}"),
         }
+    }
+
+    pub fn unit(self) -> &'static str {
+        match self {
+            Dial::Spin => "rad/s",
+            Dial::Flow | Dial::Build => "m3/s",
+            Dial::Viscosity | Dial::WallFriction => "",
+            Dial::Diameter | Dial::Width => "m",
+            Dial::Thrust => "m/s2",
+        }
+    }
+
+    pub fn value_text(self, s: &Settings) -> String {
+        let standing = s.standing_gravity().0;
+        let note = match self {
+            Dial::Spin => format!(" ({:.2} g standing)", standing / EARTH_GRAVITY.0),
+            Dial::Thrust if standing > 0.01 => {
+                format!(" ({:.2} g standing)", s.thrust.0 / standing)
+            }
+            _ => String::new(),
+        };
+        format!("{} {}", self.number(s), self.unit())
+            .trim_end()
+            .to_owned()
+            + &note
     }
 }
 
@@ -245,15 +276,17 @@ impl Dial {
 pub enum Toggle {
     Air,
     Collisions,
+    Help,
 }
 
 impl Toggle {
-    pub const ALL: [Toggle; 2] = [Toggle::Air, Toggle::Collisions];
+    pub const ALL: [Toggle; 3] = [Toggle::Air, Toggle::Collisions, Toggle::Help];
 
     pub fn key(self) -> KeyCode {
         match self {
             Toggle::Air => KeyCode::KeyG,
             Toggle::Collisions => KeyCode::Enter,
+            Toggle::Help => KeyCode::KeyH,
         }
     }
 
@@ -261,6 +294,7 @@ impl Toggle {
         match self {
             Toggle::Air => "G",
             Toggle::Collisions => "Enter",
+            Toggle::Help => "H",
         }
     }
 
@@ -268,6 +302,7 @@ impl Toggle {
         match self {
             Toggle::Air => "air drag",
             Toggle::Collisions => "player collisions",
+            Toggle::Help => "this list",
         }
     }
 
@@ -275,6 +310,7 @@ impl Toggle {
         match self {
             Toggle::Air => s.air,
             Toggle::Collisions => s.collisions,
+            Toggle::Help => s.help,
         }
     }
 
@@ -282,6 +318,7 @@ impl Toggle {
         match self {
             Toggle::Air => s.air = !s.air,
             Toggle::Collisions => s.collisions = !s.collisions,
+            Toggle::Help => s.help = !s.help,
         }
     }
 }

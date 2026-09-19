@@ -74,6 +74,14 @@ const command = async (cmd) => {
     await waitForProgress(async () => (await status()).time, before.time + cmd.seconds - 1e-3, `the simulation to advance ${cmd.seconds} s`);
   }
 };
+const tapKey = async (digit) => {
+  const before = await status();
+  const key = { code: `Digit${digit}`, key: `${digit}`, windowsVirtualKeyCode: 48 + digit };
+  await evaluate("document.querySelector('canvas').focus()");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", ...key });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", ...key });
+  await waitFor(async () => (await status()).frame >= before.frame + 2, `frames after key ${digit}`);
+};
 const screenshot = async (name) => {
   const r = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(out, `${name}.png`), Buffer.from(r.data, "base64"));
@@ -95,6 +103,16 @@ try {
 
   check("stands on the ground under one g", Math.abs(fresh.weight - 1) < 0.05 && fresh.ground_speed < 0.1, `${fresh.weight} g, ${fresh.ground_speed} m/s`);
   await screenshot("standing");
+
+  check("starts with the first tool out", fresh.tool === 0, `${fresh.tool}`);
+  await tapKey(2);
+  const swapped = await status();
+  check("a tool's key brings it out", swapped.tool === 1, `${swapped.tool}`);
+  await screenshot("land-tool");
+  await tapKey(2);
+  const away = await status();
+  check("and puts it away again", away.tool === null, `${away.tool}`);
+  await tapKey(1);
 
   await command({ cmd: "thrust", forward: 1, seconds: 4 });
   await command({ cmd: "advance", seconds: 2 });
@@ -166,7 +184,9 @@ try {
   check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && restored.sculpted === live.sculpted && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, sculpted: [live.sculpted, restored.sculpted], spin: restored.spin }));
   await screenshot("restored");
 
-  await command({ cmd: "sculpt", phi: 2.8, y: 3, radius: 2.0, amount: 0.5 });
+  // where the first hill lies on the resized ring depends on where the eye stood as it was
+  // resized, so the second is told apart by standing taller, wherever it lands
+  await command({ cmd: "sculpt", phi: 2.8, y: 3, radius: 2.0, amount: 1.5 });
   await command({ cmd: "advance", seconds: 0.5 });
   const more = await status();
   const saved = more.saves;
@@ -175,7 +195,7 @@ try {
   await send("Page.reload");
   check("app restarts again", await waitForApp());
   const again = await status();
-  check("a save keeps what was sculpted since the last", more.sculpted > restored.sculpted && again.sculpted === more.sculpted && again.particles === more.particles && Math.abs(again.landscape_max - more.landscape_max) < 1e-4, JSON.stringify({ sculpted: [restored.sculpted, more.sculpted, again.sculpted], land: [more.landscape_max, again.landscape_max], particles: again.particles }));
+  check("a save keeps what was sculpted since the last", more.landscape_max > restored.landscape_max + 0.3 && again.sculpted === more.sculpted && again.particles === more.particles && Math.abs(again.landscape_max - more.landscape_max) < 1e-4, JSON.stringify({ sculpted: [restored.sculpted, more.sculpted, again.sculpted], land: [restored.landscape_max, more.landscape_max, again.landscape_max], particles: again.particles }));
 
   const errors = [...new Set(logs.filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];
   check("no errors in the console", errors.length === 0, errors.join(" | ").slice(0, 1500));

@@ -1,26 +1,22 @@
-//! Mouse and keyboard: pointer lock, piloting the avatar, the dials (hold a key, turn the wheel),
-//! the toggles, the clearing chords, and the mouse buttons that act on the crosshair.
+//! Mouse and keyboard: pointer lock, piloting the avatar, the dials (hold a key, turn the
+//! wheel), the toggles and the clearing chords. The tools take whatever input is left once
+//! these have had theirs.
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::core::fluid::Fluid;
-use crate::core::units::{Metres, MetresPerSecond, PixelsPerSecond};
+use crate::core::units::PixelsPerSecond;
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::drum::GROUND_DEPTH;
 use crate::systems::player::{PilotInput, Player};
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
 use crate::systems::sim::{SimSet, Simulation};
+use crate::systems::tools::ToolInput;
 
-/// Water appears this far in front of the surface the crosshair rests on.
-pub const INJECT_DEPTH: Metres = Metres(1.0);
 /// Mouse speed (pixels per second) at which a turning thruster is asked for full.
 const MOUSE_FULL_SPEED: PixelsPerSecond = PixelsPerSecond(800.0);
-/// The sculpting brush: its radius, the same on a ring of any size, and how fast it raises the
-/// ground.
-pub const BRUSH_SIZE: Metres = Metres(2.0);
-pub const BRUSH_RATE: MetresPerSecond = MetresPerSecond(1.0);
 
 /// Destructive actions, each a digit chorded with Backspace so nothing is lost to a stray key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,12 +74,8 @@ impl ClearAction {
 
 #[derive(Resource, Default)]
 pub struct Controls {
-    /// Pointer lock held: the mouse steers and the buttons act on the crosshair.
+    /// Pointer lock held: the mouse steers, and the tool that is out answers to it.
     pub active: bool,
-    /// The dial whose key is held; the mouse wheel then turns it.
-    pub held_dial: Option<Dial>,
-    /// Litres requested but not yet turned into whole particles.
-    inject_carry: f32,
 }
 
 pub struct ControlsPlugin;
@@ -92,22 +84,27 @@ impl Plugin for ControlsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Controls>().add_systems(
             Update,
-            (pointer_lock, pilot, keys, mouse)
+            (pointer_lock, pilot, keys)
                 .chain()
-                .in_set(SimSet::Command),
+                .in_set(SimSet::Command)
+                .before(ToolInput),
         );
     }
 }
 
+/// The click that takes the controls is used up by taking them: a tool only answers to a
+/// button pressed once they are held.
 fn pointer_lock(
     mut controls: ResMut<Controls>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut aim: ResMut<Aim>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut cursors: Query<&mut CursorOptions>,
 ) {
     let was_active = controls.active;
     if !controls.active && mouse.just_pressed(MouseButton::Left) {
         controls.active = true;
+        mouse.reset(MouseButton::Left);
     }
     if keys.just_pressed(KeyCode::Escape) {
         controls.active = false;
@@ -115,6 +112,7 @@ fn pointer_lock(
     if controls.active && was_active && !web::pointer_locked() {
         controls.active = false;
     }
+    aim.engaged = controls.active;
     if controls.active != was_active {
         for mut cursor in &mut cursors {
             cursor.grab_mode = if controls.active {
@@ -164,19 +162,19 @@ pub fn pilot(
     sim.avatar_input = player.input(pilot);
 }
 
+/// A held dial takes the wheel, and a clearing chord its digit, so neither reaches the tools.
 fn keys(
-    mut controls: ResMut<Controls>,
-    keys: Res<ButtonInput<KeyCode>>,
-    scroll: Res<AccumulatedMouseScroll>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut scroll: ResMut<AccumulatedMouseScroll>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
     mut fluid: ResMut<Fluid>,
 ) {
-    controls.held_dial = Dial::ALL.into_iter().find(|dial| keys.pressed(dial.key()));
-    if let Some(dial) = controls.held_dial
-        && scroll.delta.y != 0.0
-    {
-        dial.adjust(&mut settings, scroll.delta.y.signum() as i32);
+    if let Some(dial) = Dial::held(&keys) {
+        if scroll.delta.y != 0.0 {
+            dial.adjust(&mut settings, scroll.delta.y.signum() as i32);
+        }
+        scroll.delta = Vec2::ZERO;
     }
     for toggle in Toggle::ALL {
         if keys.just_pressed(toggle.key()) {
@@ -192,46 +190,8 @@ fn keys(
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
                 action.apply(&mut settings, &mut sim, &mut fluid);
+                keys.clear_just_pressed(action.key());
             }
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn mouse(
-    mut controls: ResMut<Controls>,
-    time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut aim: ResMut<Aim>,
-    settings: Res<Settings>,
-    mut sim: ResMut<Simulation>,
-    mut fluid: ResMut<Fluid>,
-) {
-    aim.engaged = controls.active;
-    aim.brush = None;
-    if !controls.active {
-        controls.inject_carry = 0.0;
-        return;
-    }
-    let Some(target) = aim.target else {
-        return;
-    };
-    let dt = time.delta_secs();
-    if mouse.pressed(MouseButton::Left) && !mouse.just_pressed(MouseButton::Left) {
-        controls.inject_carry += settings.flow.0 * dt / fluid.resolution().litres_per_particle().0;
-        let count = controls.inject_carry.floor();
-        controls.inject_carry -= count;
-        let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
-        sim.inject(&mut fluid, at.to_array(), count as u32);
-    } else {
-        controls.inject_carry = 0.0;
-    }
-    if mouse.pressed(MouseButton::Right) {
-        let brush = BRUSH_SIZE;
-        aim.brush = Some(brush);
-        let lower = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-        let amount = BRUSH_RATE.0 * dt * if lower { -1.0 } else { 1.0 };
-        sim.sculpt(target.point.to_array(), brush.0 as f64, amount as f64);
     }
 }

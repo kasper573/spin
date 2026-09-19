@@ -1,10 +1,11 @@
 // How light meets a smooth surface, shared by everything that reflects and lets light through:
 // what a ray sees of the scene on screen, found by marching it against the depth of the scene,
 // or of space beyond it; how much of the light a dielectric surface mirrors and how much it
-// passes; and the sun's glint off it.
+// passes; the sun's glint off it; and the light of whatever lamps stand near a point.
 #define_import_path optics
 
-#import bevy_pbr::mesh_view_bindings::{view, lights, view_transmission_texture, view_transmission_sampler}
+#import bevy_pbr::mesh_view_bindings::{view, lights, clustered_lights, view_transmission_texture, view_transmission_sampler}
+#import bevy_pbr::clustered_forward::{view_fragment_cluster_index, unpack_clusterable_object_index_ranges, get_clusterable_object_id}
 #import bevy_pbr::prepass_utils::prepass_depth
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
@@ -67,9 +68,17 @@ fn depth_of(world: vec3<f32>) -> f32 {
     return -(view.view_from_world * vec4(world, 1.0)).z;
 }
 
-/// What a ray from a point sees: the scene where the ray meets it on screen, found by marching
-/// it against the depth of the scene, or else what lies `beyond` the scene.
-fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
+/// Where a ray met the scene on screen, and how much of what is drawn there shows: it fades
+/// out toward the edges of the screen, where the view runs out, and is nothing where the ray
+/// met nothing.
+struct MetOnScreen {
+    uv: vec2<f32>,
+    share: f32,
+}
+
+/// Where a ray from a point meets the scene on screen, found by marching it against the depth
+/// of the scene no further than `reach`.
+fn met_on_screen(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> MetOnScreen {
     // how far the surface itself stands from the eye sets the march: its first step and the
     // thickness it allows the scene are shares of that, so what a wall a kilometre off mirrors
     // is followed as far as what a wall a metre off does, and neither is followed finer than
@@ -80,7 +89,7 @@ fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
     for (var i = 0; i < MARCH_STEPS; i++) {
         let q = origin + dir * t;
         let s = screen_uv(q);
-        if (s.z <= 0.0 || !on_screen(s.xy)) {
+        if (t > reach || s.z <= 0.0 || !on_screen(s.xy)) {
             break;
         }
         let gap = s.z - scene_depth(s.xy);
@@ -102,17 +111,23 @@ fn mirrored(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>) -> vec3<f32> {
                     }
                 }
                 let hit = screen_uv(origin + dir * far);
-                // fade out toward the edges of the screen, where the view runs out
                 let edge = hit.xy * (1.0 - hit.xy);
-                let fade = smoothstep(0.0, 0.02, min(edge.x, edge.y));
-                return mix(beyond, behind(hit.xy), fade);
+                return MetOnScreen(hit.xy, smoothstep(0.0, 0.02, min(edge.x, edge.y)));
             }
             break;
         }
         last = t;
         t *= 1.28;
     }
-    return beyond;
+    return MetOnScreen(vec2(0.0), 0.0);
+}
+
+/// The point of the opaque scene that is drawn at a point of the screen.
+fn scene_at(uv: vec2<f32>) -> vec3<f32> {
+    let coord = view.viewport.xy + uv * view.viewport.zw;
+    let ndc = vec3(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, prepass_depth(vec4(coord, 0.0, 0.0), 0u));
+    let world = view.world_from_clip * vec4(ndc, 1.0);
+    return world.xyz / world.w;
 }
 
 /// Space in a direction of the world, given the turn that takes the world among the stars, as a
@@ -212,10 +227,23 @@ fn ring_seen(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, ground: v
 /// there unless something stands in front of the surface, or the refraction leaves the screen.
 fn seen_through(uv: vec2<f32>, depth_here: f32, exit: vec3<f32>) -> vec3<f32> {
     var s = screen_uv(exit);
-    if (s.z <= 0.0 || !on_screen(s.xy) || scene_depth(s.xy) < depth_here) {
+    if (s.z <= 0.0 || !on_screen(s.xy) || nearest_scene_depth(s.xy) < depth_here) {
         s = vec3(uv, depth_here);
     }
     return behind(s.xy);
+}
+
+/// The nearest the opaque scene comes to the camera round a point of the screen. What is
+/// drawn there is blended from the pixels round it, so something standing in front of any of
+/// them shows in it.
+fn nearest_scene_depth(uv: vec2<f32>) -> f32 {
+    let pixel = 1.0 / view.viewport.zw;
+    var nearest = scene_depth(uv);
+    nearest = min(nearest, scene_depth(uv + vec2(pixel.x, pixel.y)));
+    nearest = min(nearest, scene_depth(uv + vec2(-pixel.x, pixel.y)));
+    nearest = min(nearest, scene_depth(uv + vec2(pixel.x, -pixel.y)));
+    nearest = min(nearest, scene_depth(uv + vec2(-pixel.x, -pixel.y)));
+    return nearest;
 }
 
 /// Schlick's share of light a dielectric mirrors at this angle, given what it mirrors face on.
@@ -256,10 +284,59 @@ fn sun_shadow(i: u32, world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> f32 {
     return fetch_directional_shadow(i, vec4(world, 1.0), n, view_z, pixel);
 }
 
+/// The lamps whose light reaches a point of the world drawn at a pixel, as a stretch of the
+/// list of them: its first, and one past its last.
+fn lamps_near(world: vec3<f32>, pixel: vec2<f32>) -> vec2<u32> {
+    let view_z = (view.view_from_world * vec4(world, 1.0)).z;
+    let near = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pixel, view_z, false));
+    return vec2(near.first_point_light_index_offset, near.first_spot_light_index_offset);
+}
+
+/// One lamp of that list as a point of the world has it: which way its light comes from, and
+/// that light, falling off with the square of how far it has come, before the eye's exposure.
+struct Lamp {
+    toward: vec3<f32>,
+    light: vec3<f32>,
+}
+
+fn lamp_at(listed: u32, world: vec3<f32>) -> Lamp {
+    let lamp = clustered_lights.data[get_clusterable_object_id(listed)];
+    let reach = lamp.position_radius.xyz - world;
+    let far2 = dot(reach, reach);
+    // eased to nothing at the lamp's range, as the lit materials around it have it
+    let ranged = far2 * lamp.color_inverse_square_range.w;
+    let eased = saturate(1.0 - ranged * ranged);
+    let light = lamp.color_inverse_square_range.rgb * (eased * eased / max(far2, 1e-4));
+    return Lamp(reach * inverseSqrt(max(far2, 1e-8)), light);
+}
+
+/// The light the lamps near a point throw on a matte surface there, facing `n`, as the eye is
+/// exposed to it.
+fn lamplight_at(world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
+    let lamps = lamps_near(world, pixel);
+    var light = vec3(0.0);
+    for (var i = lamps.x; i < lamps.y; i++) {
+        let lamp = lamp_at(i, world);
+        light += lamp.light * max(dot(n, lamp.toward), 0.0);
+    }
+    return light * view.exposure;
+}
+
+/// The lamps' glint off a smooth surface at a point, as the eye is exposed to it.
+fn lamp_glint_at(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>, roughness: f32, f0: f32, pixel: vec2<f32>) -> vec3<f32> {
+    let lamps = lamps_near(world, pixel);
+    var light = vec3(0.0);
+    for (var i = lamps.x; i < lamps.y; i++) {
+        let lamp = lamp_at(i, world);
+        light += lamp.light * glint(n, v, lamp.toward, roughness, f0);
+    }
+    return light * view.exposure;
+}
+
 /// The light falling on a matte surface at a point of the world, facing `n`, where the ring
 /// shades it from the suns.
 fn diffuse_light_at(world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
-    var light = bounce();
+    var light = bounce() + lamplight_at(world, n, pixel);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let l = lights.directional_lights[i].direction_to_light;
         let ndl = dot(n, l);

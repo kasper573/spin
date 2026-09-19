@@ -9,7 +9,8 @@
 // what hits takes the sphere's depth and is shaded as the water is.
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
-#import optics::{rotate, mirrored, ring_seen, seen_through, scene_depth, fresnel, glint, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
+#import optics::{rotate, ring_seen, seen_through, scene_depth, fresnel, glint, lamp_glint_at, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
+#import figure::mirrored
 #import ring::{ring_run, ring_up}
 #import ripples::{Carried, carried, waves_carried, noise3}
 #import air::Air
@@ -178,10 +179,7 @@ fn droplet(in: Fragment) -> Shaded {
         return out;
     }
     let reflected = reflect(dir, n);
-    var mirror = ring_seen(water.air, hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb, spread);
-    if (water.ring.z > 0.5) {
-        mirror = mirrored(hit, reflected, mirror);
-    }
+    let mirror = mirrored(hit, reflected, ring_seen(water.air, hit + water.origin.xyz, reflected, water.ring.xy, water.ground.rgb, water.to_stars, water.background.rgb, spread), hit + water.origin.xyz, water.ring.xy, water.ring.z > 0.5);
     // in through the near face, across the drop and out through the far one
     let entered = refract(dir, n, 1.0 / IOR);
     let chord = -2.0 * dot(entered, n) * radius;
@@ -193,6 +191,7 @@ fn droplet(in: Fragment) -> Shaded {
         let l = lights.directional_lights[i].direction_to_light;
         colour += sunlight(i) * glint(n, v, l, DROP_ROUGHNESS, F0) * sun_shadow(i, hit, n, pixel);
     }
+    colour += lamp_glint_at(hit, n, v, DROP_ROUGHNESS, F0, pixel);
     out.colour = vec4(saturated(through_ring_air(colour, water.air, hit + water.origin.xyz, -dir, t, water.ring.xy)), 1.0);
     return out;
 }
@@ -296,14 +295,9 @@ fn surface(in: Fragment) -> vec4<f32> {
         beyond = through_water(water.ground.rgb * light, glow(light), extinction(), dot(reflected, up), distance);
     }
     // from outside the drum the screen shows the far sides of everything the mirror would
-    // show the near sides of, so only the ring itself is mirrored there
-    // from outside the drum the screen shows the far sides of everything the mirror would
     // show the near sides of, and from under water the bed the surface mirrors lies behind
     // the surface itself, so the mirror is only marched across the screen from inside the air
-    var mirror = beyond;
-    if (water.ring.z > 0.5 && !submerged) {
-        mirror = mirrored(in.world_position, reflected, beyond);
-    }
+    var mirror = mirrored(in.world_position, reflected, beyond, site, water.ring.xy, water.ring.z > 0.5 && !submerged);
     var seen: vec3<f32>;
     var f: f32;
     if (!submerged) {
@@ -333,6 +327,7 @@ fn surface(in: Fragment) -> vec4<f32> {
         let l = lights.directional_lights[i].direction_to_light;
         colour += sunlight(i) * glint(n, v, l, roughness, F0) * sun_shadow(i, in.world_position, n, pixel);
     }
+    colour += lamp_glint_at(in.world_position, n, v, roughness, F0, pixel);
 
     // foam: bubbles ride on the flow like the ripples
     let grain = bubble_grain(run, 24.0, footprint);

@@ -6,7 +6,7 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_directional_shadow
-#import optics::{bounce, sunlight, through_ring_air}
+#import optics::{bounce, sunlight, lamplight_at, through_ring_air}
 #import ring::ring_up
 #ifdef DISTANCE_FOG
 // with the eye under water the fog carries the water round it: its colour just under the
@@ -318,8 +318,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         colour += sunlight(i) * albedo / PI * ndl * shadow * through;
     }
-    // the light bounced round the ring comes down through the water too
-    colour += bounce() * albedo * dimmed;
+    // the light bounced round the ring comes down through the water too, and any lamp's
+    colour += (bounce() + lamplight_at(p, n, in.position.xy) / PI) * albedo * dimmed;
     let away = p - view.world_position;
     let reach = length(away);
     let toward = -away / max(reach, 1e-6);

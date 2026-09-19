@@ -8,7 +8,6 @@ use bevy::prelude::*;
 use crate::core::avatar;
 use crate::core::math::mat3mul;
 use crate::core::units::Metres;
-use crate::systems::controls::BRUSH_SIZE;
 use crate::systems::drum::{Drum, PATCH, Place, Round};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
@@ -36,20 +35,21 @@ pub struct AimPoint {
 }
 
 /// The current crosshair target, refreshed every frame before commands run, and what is
-/// drawn there: the outline of the brush being wielded, if one is, and whether the crosshair
-/// is live.
+/// drawn there: the outline of the brush at work, if one is, and whether the crosshair is
+/// live.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
 pub struct Aim {
     pub target: Option<AimPoint>,
     /// The radius of the brush at work on the target, when one is.
     pub brush: Option<Metres>,
-    /// Whether the crosshair is being steered, so its marker is drawn bright.
+    /// Whether the viewer is at the controls: the crosshair is being steered, so its marker
+    /// is drawn bright, and the tool that is out answers to the mouse.
     pub engaged: bool,
 }
 
-/// The marker at rest outlines this share of the brush it would put to work, and every marker
-/// floats this share of its own radius above the surface, clear of it at any size of ring.
-const MARKER_SHARE: f64 = 0.15;
+/// The marker at rest is this big, the same on a ring of any size, and every marker floats
+/// this share of its own radius above the surface, clear of it at any size of ring.
+const MARKER_AT_REST: Metres = Metres(0.3);
 const MARKER_LIFT: f64 = 0.01;
 
 pub struct AimPlugin;
@@ -166,10 +166,7 @@ fn marker(aim: Res<Aim>, sim: Res<Simulation>, viewpoint: Res<Viewpoint>, mut gi
     let Some(target) = aim.target else {
         return;
     };
-    let radius = match aim.brush {
-        Some(brush) => brush.0 as f64,
-        None => BRUSH_SIZE.0 as f64 * MARKER_SHARE,
-    };
+    let radius = aim.brush.unwrap_or(MARKER_AT_REST).0 as f64;
     let colour = if aim.engaged {
         Color::srgba(1.0, 1.0, 1.0, 0.9)
     } else {

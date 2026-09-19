@@ -19,13 +19,13 @@ use game::core::units::{
     EARTH_GRAVITY, KilogramsPerCubicMetre, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
 };
 use game::systems::air::{Air, Suspension};
-use game::systems::controls::BRUSH_SIZE;
 use game::systems::drum::GROUND_DEPTH;
 use game::systems::drum::{Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::Settings;
-use game::systems::sim::{Simulation, standing_spin};
+use game::systems::sim::{Footing, Simulation, standing_spin};
 use game::systems::testing::{self, Headless};
+use game::systems::tools::land_tool::brush;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -191,7 +191,7 @@ fn walking_any_ring_leaves_it_standing() {
             sim.gyros = Gyros::holding(sim.avatar());
             let here = sim.avatar().p;
             sim.resite(here);
-            let brush = BRUSH_SIZE.0 as f64;
+            let brush = brush(Settings::default().build).0 as f64;
             for k in 0..4 {
                 let at = sim
                     .drum
@@ -272,18 +272,23 @@ fn walking_any_ring_leaves_it_standing() {
             testing::run(&mut app, Seconds(0.5));
             waited += 0.5;
             let footing = app.world().resource::<Simulation>().footing();
-            if !footing.airborne && footing.ground_speed < 0.5 {
+            if standing(footing) && footing.ground_speed < 0.5 {
                 break;
             }
         }
         let footing = app.world().resource::<Simulation>().footing();
-        if footing.airborne || !(0.3..3.0).contains(&footing.weight) {
+        if !standing(footing) {
             wrong.push(format!(
                 "{diameter} m: after {waited} s the walker is {footing:?} rather than standing at one g"
             ));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// On the ground and bearing on it: a touch between two bounces bears nothing yet.
+fn standing(footing: Footing) -> bool {
+    !footing.airborne && (0.3..3.0).contains(&footing.weight)
 }
 
 /// The drum is a sealed vessel: nothing that is in it gets out of it, however hard it is thrown
@@ -628,7 +633,9 @@ impl Hunt {
                         .clamp(-half_width, half_width),
                 };
                 let raise = case.hills * rng.random_range(-1.0..1.0);
-                sim.drum.landscape.sculpt(at, BRUSH_SIZE.0 as f64, raise);
+                sim.drum
+                    .landscape
+                    .sculpt(at, brush(Settings::default().build).0 as f64, raise);
             }
         }
         if case.sea > 0.0 {

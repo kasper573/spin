@@ -24,11 +24,11 @@ bench:
 
 # A short first-person video of the avatar walking and jumping on the ring, rendered headless
 # into target/record/ and stitched by ffmpeg with the thrusters' voices and the avatar's readouts
-# as subtitles.
+# as subtitles, which keep to the right of the HUD's list.
 record script="":
     cargo run --release -p game --bin record {{script}}
     ffmpeg -y -loglevel error -framerate 30 -i target/record/frame_%04d.png -i target/record/thrusters.wav \
-      -vf "scale=1280:720:flags=lanczos,subtitles=target/record/readout.srt:force_style='FontName=DejaVu Sans Mono,FontSize=14,Alignment=7,MarginL=16,MarginV=12,Outline=1'" \
+      -vf "scale=1280:720:flags=lanczos,subtitles=target/record/readout.srt:force_style='FontName=DejaVu Sans Mono,FontSize=10,Alignment=7,MarginL=185,MarginR=6,MarginV=8,Outline=1'" \
       -c:v libx264 -pix_fmt yuv420p -crf 20 -c:a aac -shortest target/record/ring-walk.mp4
     @echo "wrote target/record/ring-walk.mp4"
 

@@ -6,7 +6,6 @@ use game::core::fluid::{Fluid, Resolution};
 use game::core::math::{mat3mul, quat_mul};
 use game::core::units::{Metres, Seconds};
 use game::systems::aim::{self, Aim, AimPoint};
-use game::systems::controls::{BRUSH_RATE, BRUSH_SIZE, INJECT_DEPTH};
 use game::systems::drum::Ring;
 use game::systems::drum::{Drum, GROUND_DEPTH};
 use game::systems::player::PlayerCamera;
@@ -15,6 +14,8 @@ use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::sim::standing_spin;
 use game::systems::testing;
+use game::systems::tools::land_tool::brush;
+use game::systems::tools::water_tool::INJECT_DEPTH;
 
 /// The outline of a brush on uneven ground lies on the ground, just above it, everywhere
 /// round it: every point is the brush's radius from its centre along the ground and at the
@@ -139,7 +140,7 @@ fn what_the_crosshair_points_at_is_drawn_under_it() {
             let Some(hit) = aim::cast(eye, dir, &sim.drum) else {
                 continue;
             };
-            let (radius, lift) = (BRUSH_SIZE.0 as f64, 0.02);
+            let (radius, lift) = (brush(Settings::default().build).0 as f64, 0.02);
             let Some(crosshair) = on_screen((eye + dir * eye.distance(hit.point)).to_array())
             else {
                 continue;
@@ -171,10 +172,10 @@ fn what_the_crosshair_points_at_is_drawn_under_it() {
     }
 }
 
-/// Whatever size the ring is, the mouse works what the crosshair rests on the same way: the
-/// brush, a few metres across on every ring, raises the ground under the crosshair as fast,
-/// and the hose puts the same water down where it points, as fine and as many particles a
-/// second.
+/// Whatever size the ring is, the tools work what the crosshair rests on the same way: the
+/// land tool's brush, a few metres across on every ring, raises the ground under the
+/// crosshair as fast, and the water tool puts the same water down where it points, as fine
+/// and as many particles a second.
 #[test]
 fn the_crosshair_works_the_ground_alike_on_a_ring_of_any_size() {
     let frame = 1.0 / 60.0;
@@ -216,16 +217,11 @@ fn the_crosshair_works_the_ground_alike_on_a_ring_of_any_size() {
             "on a ring of radius {radius} m the crosshair rests {distance} m off"
         );
         let before = sim.drum.landscape.max_height();
-        for _ in 0..60 {
-            let target = app.world().resource::<Aim>().target.expect("aimed");
-            let mut sim = app.world_mut().resource_mut::<Simulation>();
-            sim.sculpt(
-                target.point.to_array(),
-                BRUSH_SIZE.0 as f64,
-                (BRUSH_RATE.0 * frame) as f64,
-            );
-            testing::run(&mut app, Seconds(frame));
-        }
+        testing::tap(&mut app, KeyCode::Digit2);
+        testing::button(&mut app, MouseButton::Left, true);
+        testing::run(&mut app, Seconds(1.0));
+        testing::button(&mut app, MouseButton::Left, false);
+        testing::run(&mut app, Seconds(frame));
         let sim = app.world().resource::<Simulation>();
         let mound = (sim.drum.landscape.max_height() - before) as f64;
         mounds.push(mound);
@@ -239,15 +235,16 @@ fn the_crosshair_works_the_ground_alike_on_a_ring_of_any_size() {
         let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
         let flow = app.world().resource::<Settings>().flow.0;
         let count = (flow * 0.5 / Resolution::FINEST.litres_per_particle().0).round() as u32;
-        let added = app
-            .world_mut()
-            .resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world
-                    .resource_mut::<Simulation>()
-                    .inject(&mut fluid, at.to_array(), count)
-            });
+        testing::tap(&mut app, KeyCode::Digit1);
+        testing::button(&mut app, MouseButton::Left, true);
+        testing::run(&mut app, Seconds(0.5));
+        testing::button(&mut app, MouseButton::Left, false);
+        let added = app.world().resource::<Fluid>().len() as u32;
         testing::run(&mut app, Seconds(frame));
-        assert_eq!(added, count, "on a ring of radius {radius} m");
+        assert!(
+            added.abs_diff(count) <= 1,
+            "on a ring of radius {radius} m half a second of the hose put down {added} particles, not {count}"
+        );
         assert_eq!(
             app.world().resource::<Fluid>().resolution(),
             Resolution::FINEST,
