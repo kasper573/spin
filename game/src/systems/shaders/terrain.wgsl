@@ -7,7 +7,7 @@
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import optics::{bounce, sunlight, lamplight_at, through_ring_air}
-#import ring::ring_up
+#import ring::{ring_up, short_way_round}
 #ifdef DISTANCE_FOG
 // with the eye under water the fog carries the water round it: its colour just under the
 // surface, and what a metre of it takes out of light crossing it
@@ -110,7 +110,7 @@ fn column_at(round: i32, along: i32) -> vec4<f32> {
     var r = round;
     let n = i32(terrain.clock.w);
     if (n > 0) {
-        r = ((r + n / 2) % n + n) % n - n / 2;
+        r = short_way_round(r, n);
     }
     if (r < -KEYED_ROUND || r >= KEYED_ROUND || along < -KEYED_ALONG || along >= KEYED_ALONG) {
         return vec4(0.0);
@@ -218,13 +218,14 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
 }
 
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @location(0) vec4<f32> {
     let p = in.world_position.xyz;
-    // the ground has a face toward the eye whichever way it was wound; seen from below,
-    // through the glass, it is the dirt pressed against the glass
+    // the ground is one sheet wound the same way throughout, so which face of it is seen is
+    // a matter of the face and not of the normal it is shaded with, which leans over every
+    // crest; seen from below, through the glass, it is the dirt pressed against the glass
     var n = normalize(in.world_normal);
     let to_eye = view.world_position - p;
-    let underside = dot(n, to_eye) < 0.0;
+    let underside = !from_above;
     if (underside) {
         n = -n;
     }

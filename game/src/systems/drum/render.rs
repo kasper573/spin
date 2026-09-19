@@ -776,15 +776,17 @@ fn rim_mesh(drum: &Drum, columns: &[f64], side: f64) -> Mesh {
 }
 
 /// The raised parts of the landscape over the columns and rows, plus skirts down to the glass
-/// along both caps so raised ground reads as solid from the side. Bare glass gets no
-/// triangles, and nothing is placed on the glass itself, which would fight it for depth. The
-/// tiles round and along and the height above the glass ride along as attributes.
+/// along both caps so raised ground reads as solid from the side. A skirt hangs from an edge of
+/// its own rather than from the ground's, so the ground is shaded to its very edge by its own
+/// slope and not by the drop beside it. Bare glass gets no triangles, and nothing is placed on
+/// the glass itself, which would fight it for depth. The tiles round and along and the height
+/// above the glass ride along as attributes.
 fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh {
     let landscape = &drum.landscape;
     let ring = drum.ring;
     let radius = ring.radius.0 as f64;
     let tile = tile_round(ring);
-    let across = rows.len() + 2;
+    let across = rows.len() + 4;
     let mut positions = Vec::with_capacity(columns.len() * across);
     let mut uvs = Vec::with_capacity(columns.len() * across);
     let mut heights = Vec::with_capacity(columns.len() * across);
@@ -811,20 +813,27 @@ fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh
             heights.push([height as f32, 0.0]);
             raised.push(height > 0.0);
         };
-        push(0.0, rows[0]);
-        for &y in rows {
+        let ground = |y: f64| {
             let at = Place {
                 round,
                 along: y + drum.site.y,
             };
-            push(landscape.sample(at).0, y);
+            landscape.sample(at).0
+        };
+        let (first, last) = (rows[0], rows[rows.len() - 1]);
+        push(0.0, first);
+        push(ground(first), first);
+        for &y in rows {
+            push(ground(y), y);
         }
-        push(0.0, rows[rows.len() - 1]);
+        push(ground(last), last);
+        push(0.0, last);
     }
-    let raised = |i: usize, j: usize| raised[i * across + j.clamp(1, rows.len())];
+    let raised = |i: usize, j: usize| raised[i * across + j.clamp(1, across - 2)];
     let mut indices = Vec::with_capacity(columns.len() * (across - 1) * 6);
     grid_indices(&mut indices, columns.len(), across, 0, |i, j| {
-        raised(i, j) || raised(i + 1, j) || raised(i, j + 1) || raised(i + 1, j + 1)
+        let seam = j == 1 || j == across - 3;
+        !seam && (raised(i, j) || raised(i + 1, j) || raised(i, j + 1) || raised(i + 1, j + 1))
     });
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,

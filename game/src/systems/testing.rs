@@ -531,17 +531,20 @@ pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
     app.world().resource::<Fluid>().particles().collect()
 }
 
-/// Point the player's camera at an offscreen image of this size, for reading frames back.
-/// Draw what the player's camera sees into this image from now on.
+/// Draw what the player's camera sees into this image from now on. Bevy sizes a camera to
+/// what it draws into when that changes size or the projection changes, not when the camera is
+/// turned to something else, so the projection is marked as changed along with it.
 pub fn draw_into(app: &mut App, image: &Handle<Image>) {
     let mut cameras = app
         .world_mut()
-        .query_filtered::<&mut RenderTarget, With<PlayerCamera>>();
-    for mut target in cameras.iter_mut(app.world_mut()) {
+        .query_filtered::<(&mut RenderTarget, &mut Projection), With<PlayerCamera>>();
+    for (mut target, mut projection) in cameras.iter_mut(app.world_mut()) {
         *target = RenderTarget::from(image.clone());
+        projection.set_changed();
     }
 }
 
+/// Point the player's camera at an offscreen image of this size, for reading frames back.
 pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> {
     app.update();
     let mut image = Image::new_fill(

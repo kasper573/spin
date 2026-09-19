@@ -4,6 +4,7 @@
 // from the water's site, so that the ground can be lit by what sunlight comes down to it
 // through the water; and how far from its site the water reaches, which sets how fine it may be.
 #import vessel::{drum, wall}
+#import ring::short_way_round
 
 struct Survey {
     count: u32,
@@ -64,8 +65,7 @@ fn survey_columns(
     }
     var round = i32(floor(drum.radius * atan2(p.z, drum.radius + p.x) * survey.per_unit));
     if (survey.columns_round > 0u) {
-        let n = i32(survey.columns_round);
-        round = ((round + n / 2) % n + n) % n - n / 2;
+        round = short_way_round(round, i32(survey.columns_round));
     }
     let along = i32(floor(p.y));
     if (round < -KEYED_ROUND || round >= KEYED_ROUND || along < -KEYED_ALONG || along >= KEYED_ALONG) {

@@ -131,19 +131,35 @@ fn fill_half(app: &mut App) {
     testing::run(app, Seconds(40.0));
 }
 
-/// Two ridges across the ring with a pool laid in the valley between them, and left to settle.
-fn pool(app: &mut App) {
-    {
-        let mut sim = app.world_mut().resource_mut::<Simulation>();
-        for crest in [8.0, -12.0] {
-            for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
-                let at = place(&sim, crest, y);
-                for _ in 0..20 {
-                    sim.drum.landscape.sculpt(at, 8.0, 1.4 / 20.0);
-                }
+/// A third of the wheel under water, held there by a ridge across the ring at either end of it,
+/// and left to settle.
+fn fill_a_third(app: &mut App) {
+    ridges(app, [-2.0, 24.0]);
+    for k in 0..15 {
+        let arc = 4.0 + (k % 5) as f64 * 3.5;
+        let y = (k / 5) as f64 * 3.0 - 3.0;
+        inject(app, [arc, y, 1.8], 500);
+        testing::run(app, Seconds(1.0));
+    }
+    testing::run(app, Seconds(20.0));
+}
+
+/// Ridges raised across the ring, with their crests this far round it.
+fn ridges(app: &mut App, crests: [f64; 2]) {
+    let mut sim = app.world_mut().resource_mut::<Simulation>();
+    for crest in crests {
+        for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
+            let at = place(&sim, crest, y);
+            for _ in 0..20 {
+                sim.drum.landscape.sculpt(at, 8.0, 1.4 / 20.0);
             }
         }
     }
+}
+
+/// Two ridges across the ring with a pool laid in the valley between them, and left to settle.
+fn pool(app: &mut App) {
+    ridges(app, [8.0, -12.0]);
     for k in 0..15 {
         let arc = -1.5 - (k % 3) as f64 * 2.5;
         let y = (k / 3) as f64 * 1.5 - 3.0;
@@ -210,6 +226,12 @@ impl Sight {
         }
     }
 
+    /// Take all the water out of the ring.
+    fn empty(&mut self) {
+        self.app.world_mut().resource_mut::<Fluid>().clear();
+        testing::run(&mut self.app, Seconds(0.1));
+    }
+
     fn shown(&mut self, shown: bool) {
         let mut query = self
             .app
@@ -267,8 +289,9 @@ struct View {
     changed: f64,
     /// The mean colour of the water where it changed the frame, out of 255.
     water: [f64; 3],
-    /// The frame itself, with the water in it.
+    /// The frame itself, with the water in it, and with it hidden.
     pixels: Vec<u8>,
+    hidden: Vec<u8>,
 }
 
 impl View {
@@ -290,6 +313,7 @@ impl View {
             changed: changed as f64 / (WIDTH * HEIGHT) as f64,
             water: sum.map(|s| s / n),
             pixels: with.to_vec(),
+            hidden: without.to_vec(),
         }
     }
 
@@ -353,6 +377,137 @@ impl View {
             self.water
         );
         self
+    }
+}
+
+/// How green a pixel is, as green's share of its light, or nothing where it is too dark to say.
+fn greenness(pixel: &[u8]) -> Option<f64> {
+    let light: f64 = pixel[..3].iter().map(|&c| c as f64).sum();
+    (light > 60.0).then(|| pixel[1] as f64 / light)
+}
+
+/// The share of the frame where the ground shows as the water's bed with no water drawn over
+/// it: where it has lost the green it has in the same sight of the ring dry, though the water
+/// changes nothing at all there, however clear it may be. The water is kept a little clear of
+/// the glass, which leaves a sliver of wet ground bare along it, so only ground bare for
+/// `SLIVER` pixels every way round counts.
+fn bare_bed(view: &View, dry: &View) -> f64 {
+    const SLIVER: usize = 4;
+    let (width, height) = (WIDTH as usize, HEIGHT as usize);
+    let bare: Vec<bool> = view
+        .pixels
+        .chunks_exact(4)
+        .zip(view.hidden.chunks_exact(4))
+        .zip(dry.hidden.chunks_exact(4))
+        .map(|((with, hidden), dry)| {
+            let watered = (0..3).any(|c| (with[c] as i32 - hidden[c] as i32).abs() > 2);
+            let bedded = matches!(
+                (greenness(hidden), greenness(dry)),
+                (Some(wet), Some(dry)) if dry - wet > 0.08
+            );
+            bedded && !watered
+        })
+        .collect();
+    let wide = (SLIVER..height - SLIVER)
+        .flat_map(|y| (SLIVER..width - SLIVER).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            (y - SLIVER..=y + SLIVER)
+                .all(|v| (x - SLIVER..=x + SLIVER).all(|u| bare[v * width + u]))
+        })
+        .count();
+    wide as f64 / (width * height) as f64
+}
+
+/// The share of the frame that shows the ground's dirt: red over green over blue.
+fn dirt(view: &View) -> f64 {
+    let dirt = view
+        .hidden
+        .chunks_exact(4)
+        .filter(|p| {
+            p[0] > 60 && p[0] as f64 > 1.15 * p[1] as f64 && p[1] as f64 > 1.3 * p[2] as f64
+        })
+        .count();
+    dirt as f64 / (WIDTH * HEIGHT) as f64
+}
+
+/// Where a viewer outside the near end of the ring stands, `aside` metres round the ring from
+/// where the water was laid, looking in through the glass at the ground on the far side.
+fn from_outside(aside: f64) -> ([f64; 3], [f64; 3]) {
+    ([aside - 9.0, 17.0, 8.0], [aside + 8.0, -6.0, 2.0])
+}
+
+/// The ground must show as the water's bed under the water and nowhere else, all the way round
+/// the ring, for a viewer standing still outside it.
+#[test]
+#[ignore = "wants a GPU"]
+fn the_bed_lies_under_the_water_for_a_viewer_standing_outside() {
+    let mut sight = Sight::new("bed_still", fill_a_third);
+    let (eye, at) = from_outside(0.0);
+    let views: Vec<View> = (0..10)
+        .map(|second| sight.view(&format!("second_{second}"), eye, at, true))
+        .collect();
+    sight.empty();
+    let dry = sight.view("dry", eye, at, true);
+    for view in &views {
+        view.seen(0.1);
+        let bare = bare_bed(view, &dry);
+        assert!(
+            bare < 0.002,
+            "{}: {:.2}% of the frame is bed with no water over it",
+            view.name,
+            bare * 100.0
+        );
+    }
+}
+
+/// The same for a viewer moving from side to side, whose site on the ring moves with them.
+#[test]
+#[ignore = "wants a GPU"]
+fn the_bed_lies_under_the_water_for_a_viewer_moving_outside() {
+    let mut sight = Sight::new("bed_moving", fill_a_third);
+    let asides: Vec<f64> = (0..12).map(|k| (k as f64 * 0.7).sin() * 9.0).collect();
+    let views: Vec<View> = asides
+        .iter()
+        .enumerate()
+        .map(|(k, &aside)| {
+            let (eye, at) = from_outside(aside);
+            sight.view(&format!("aside_{k}"), eye, at, true)
+        })
+        .collect();
+    sight.empty();
+    for (k, (view, &aside)) in views.iter().zip(&asides).enumerate() {
+        let (eye, at) = from_outside(aside);
+        let dry = sight.view(&format!("dry_{k}"), eye, at, true);
+        view.seen(0.05);
+        let bare = bare_bed(view, &dry);
+        assert!(
+            bare < 0.002,
+            "{}: {:.2}% of the frame is bed with no water over it",
+            view.name,
+            bare * 100.0
+        );
+    }
+}
+
+/// Flat ground shows its grass right up to the glass at either end, from wherever over it the
+/// viewer stands: its dirt is only ever seen from the side or from below.
+#[test]
+#[ignore = "wants a GPU"]
+fn flat_ground_shows_no_dirt_from_over_it() {
+    let mut sight = Sight::new("edges", |_| {});
+    for (k, aside) in [0.0, 3.0, 9.0, -6.0].into_iter().enumerate() {
+        for (end, toward) in [("far", 1.0), ("near", -1.0)] {
+            let eye = [aside, -3.0 * toward, 1.7];
+            let at = [aside + 6.0, 6.0 * toward, 0.0];
+            let view = sight.view(&format!("{end}_{k}"), eye, at, true);
+            let dirt = dirt(&view);
+            assert!(
+                dirt < 0.0005,
+                "{}: {:.2}% of the frame is dirt",
+                view.name,
+                dirt * 100.0
+            );
+        }
     }
 }
 

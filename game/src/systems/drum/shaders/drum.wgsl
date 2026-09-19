@@ -5,6 +5,7 @@
 // coordinates without forming the radius squared or any sum it would swamp, so it holds on a
 // ring of any size. Mirrors `Drum` on the CPU.
 #define_import_path vessel
+#import ring::short_way_round
 
 struct DrumUniform {
     // the drum's spin and its rate of change, per second of the water's clock
@@ -105,8 +106,7 @@ fn patch_slot(round: i32, along: i32) -> i32 {
 fn patch_of(cell: i32, row: i32) -> i32 {
     var round = cell >> 5u;
     if (drum.patches_round > 0u) {
-        let n = i32(drum.patches_round);
-        round = ((round + n / 2) % n + n) % n - n / 2;
+        round = short_way_round(round, i32(drum.patches_round));
     }
     return patch_slot(round, row >> 5u);
 }

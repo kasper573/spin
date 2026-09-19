@@ -55,6 +55,18 @@ fn ring_up(at: vec3<f32>, radius: f32) -> vec3<f32> {
     return -normalize(vec3(radius + at.x, 0.0, at.z));
 }
 
+/// Which of the `n` things round the ring the `i`th is, counted the short way from the first.
+/// A negative number is brought up by whole turns before its remainder is taken: GPUs do not
+/// agree on what is left over of a negative whole number divided, and some take it for the
+/// unsigned number with the same bits.
+fn short_way_round(i: i32, n: i32) -> i32 {
+    var turned = i + n / 2;
+    if (turned < 0) {
+        turned += (n - 1 - turned) / n * n;
+    }
+    return turned % n - n / 2;
+}
+
 /// Whether a sun reaches a point inside the ring: its light comes in through a cap, so the way
 /// toward it must leave the ring's width before it crosses the ring.
 fn sun_reaches(at: vec3<f32>, to_sun: vec3<f32>, ring: vec2<f32>) -> bool {
