@@ -3,6 +3,7 @@
 //! viewer: everything near the viewer then has small coordinates however far the wheel
 //! reaches, and the wheel stands still while the sky turns.
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -27,10 +28,9 @@ use bevy::shader::{Shader, ShaderRef};
 
 use crate::core::avatar;
 use crate::core::fluid::Fluid;
-use crate::core::math::Vec3d;
-use crate::core::rigid::Body;
+use crate::core::math::{Quatd, Vec3d};
 use crate::systems::air::{Air, AirUniform};
-use crate::systems::drum::{Ring, bed_albedo, slack};
+use crate::systems::drum::{Drum, Ring, Site, SiteFrame, bed_albedo, slack};
 use crate::systems::player::PlayerCamera;
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
@@ -59,7 +59,9 @@ pub fn sunlight() -> Vec3 {
 const BLOOM: f32 = 0.06;
 /// Each cascade of the sun's shadow map is this many texels across.
 const SHADOW_MAP: usize = 2048;
-/// The projection itself has no far plane; this only bounds what is worth culling.
+/// Nothing nearer the eye than this is seen, and the projection itself has no far plane: this
+/// only bounds what is worth culling.
+pub const NEAR: f32 = 0.1;
 const FAR: f32 = 1e15;
 /// The viewer is never taken to be closer to the wheel's wall than this when choosing how
 /// finely to draw it.
@@ -99,14 +101,93 @@ impl Viewpoint {
         Transform::from_translation(self.local(p))
     }
 
-    /// The camera at the hull's eye, looking straight out of it.
-    pub fn view(&self, hull: &Body) -> Transform {
-        let q = hull.q;
+    /// The camera at an eye turned so, looking straight out of it.
+    pub fn view(&self, (eye, q): (Vec3d, Quatd)) -> Transform {
         Transform {
-            translation: self.local(avatar::eye(hull)),
+            translation: self.local(eye),
             rotation: Quat::from_xyzw(q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32),
             scale: Vec3::ONE,
         }
+    }
+}
+
+/// How many places the ring is seen from at once: the viewer's own, and the far side of each
+/// of a pair of portals.
+pub const VANTAGES: usize = 3;
+
+/// A place the ring is seen from. Everything drawn for it is drawn in the frame about a site
+/// of its own on the wall and about a point of its own in that frame, so that what is near it
+/// is drawn exactly however far it is from the viewer, and is seen by its own camera only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vantage {
+    pub frame: SiteFrame,
+    pub viewpoint: Viewpoint,
+    pub sky: Sky,
+    /// Whether what looks from here looks from inside the drum, and from under its water.
+    pub enclosed: bool,
+    pub submerged: bool,
+}
+
+impl Vantage {
+    /// A vantage about a site, with `origin` a point of the drum's frame.
+    pub fn about(drum: &Drum, site: Site, origin: Vec3d, standoff: f64) -> Vantage {
+        let frame = drum.frame_at(site);
+        let angle = site.phi - drum.angle.0;
+        let rotation = Quat::from_rotation_y(angle.rem_euclid(std::f64::consts::TAU) as f32);
+        Vantage {
+            frame,
+            viewpoint: Viewpoint {
+                origin: frame.point(origin),
+                standoff,
+            },
+            sky: Sky {
+                rotation,
+                sun: rotation * SUN_DIRECTION,
+            },
+            enclosed: drum.encloses(origin),
+            submerged: false,
+        }
+    }
+
+    /// A point of the drum's frame as this vantage's renderer sees it.
+    pub fn local(&self, p: Vec3d) -> Vec3 {
+        self.viewpoint.local(self.frame.point(p))
+    }
+
+    /// The same exactly, and the point of the drum's frame that the renderer sees so.
+    pub fn drawn(&self, p: Vec3d) -> Vec3d {
+        let (p, o) = (self.frame.point(p), self.viewpoint.origin);
+        [p[0] - o[0], p[1] - o[1], p[2] - o[2]]
+    }
+
+    pub fn drawn_back(&self, x: Vec3d) -> Vec3d {
+        let o = self.viewpoint.origin;
+        self.frame
+            .point_back([x[0] + o[0], x[1] + o[1], x[2] + o[2]])
+    }
+
+    /// Where something at a point of the drum's frame, turned so, is drawn.
+    pub fn pose(&self, p: Vec3d, q: Quatd) -> Transform {
+        let q = self.frame.attitude(q);
+        Transform {
+            translation: self.local(p),
+            rotation: Quat::from_xyzw(q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32),
+            scale: Vec3::ONE,
+        }
+    }
+}
+
+/// The places the ring is seen from this frame: the viewer's own first, which is always there.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct Vantages(pub [Option<Vantage>; VANTAGES]);
+
+/// Which vantage something is drawn for, which is the render layer it is drawn on.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeenFrom(pub usize);
+
+impl SeenFrom {
+    pub fn layers(self) -> RenderLayers {
+        RenderLayers::layer(self.0)
     }
 }
 
@@ -127,6 +208,19 @@ impl Default for Sky {
     }
 }
 
+/// The lines drawn for what is seen beyond each mouth, since a group of lines is drawn on one
+/// set of layers: the default group is the viewer's own.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct LinesBeyondBlue;
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct LinesBeyondOrange;
+
+/// Whatever settles the frame's vantages runs in this set, after everything that reads the
+/// stepped simulation may, and what tells the scenery where it is seen from runs after it.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SettleVantages;
+
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -136,6 +230,9 @@ impl Plugin for ScenePlugin {
             AutoExposurePlugin,
         ))
         .init_resource::<Viewpoint>()
+        .init_resource::<Vantages>()
+        .insert_gizmo_config(LinesBeyondBlue, lines_seen_from(SeenFrom(1)))
+        .insert_gizmo_config(LinesBeyondOrange, lines_seen_from(SeenFrom(2)))
         .init_resource::<Sky>()
         .init_resource::<Air>()
         .insert_resource(ClearColor(SPACE))
@@ -147,7 +244,18 @@ impl Plugin for ScenePlugin {
         .insert_resource(DirectionalLightShadowMap { size: SHADOW_MAP })
         .add_systems(Startup, (load_shared, spawn))
         .add_systems(Update, locate.before(SimSet::Command))
-        .add_systems(Update, (turn_sky, shade, bounce).in_set(SimSet::Observe));
+        .configure_sets(Update, SettleVantages.in_set(SimSet::Observe))
+        .add_systems(
+            Update,
+            (turn_sky.after(SettleVantages), shade, bounce).in_set(SimSet::Observe),
+        );
+    }
+}
+
+fn lines_seen_from(seen: SeenFrom) -> GizmoConfig {
+    GizmoConfig {
+        render_layers: seen.layers(),
+        ..default()
     }
 }
 
@@ -177,11 +285,15 @@ fn bounce(
     ambient.color = Color::linear_rgb(colour.x, colour.y, colour.z);
 }
 
-/// Follow the avatar, and move the site when the viewer has gone far enough from it, come
+/// Follow the viewer, and move the site when the viewer has gone far enough from it, come
 /// much closer to the wall than the wheel was drawn for, or gone much farther from it.
-pub fn locate(mut sim: ResMut<Simulation>, mut viewpoint: ResMut<Viewpoint>) {
+pub fn locate(
+    mut sim: ResMut<Simulation>,
+    mut viewpoint: ResMut<Viewpoint>,
+    mut vantages: ResMut<Vantages>,
+) {
     let ring = sim.drum.ring;
-    let p = sim.avatar().p;
+    let p = sim.viewer();
     let standoff = sim.drum.height_above_glass(p).abs().max(NEAREST);
     let slack = slack(ring, viewpoint.standoff) / 2.0;
     let moved = p[2].abs() > slack || p[1].abs() > slack;
@@ -191,7 +303,13 @@ pub fn locate(mut sim: ResMut<Simulation>, mut viewpoint: ResMut<Viewpoint>) {
         sim.resite(p);
         viewpoint.standoff = standoff;
     }
-    viewpoint.origin = sim.avatar().p;
+    viewpoint.origin = sim.viewer();
+    let drum = &sim.drum;
+    vantages.0[0] = Some(Vantage {
+        enclosed: drum.encloses(sim.avatar().p),
+        submerged: sim.submerged(),
+        ..Vantage::about(drum, drum.site, viewpoint.origin, viewpoint.standoff)
+    });
 }
 
 /// The stars and the sun turn the other way from the drum.
@@ -199,32 +317,39 @@ pub fn locate(mut sim: ResMut<Simulation>, mut viewpoint: ResMut<Viewpoint>) {
 fn turn_sky(
     sim: Res<Simulation>,
     air: Res<Air>,
-    viewpoint: Res<Viewpoint>,
+    vantages: Res<Vantages>,
     mut sky: ResMut<Sky>,
     mut materials: ResMut<Assets<StarsMaterial>>,
     mut stars: Query<
-        (&MeshMaterial3d<StarsMaterial>, &mut Transform),
+        (&SeenFrom, &MeshMaterial3d<StarsMaterial>, &mut Transform),
         (With<StarSphere>, Without<SunLight>),
     >,
-    mut suns: Query<(&SunLight, &mut Transform), Without<StarSphere>>,
+    mut suns: Query<(&SeenFrom, &SunLight, &mut Transform), Without<StarSphere>>,
 ) {
-    let angle = sim.drum.site.phi - sim.drum.angle.0;
-    sky.rotation = Quat::from_rotation_y(angle.rem_euclid(std::f64::consts::TAU) as f32);
-    sky.sun = sky.rotation * SUN_DIRECTION;
+    if let Some(own) = vantages.0[0] {
+        *sky = own.sky;
+    }
     let ring = sim.drum.ring;
-    let [x, y, z] = viewpoint.origin;
-    for (material, mut transform) in &mut stars {
-        transform.rotation = sky.rotation;
+    for (seen, material, mut transform) in &mut stars {
+        let Some(vantage) = vantages.0[seen.0] else {
+            continue;
+        };
+        transform.rotation = vantage.sky.rotation;
         if let Some(mut material) = materials.get_mut(&material.0) {
             material.air = air.uniform(sim.drum.spin);
-            let to_stars = sky.rotation.inverse();
+            let to_stars = vantage.sky.rotation.inverse();
             material.to_stars = Vec4::new(to_stars.x, to_stars.y, to_stars.z, to_stars.w);
-            material.origin = Vec4::new(x as f32, (y + sim.drum.site.y) as f32, z as f32, 0.0);
+            let [x, y, z] = vantage.viewpoint.origin;
+            let along = y + vantage.frame.site.y;
+            material.origin = Vec4::new(x as f32, along as f32, z as f32, 0.0);
             material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
         }
     }
-    for (SunLight(direction), mut transform) in &mut suns {
-        *transform = Transform::default().looking_to(-(sky.rotation * *direction), Vec3::Y);
+    for (seen, SunLight(direction), mut transform) in &mut suns {
+        if let Some(vantage) = vantages.0[seen.0] {
+            *transform =
+                Transform::default().looking_to(-(vantage.sky.rotation * *direction), Vec3::Y);
+        }
     }
 }
 
@@ -300,10 +425,10 @@ struct StarSphere;
 /// The shader modules the materials share, kept loaded: space, for the stars and whatever
 /// reflects them; the ring as a shape rays are cast against; the optics of smooth surfaces,
 /// for the water and the glass; the air between the eye and everything in the ring; the
-/// ripples, for the water and the ground they cast their light on; and the viewer's own
-/// figure, for whatever mirrors it.
+/// ripples, for the water and the ground they cast their light on; the viewer's own figure,
+/// for whatever mirrors it; and the portals, for the surfaces they are let into.
 #[derive(Resource)]
-struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 6]);
+struct SharedShaders(#[allow(dead_code)] [Handle<Shader>; 7]);
 
 fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SharedShaders([
@@ -313,6 +438,7 @@ fn load_shared(mut commands: Commands, assets: Res<AssetServer>) {
         assets.load("embedded://game/systems/shaders/air.wgsl"),
         assets.load("embedded://game/systems/shaders/ripples.wgsl"),
         assets.load("embedded://game/systems/shaders/figure.wgsl"),
+        assets.load("embedded://game/systems/shaders/portals.wgsl"),
     ]));
 }
 
@@ -381,7 +507,7 @@ fn spawn(
         Hdr,
         Projection::Perspective(PerspectiveProjection {
             fov: 60f32.to_radians(),
-            near: 0.1,
+            near: NEAR,
             far: FAR,
             ..default()
         }),
@@ -408,28 +534,35 @@ fn spawn(
         IsDefaultUiCamera,
         PlayerCamera,
     ));
-    commands.spawn((
-        SunLight(SUN_DIRECTION),
-        DirectionalLight {
-            color: SUN,
-            illuminance: light_consts::lux::DIRECT_SUNLIGHT,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::default().looking_to(-SUN_DIRECTION, Vec3::Y),
-    ));
-    commands.spawn((
-        StarSphere,
-        NotShadowCaster,
-        NotShadowReceiver,
-        Mesh3d(meshes.add(Sphere::new(400.0).mesh().uv(48, 24))),
-        MeshMaterial3d(stars.add(StarsMaterial {
-            background: SPACE.to_linear(),
-            sun: SUN_DIRECTION.extend(0.0),
-            to_stars: Vec4::W,
-            origin: Vec4::ZERO,
-            ring: Vec4::ZERO,
-            air: AirUniform::default(),
-        })),
-    ));
+    let sphere = meshes.add(Sphere::new(400.0).mesh().uv(48, 24));
+    for seen in (0..VANTAGES).map(SeenFrom) {
+        commands.spawn((
+            seen,
+            seen.layers(),
+            SunLight(SUN_DIRECTION),
+            DirectionalLight {
+                color: SUN,
+                illuminance: light_consts::lux::DIRECT_SUNLIGHT,
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            Transform::default().looking_to(-SUN_DIRECTION, Vec3::Y),
+        ));
+        commands.spawn((
+            seen,
+            seen.layers(),
+            StarSphere,
+            NotShadowCaster,
+            NotShadowReceiver,
+            Mesh3d(sphere.clone()),
+            MeshMaterial3d(stars.add(StarsMaterial {
+                background: SPACE.to_linear(),
+                sun: SUN_DIRECTION.extend(0.0),
+                to_stars: Vec4::W,
+                origin: Vec4::ZERO,
+                ring: Vec4::ZERO,
+                air: AirUniform::default(),
+            })),
+        ));
+    }
 }

@@ -4,7 +4,8 @@
 #define_import_path figure
 
 #import bevy_pbr::mesh_view_bindings::{view, lights}
-#import optics::{bounce, sunlight, glint, met_on_screen, scene_at, behind}
+#import optics::{bounce, sunlight, glint, sunbeams_at, sunbeam_glints_at, met_on_screen, scene_at, behind}
+#import portals::mouths
 #import ring::sun_reaches
 
 struct Part {
@@ -120,6 +121,9 @@ fn figure_seen(origin: vec3<f32>, dir: vec3<f32>, beyond: vec3<f32>, at: vec3<f3
             shine += sunlight(i) * glint(n, -dir, l, roughness, f0);
         }
     }
+    let drawn = here - mouths.about.xyz;
+    matte += sunbeams_at(drawn, n) / PI;
+    shine += sunbeam_glints_at(drawn, n, -dir, roughness, f0);
     seen.colour = albedo * matte + sheen * shine + glow.rgb * view.exposure;
     return seen;
 }

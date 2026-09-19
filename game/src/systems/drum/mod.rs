@@ -11,17 +11,22 @@
 //! own, where it was first put, so it is exact where it is.
 mod gpu;
 mod landscape;
+mod mouths;
 mod render;
 
 pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{CELL, Flood, Grid, Ground, Landscape, PATCH, Patch, Place, Round};
+pub use mouths::{
+    CapSide, DrumSurface, FLAME_BAND, Mouth, MouthAnchor, MouthColour, MouthCoords, MouthFit,
+    MouthSeat, MouthSight, Mouths, OPENING,
+};
 pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::math::{Vec3d, quat_about_y, rotate_y};
+use crate::core::math::{Quatd, Vec3d, quat_about_y, quat_mul, rotate_y};
 use crate::core::units::{Metres, Radians, RadiansPerSecond, RadiansPerSecondSquared};
-use crate::core::vessel::{Penetration, Penetrations, Vessel, WaterFrame};
+use crate::core::vessel::{Passage, Penetration, Penetrations, Vessel, WaterFrame};
 
 /// The ring as it starts out.
 pub const DEFAULT_RING: Ring = Ring {
@@ -69,6 +74,30 @@ impl Ring {
     /// How far the drum reaches from its centre along any axis.
     pub fn reach(self) -> Metres {
         Metres(self.radius.0.max(self.half_width.0))
+    }
+
+    /// A point of the wall, `turn` round the ring from a site and `axial` along the axis from
+    /// it, in the frame about that site: exact however large the ring, since the wall curves
+    /// away from the site by a sagitta that is small when the turn is.
+    pub fn wall_point(self, turn: f64, axial: f64) -> Vec3d {
+        let radius = self.radius.0 as f64;
+        let half = (turn / 2.0).sin();
+        [-2.0 * radius * half * half, axial, radius * turn.sin()]
+    }
+
+    /// How far a point of a frame about a site is inside the glass, and the direction out
+    /// through it.
+    pub fn depth_and_outward(self, p: Vec3d) -> (f64, Vec3d) {
+        let radius = self.radius.0 as f64;
+        let a = radius + p[0];
+        let r = (a * a + p[2] * p[2]).sqrt();
+        let outward = if r > 0.0 {
+            [a / r, 0.0, p[2] / r]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let over = (2.0 * radius * p[0] + p[0] * p[0] + p[2] * p[2]) / (r + radius);
+        (-over, outward)
     }
 }
 
@@ -122,6 +151,42 @@ impl Site {
     }
 }
 
+/// The frame about another site of the wall, as the drum's own frame has it: where that site
+/// is in it, and how far round the ring from the drum's own site, which is how far the one
+/// frame is turned from the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SiteFrame {
+    pub site: Site,
+    origin: Vec3d,
+    turn: f64,
+}
+
+impl SiteFrame {
+    /// A point of the drum's frame in this one, and the same for a vector and an attitude.
+    pub fn point(&self, p: Vec3d) -> Vec3d {
+        let o = self.origin;
+        rotate_y(&[p[0] - o[0], p[1] - o[1], p[2] - o[2]], self.turn)
+    }
+
+    pub fn vector(&self, v: Vec3d) -> Vec3d {
+        rotate_y(&v, self.turn)
+    }
+
+    /// A point and a vector of this frame in the drum's.
+    pub fn point_back(&self, p: Vec3d) -> Vec3d {
+        let (o, r) = (self.origin, rotate_y(&p, -self.turn));
+        [r[0] + o[0], r[1] + o[1], r[2] + o[2]]
+    }
+
+    pub fn vector_back(&self, v: Vec3d) -> Vec3d {
+        rotate_y(&v, -self.turn)
+    }
+
+    pub fn attitude(&self, q: Quatd) -> Quatd {
+        quat_mul(&quat_about_y(self.turn), &q)
+    }
+}
+
 /// How the site moved: the arc it went round the ring, spinward, and how far along the axis.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Shift {
@@ -142,6 +207,7 @@ pub struct Drum {
     pub site: Site,
     pub water: Site,
     pub landscape: Landscape,
+    pub mouths: Mouths,
 }
 
 impl Default for Drum {
@@ -162,6 +228,7 @@ impl Drum {
             site: Site::at(0.0, 0.0, ring),
             water: Site::at(0.0, 0.0, ring),
             landscape: Landscape::flat(ring, GROUND_DEPTH),
+            mouths: Mouths::default(),
         }
     }
 
@@ -182,6 +249,7 @@ impl Drum {
         };
         self.water = Site::on(water, self.water.y.clamp(-half_width, half_width), ring);
         self.landscape.resize(ring, from.round, self.site.round);
+        self.carry_mouths(from.round, old);
         [before - ring.radius.0 as f64, from.y - self.site.y, 0.0]
     }
 
@@ -196,6 +264,7 @@ impl Drum {
         self.spin_rate = RadiansPerSecondSquared(if dt > 0.0 { (change / dt) as f32 } else { 0.0 });
         let turned = (before + self.spin.0 as f64) / 2.0 * dt;
         self.angle.0 = (self.angle.0 + turned).rem_euclid(std::f64::consts::TAU);
+        self.mouths.advance(dt);
     }
 
     /// Move the site to the wall below a point of the frame, and say how the frame moved: the
@@ -223,6 +292,17 @@ impl Drum {
         site.phi = site.round.angle(grid);
         site.y = y;
         shift
+    }
+
+    /// The frame about a site of the wall.
+    pub fn frame_at(&self, site: Site) -> SiteFrame {
+        let arc = self.site.round.arc_to(site.round, self.landscape.grid());
+        let turn = arc / self.ring.radius.0 as f64;
+        SiteFrame {
+            site,
+            origin: self.wall_point(turn, site.y - self.site.y),
+            turn,
+        }
     }
 
     /// A point of the old frame in the new one after a shift of the site, and the same for a
@@ -265,6 +345,7 @@ impl Drum {
     pub fn sculpt(&mut self, p: Vec3d, radius: f64, amount: f64) {
         let at = self.place(p);
         self.landscape.sculpt(at, radius, amount);
+        self.refit_mouths();
     }
 
     /// Put the water's site on the wall under a point of the frame, which is only done while
@@ -276,26 +357,14 @@ impl Drum {
     }
 
     /// A point of the wall, `turn` round the ring from the site and `axial` along the axis
-    /// from it, in the frame: exact however large the ring, since the wall curves away from
-    /// the site by a sagitta that is small when the turn is.
+    /// from it, in the frame.
     pub fn wall_point(&self, turn: f64, axial: f64) -> Vec3d {
-        let radius = self.ring.radius.0 as f64;
-        let half = (turn / 2.0).sin();
-        [-2.0 * radius * half * half, axial, radius * turn.sin()]
+        self.ring.wall_point(turn, axial)
     }
 
     /// How far a point of the frame is inside the glass, and the direction out through it.
     pub fn depth_and_outward(&self, p: Vec3d) -> (f64, Vec3d) {
-        let radius = self.ring.radius.0 as f64;
-        let a = radius + p[0];
-        let r = (a * a + p[2] * p[2]).sqrt();
-        let outward = if r > 0.0 {
-            [a / r, 0.0, p[2] / r]
-        } else {
-            [1.0, 0.0, 0.0]
-        };
-        let over = (2.0 * radius * p[0] + p[0] * p[0] + p[2] * p[2]) / (r + radius);
-        (-over, outward)
+        self.ring.depth_and_outward(p)
     }
 
     /// How far a point of the frame is inside the glass.
@@ -329,6 +398,14 @@ impl Drum {
         let frame = self.water_frame();
         let o = frame.origin;
         frame.vector_from_water([w[0] - o[0], w[1] - o[1], w[2] - o[2]])
+    }
+
+    /// Whether a point of the water's frame is inside the drum, `margin` clear of the caps and
+    /// above the landscape.
+    pub fn has_room(&self, p: Vec3d, margin: f64) -> bool {
+        let (height, _) = self.depth_and_outward(p);
+        let ground = self.landscape.sample(self.place_from(&self.water, p)).0;
+        (self.water.y + p[1]).abs() <= self.ring.room_along(margin) && height >= ground + margin
     }
 
     /// Pull a point of the water's frame inside the drum, `margin` clear of the caps and above
@@ -392,7 +469,8 @@ impl Drum {
             && self.axial(c).abs() < self.ring.half_width.0 as f64 + clear
     }
 
-    /// A sphere inside the drum against the rim, the landscape and the caps.
+    /// A sphere inside the drum against the rim, the landscape and the caps, and against the
+    /// edge of what is open of a mouth where it is over one, which has no surface to meet.
     fn inner_sphere_penetrations(&self, c: Vec3d, radius: f64) -> Penetrations {
         let mut out = Penetrations::default();
         let (depth, normal) = if self.landscape.is_empty() {
@@ -401,21 +479,25 @@ impl Drum {
         } else {
             self.terrain_penetration(c, radius)
         };
-        if depth > 0.0 {
-            out.push(Penetration { depth, normal });
+        match self.open_edge(c, radius, DrumSurface::Wall) {
+            Some(edge) => out.extend(edge),
+            None if depth > 0.0 => out.push(Penetration { depth, normal }),
+            None => {}
         }
         let cap = self.ring.room_along(radius);
         let y = self.axial(c);
-        if y > cap {
-            out.push(Penetration {
-                depth: y - cap,
-                normal: [0.0, -1.0, 0.0],
-            });
-        } else if y < -cap {
-            out.push(Penetration {
-                depth: -cap - y,
-                normal: [0.0, 1.0, 0.0],
-            });
+        let (side, depth) = if y > 0.0 {
+            (CapSide::High, y - cap)
+        } else {
+            (CapSide::Low, -cap - y)
+        };
+        match self.open_edge(c, radius, DrumSurface::Cap(side)) {
+            Some(edge) => out.extend(edge),
+            None if depth > 0.0 => out.push(Penetration {
+                depth,
+                normal: [0.0, -side.sign(), 0.0],
+            }),
+            None => {}
         }
         out
     }
@@ -533,5 +615,9 @@ impl Vessel for Drum {
         } else {
             self.outer_sphere_penetrations(centre, radius)
         }
+    }
+
+    fn passage(&self, from: Vec3d, to: Vec3d) -> Option<Passage> {
+        self.passage_through_mouths(from, to)
     }
 }

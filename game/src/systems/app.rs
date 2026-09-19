@@ -12,8 +12,8 @@ use crate::core::web;
 use crate::systems::{
     aim::AimPlugin, body::BodyPlugin, controls::ControlsPlugin, drum::DrumPlugin,
     figure::FigurePlugin, hud::HudPlugin, persistence::PersistencePlugin, player::PlayerPlugin,
-    scene::ScenePlugin, settings::SettingsPlugin, sim::SimulationPlugin, testing::TestingPlugin,
-    thrusters::ThrustersPlugin, tools::ToolsPlugin, water::WaterPlugin,
+    portal::PortalPlugin, scene::ScenePlugin, settings::SettingsPlugin, sim::SimulationPlugin,
+    testing::TestingPlugin, thrusters::ThrustersPlugin, tools::ToolsPlugin, water::WaterPlugin,
 };
 
 pub fn build() -> App {
@@ -70,6 +70,7 @@ fn simulation(app: &mut App) {
         FigurePlugin,
         BodyPlugin,
         ToolsPlugin,
+        PortalPlugin,
         HudPlugin,
     ));
 }

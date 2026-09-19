@@ -10,7 +10,7 @@ use game::core::math::{
 };
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{DEFAULT_RING, GROUND_DEPTH};
+use game::systems::drum::{DEFAULT_RING, DrumSurface, GROUND_DEPTH, MouthColour};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_gravity, standing_spin};
@@ -697,4 +697,67 @@ fn resizing_the_ring_leaves_a_ghost_outside_where_it_is() {
         (last, usual, turned) = (now, moved, jumped);
     }
     assert_eq!(state(&app).drum.ring.radius, Metres(30.0));
+}
+
+/// Put an open pair of portals on the ground: the blue one `spinward` metres round the ring
+/// from the site, the orange one a quarter of the way round the ring.
+fn open_pair(app: &mut App, spinward: f64) -> (Vec3d, Vec3d) {
+    let mut sim = state_mut(app);
+    let drum = &mut sim.drum;
+    let under = drum.wall_point(spinward / drum.ring.radius.0 as f64, 0.0);
+    let away = drum.wall_point(std::f64::consts::FRAC_PI_2, 0.0);
+    let diameter = Metres(2.0);
+    for (colour, at) in [(MouthColour::Blue, under), (MouthColour::Orange, away)] {
+        let wanted = drum.mouth_at(at, DrumSurface::Wall, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+        let fit = drum.fit_mouth(colour, wanted, diameter);
+        drum.put_mouth(colour, fit, diameter);
+    }
+    (under, away)
+}
+
+#[test]
+fn a_solid_avatar_standing_where_a_pair_opens_falls_through_it() {
+    let mut app = testing::headless();
+    testing::run(&mut app, Seconds(1.0));
+    assert!(weight_in_g(state(&app)) > 0.5, "the avatar stands");
+    let (_, away) = open_pair(&mut app, 0.0);
+    testing::run(&mut app, Seconds(1.5));
+    let sim = state(&app);
+    let drum = &sim.drum;
+    let orange = drum
+        .mouths
+        .get(MouthColour::Orange)
+        .expect("the orange mouth");
+    let out_of = drum.mouth_coords(orange, sim.avatar().p);
+    assert!(
+        out_of.across() < 5.0 && out_of.h > 0.0,
+        "the avatar is {out_of:?} from the orange mouth, which is at {away:?}, at {:?}",
+        sim.avatar().p
+    );
+}
+
+#[test]
+fn a_solid_avatar_walking_onto_an_open_portal_falls_through_it() {
+    let mut app = testing::headless();
+    testing::run(&mut app, Seconds(1.0));
+    let ahead = state(&app).avatar().rotate(&[0.0, 0.0, -1.0]);
+    assert!(
+        ahead[2].abs() > 0.9,
+        "the avatar faces round the ring: {ahead:?}"
+    );
+    open_pair(&mut app, 3.0 * ahead[2].signum());
+    testing::run(&mut app, Seconds(1.5));
+    let mut pilot = PilotInput::default();
+    pilot.levels[Thruster::Forward as usize] = 1.0;
+    let came_out = (0..25).find_map(|_| {
+        hold(&mut app, pilot, 0.2);
+        let sim = state(&app);
+        let orange = sim.drum.mouths.get(MouthColour::Orange)?;
+        let out_of = sim.drum.mouth_coords(orange, sim.avatar().p);
+        (out_of.across() < 2.0 && out_of.h > 0.0).then_some(out_of)
+    });
+    assert!(
+        came_out.is_some(),
+        "the avatar walked five seconds toward the portal and never came out of the other"
+    );
 }

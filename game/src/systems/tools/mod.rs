@@ -10,16 +10,18 @@ use bevy::ecs::system::ScheduleSystem;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use crate::core::avatar::{self, WALK_SPEED};
-use crate::core::math::{mat3mul, quat_conjugate, quat_rotate};
+use crate::core::avatar::WALK_SPEED;
+use crate::core::math::{quat_conjugate, quat_rotate};
 use crate::core::units::{Metres, Seconds};
 use crate::systems::aim::{self, Aim};
 use crate::systems::figure::{Mirrored, MirroredFinish, MirroredSolid};
+use crate::systems::portal::{SolidMaterial, solid};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
 pub mod land_tool;
 pub mod muzzle;
+pub mod portal_tool;
 pub mod screen;
 pub mod water_tool;
 
@@ -103,7 +105,7 @@ impl Toolbelt {
 /// What a tool's parts are made of: the material they are drawn in, and what the mirrors are
 /// told of it, whatever the shape.
 pub struct Finish {
-    material: Handle<StandardMaterial>,
+    material: Handle<SolidMaterial>,
     mirrored: MirroredFinish,
 }
 
@@ -111,7 +113,7 @@ pub struct Finish {
 pub struct Workbench<'a, 'w, 's> {
     pub commands: &'a mut Commands<'w, 's>,
     pub meshes: &'a mut Assets<Mesh>,
-    pub materials: &'a mut Assets<StandardMaterial>,
+    pub materials: &'a mut Assets<SolidMaterial>,
     pub images: &'a mut Assets<Image>,
     model: Entity,
     slot: usize,
@@ -151,7 +153,7 @@ impl Workbench<'_, '_, '_> {
     pub fn finish(&mut self, material: StandardMaterial) -> Finish {
         Finish {
             mirrored: MirroredFinish::of(&material),
-            material: self.materials.add(material),
+            material: self.materials.add(solid(material)),
         }
     }
 
@@ -183,13 +185,14 @@ impl Plugin for ToolsPlugin {
         app.init_resource::<Toolbelt>()
             .init_resource::<Carried>()
             .configure_sets(Update, ToolInput.in_set(SimSet::Command))
-            .add_systems(Update, switch.in_set(ToolInput))
+            .add_systems(Update, (switch, unmark).chain().in_set(ToolInput))
             .add_systems(Update, carry.in_set(SimSet::Observe))
             .add_plugins((
                 muzzle::MuzzlePlugin,
                 screen::ScreenPlugin,
                 water_tool::WaterToolPlugin,
                 land_tool::LandToolPlugin,
+                portal_tool::PortalToolPlugin,
             ));
     }
 }
@@ -219,7 +222,7 @@ impl ToolApp for App {
                     operate.run_if(operating::<T>),
                     rest::<T>.run_if(not(operating::<T>)),
                 )
-                    .after(switch)
+                    .after(unmark)
                     .in_set(ToolInput),
             )
     }
@@ -291,10 +294,17 @@ fn switch(keys: Res<ButtonInput<KeyCode>>, mut belt: ResMut<Toolbelt>) {
     }
 }
 
+/// No tool has marked the crosshair's target yet this frame: the one at work does so anew.
+fn unmark(mut aim: ResMut<Aim>) {
+    if aim.marker.is_some() {
+        aim.marker = None;
+    }
+}
+
 fn assemble<T: Tool>(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<SolidMaterial>>,
     mut images: ResMut<Assets<Image>>,
     belt: Res<Toolbelt>,
 ) {
@@ -358,11 +368,11 @@ fn carry(
     let swing = carried.strides * std::f32::consts::TAU;
     let bob = Vec2::new(swing.cos(), -swing.sin().abs()) * BOB.0 * walking;
 
-    let beside = DVec3::from_array(avatar::eye_offset()) + PLACE.with_z(0.0).as_dvec3();
-    let from = DVec3::from_array(hull.to_world(&beside.to_array()));
-    let ahead = DVec3::from_array(mat3mul(&hull.m, &[0.0, 0.0, -1.0]));
-    let clear = aim::cast(from, ahead, &sim.drum)
-        .map_or(f32::INFINITY, |hit| hit.point.distance(from) as f32);
+    let (eye, attitude) = sim.eye();
+    let beside = quat_rotate(&attitude, &PLACE.with_z(0.0).as_dvec3().to_array());
+    let from = DVec3::from_array(eye) + DVec3::from_array(beside);
+    let ahead = DVec3::from_array(quat_rotate(&attitude, &[0.0, 0.0, -1.0]));
+    let clear = aim::cast(from, ahead, &sim.drum).map_or(f32::INFINITY, |hit| hit.range as f32);
     let in_the_way =
         (belt.slots[slot].reach.0 - PLACE.z + CLEARANCE.0 - clear).clamp(0.0, MOST_DRAWN_BACK.0);
     carried.drawn_back += (in_the_way - carried.drawn_back) * (DRAW_BACK_RATE * dt).min(1.0);
@@ -374,7 +384,7 @@ fn carry(
             * Quat::from_rotation_x(-TIPPED * away),
         scale: Vec3::ONE,
     };
-    let placed = viewpoint.view(hull) * floating;
+    let placed = viewpoint.view((eye, attitude)) * floating;
     for (held, mut transform, mut visibility) in &mut models {
         if held.0 == slot {
             *transform = placed;

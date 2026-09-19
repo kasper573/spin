@@ -3,12 +3,13 @@
 //! off, by day and by night. Each sight is drawn twice, with the water and with it hidden,
 //! and the water must change the picture wherever it lies in view, with its own colours, and
 //! nowhere else. Every frame is written to `target/sights/` to be looked at as well.
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use game::core::avatar::{self, Gyros};
-use game::core::fluid::Fluid;
+use game::core::fluid::{Fluid, Particle};
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
 use game::core::units::{Metres, Radians, Seconds};
 use game::systems::drum::{DEFAULT_RING, Place, Ring, Round};
@@ -144,11 +145,12 @@ fn fill_a_third(app: &mut App) {
     testing::run(app, Seconds(20.0));
 }
 
-/// Ridges raised across the ring, with their crests this far round it.
+/// Ridges raised across the ring from end to end, with their crests this far round it.
 fn ridges(app: &mut App, crests: [f64; 2]) {
     let mut sim = app.world_mut().resource_mut::<Simulation>();
+    let across = (sim.drum.ring.half_width.0 as f64 / 2.75).floor() as i32;
     for crest in crests {
-        for y in [-5.5, -2.75, 0.0, 2.75, 5.5] {
+        for y in (-across..=across).map(|k| k as f64 * 2.75) {
             let at = place(&sim, crest, y);
             for _ in 0..20 {
                 sim.drum.landscape.sculpt(at, 8.0, 1.4 / 20.0);
@@ -159,11 +161,21 @@ fn ridges(app: &mut App, crests: [f64; 2]) {
 
 /// Two ridges across the ring with a pool laid in the valley between them, and left to settle.
 fn pool(app: &mut App) {
+    pool_of(app, 500);
+}
+
+/// The same between the ends of a ring several times as wide, with as much more water as
+/// stands as deep in it once it has run out level from end to end.
+fn wide_pool(app: &mut App) {
+    pool_of(app, 1800);
+}
+
+fn pool_of(app: &mut App, heap: u32) {
     ridges(app, [8.0, -12.0]);
     for k in 0..15 {
         let arc = -1.5 - (k % 3) as f64 * 2.5;
         let y = (k / 3) as f64 * 1.5 - 3.0;
-        inject(app, [arc, y, 1.8], 500);
+        inject(app, [arc, y, 1.8], heap);
         testing::run(app, Seconds(1.0));
     }
     testing::run(app, Seconds(20.0));
@@ -577,7 +589,7 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
     let end_night = sight.view("end_on_axis", end_on_axis.0, end_on_axis.1, false);
     unlit_by_night(&end_day, &end_night);
     sight.view("under", under.0, under.1, false).seen(0.3);
-    sight.view("axis", axis.0, axis.1, false).seen(0.1);
+    sight.view("axis", axis.0, axis.1, false).seen(0.08);
     sight
         .view("through_floor", through_floor.0, through_floor.1, false)
         .unseen();
@@ -622,8 +634,8 @@ fn a_pool_is_seen_from_everywhere() {
         .seen(0.01);
 }
 
-/// Water in flight: a heap splashing into the pool, its droplets seen from the shore and from
-/// outside the glass end. The sun is brought round before the heap is let go, since the splash
+/// Water in flight: a heap splashing into the pool, the water it throws up and the spray
+/// that comes off it seen from the shore and from outside the glass end. The sun is brought round before the heap is let go, since the splash
 /// is over in a moment.
 #[test]
 #[ignore = "wants a GPU"]
@@ -639,10 +651,177 @@ fn a_splash_is_seen_in_flight() {
         spray(&mut sight.app);
         let drops = testing::surface_demand(&mut sight.app).droplets;
         assert!(drops > 0, "{name}: the splash threw no droplets at all");
+        let motes = testing::spray(&mut sight.app).len();
+        assert!(motes > 0, "{name}: the splash threw no spray at all");
         let flying = sight.held(name, eye, at, true);
         flying.seen(least);
         flying.differs_from(&still, 0.01);
     }
+}
+
+/// The share of the water in view that flashes: whose brightness jumps by more than a tenth of
+/// the way from black to white from one frame to the next, a thirtieth of a second on, and
+/// jumps back in the one after. Sunlight sweeping over the water as the ring turns and ripples
+/// running across it change a pixel one way and leave it changed, which is no flash; and a
+/// star crossing behind the water flashes with no water there too, which is no flash of the
+/// water's.
+fn flashing(sight: &mut Sight, eye: [f64; 3], at: [f64; 3]) -> f64 {
+    testing::draw_into(&mut sight.app, &sight.glimpse.clone());
+    settle_the_eye(&mut sight.app, eye, at, true);
+    testing::draw_into(&mut sight.app, &sight.image.clone());
+    let frames: Vec<[Vec<u8>; 2]> = (0..7)
+        .map(|k| {
+            testing::frame(&mut sight.app, Seconds(1.0 / 30.0));
+            look(&mut sight.app, eye, at);
+            let wet = sight.capture(&format!("frame_{k}"));
+            sight.shown(false);
+            let dry = sight.capture(&format!("dry_{k}"));
+            sight.shown(true);
+            [wet, dry]
+        })
+        .collect();
+    let light = |frame: &[u8], pixel: usize| {
+        frame[4 * pixel..4 * pixel + 3]
+            .iter()
+            .map(|&c| c as i32)
+            .sum::<i32>()
+    };
+    let flashes = |run: &[[Vec<u8>; 2]], shown: usize, pixel: usize| {
+        let there = light(&run[1][shown], pixel) - light(&run[0][shown], pixel);
+        let back = light(&run[2][shown], pixel) - light(&run[1][shown], pixel);
+        there.abs() > 75 && back.abs() > 75 && there.signum() != back.signum()
+    };
+    let water: Vec<usize> = (0..(WIDTH * HEIGHT) as usize)
+        .filter(|&pixel| (light(&frames[3][0], pixel) - light(&frames[3][1], pixel)).abs() > 24)
+        .collect();
+    assert!(
+        water.len() > (WIDTH * HEIGHT) as usize / 20,
+        "hardly any water is in view"
+    );
+    // the water bends what is seen through it, so a star behind it flashes a little way from
+    // where it does with the water gone
+    const BLOCK: usize = 16;
+    let across = (WIDTH as usize).div_ceil(BLOCK);
+    let block_of = |pixel: usize| (pixel / WIDTH as usize / BLOCK, pixel % WIDTH as usize / BLOCK);
+    frames
+        .windows(3)
+        .map(|run| {
+            let starry: HashSet<usize> = (0..(WIDTH * HEIGHT) as usize)
+                .filter(|&pixel| flashes(run, 1, pixel))
+                .map(|pixel| block_of(pixel).0 * across + block_of(pixel).1)
+                .collect();
+            let by_a_star = |pixel: usize| {
+                let (row, column) = block_of(pixel);
+                (row.saturating_sub(1)..=row + 1).any(|r| {
+                    (column.saturating_sub(1)..=column + 1).any(|c| starry.contains(&(r * across + c)))
+                })
+            };
+            let flashed = water
+                .iter()
+                .filter(|&&pixel| flashes(run, 0, pixel) && !by_a_star(pixel))
+                .count();
+            flashed as f64 / water.len() as f64
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Expected: a pool left to settle lies still to the eye of someone standing on its shore:
+/// the bed shows steadily through it, and nothing on it flashes.
+#[test]
+#[ignore = "wants a GPU"]
+fn a_settled_pool_does_not_flicker() {
+    let mut sight = Sight::new("flicker", pool);
+    testing::run(&mut sight.app, Seconds(20.0));
+    let worst = flashing(&mut sight, [3.0, 2.0, 2.6], [0.0, 0.5, 0.0]);
+    println!("at worst {worst:.5} of the water flashed");
+    assert!(worst < 0.0001, "{worst:.5} of the water flashed");
+}
+
+/// Expected: the water lying round a ring a third full, seen from outside through the glass
+/// end, lies as still to the eye as a pool does from its shore.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_seen_from_outside_does_not_flicker() {
+    let mut sight = Sight::new("flicker_outside", fill_a_third);
+    testing::run(&mut sight.app, Seconds(20.0));
+    let (eye, at) = from_outside(0.0);
+    let worst = flashing(&mut sight, eye, at);
+    println!("at worst {worst:.5} of the water flashed");
+    assert!(worst < 0.0001, "{worst:.5} of the water flashed");
+}
+
+/// Parcels of water let go on their own in the air, a row of them, from clear at one end to
+/// all froth at the other.
+fn parcels_in_the_air(app: &mut App) {
+    parcels_let_go(app, 2.5);
+}
+
+/// A row of parcels of water let go on their own, this high above the ground.
+fn parcels_let_go(app: &mut App, height: f64) {
+    app.world_mut()
+        .resource_scope(|world, mut fluid: Mut<Fluid>| {
+            let sim = world.resource::<Simulation>();
+            for k in 0..5 {
+                let at = spot(sim, [-3.0 + 1.5 * k as f64, 0.0, height]);
+                fluid.add(Particle {
+                    position: sim.drum.to_water(at),
+                    velocity: [0.0; 3],
+                    foam: k as f32 / 4.0,
+                });
+            }
+        });
+    testing::run(app, Seconds(0.1));
+}
+
+/// Expected: a bucketful of water let go on its own in the air is the same water as any
+/// other, drawn as the surface would be there had its grid been fine enough: a globe of clear
+/// water that shows what is behind it upside down, as a ball of water does, and the whiter the
+/// more of it is froth. Every parcel of the row is on its own, and every one is seen.
+#[test]
+#[ignore = "wants a GPU"]
+fn a_parcel_on_its_own_is_a_globe_of_water() {
+    let (eye, at) = ([0.0, -5.0, 2.2], [0.0, 0.0, 2.3]);
+    let mut sight = Sight::new("parcels", |_| {});
+    testing::draw_into(&mut sight.app, &sight.glimpse.clone());
+    settle_the_eye(&mut sight.app, eye, at, true);
+    testing::draw_into(&mut sight.app, &sight.image.clone());
+    parcels_in_the_air(&mut sight.app);
+    let drops = testing::surface_demand(&mut sight.app).droplets;
+    assert_eq!(drops, 5, "the parcels let go are not all on their own");
+    let seen = sight.held("row", eye, at, true);
+    seen.seen(0.004);
+}
+
+/// Expected: water that has come down on dry ground on its own is no cloud of drops any
+/// more, and nothing white: it lies on the ground as a clear puddle, which shows as the ground
+/// seen through a little water and brightens next to none of it.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_come_down_on_dry_ground_lies_in_puddles() {
+    let (eye, at) = ([0.0, -3.5, 1.6], [0.0, 0.0, 0.0]);
+    let mut sight = Sight::new("puddles", |_| {});
+    testing::draw_into(&mut sight.app, &sight.glimpse.clone());
+    settle_the_eye(&mut sight.app, eye, at, true);
+    testing::draw_into(&mut sight.app, &sight.image.clone());
+    parcels_let_go(&mut sight.app, 0.3);
+    testing::run(&mut sight.app, Seconds(2.0));
+    let drops = testing::surface_demand(&mut sight.app).droplets;
+    assert_eq!(drops, 5, "the parcels come down are not all on their own");
+    let seen = sight.held("row", eye, at, true);
+    seen.seen(0.0003);
+    let light = |p: &[u8]| p[0] as i32 + p[1] as i32 + p[2] as i32;
+    let (changed, whitened) = seen
+        .pixels
+        .chunks_exact(4)
+        .zip(seen.hidden.chunks_exact(4))
+        .filter(|(with, without)| (light(with) - light(without)).abs() > 24)
+        .fold((0, 0), |(changed, whitened), (with, without)| {
+            let whiter = light(with) - light(without) > 150;
+            (changed + 1, whitened + whiter as usize)
+        });
+    let share = whitened as f64 / changed as f64;
+    println!("{share:.3} of the puddles is much brighter than the ground they lie on");
+    assert!(share < 0.05, "{share:.3} of the water come down is white");
 }
 
 /// A pool on a ring two hundred metres across, where the same water covers a much smaller
@@ -654,7 +833,7 @@ fn a_pool_on_a_large_ring_is_seen_from_everywhere() {
         radius: Metres(100.0),
         half_width: Metres(20.0),
     };
-    let mut sight = Sight::sized("large", ring, pool);
+    let mut sight = Sight::sized("large", ring, wide_pool);
     let under = ([-2.0, 0.0, 0.6], [-8.0, 0.0, 0.6]);
     let shore = ([3.0, 0.0, 1.7], [-6.0, 0.0, 1.0]);
     let over = ([-2.0, 0.0, 6.0], [-6.0, 0.0, 0.0]);

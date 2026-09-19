@@ -13,13 +13,16 @@ use game::core::fluid::Fluid;
 use game::core::math::quat_mul;
 use game::core::units::{Radians, Seconds};
 use game::systems::aim::Aim;
+use game::systems::drum::MouthColour;
 use game::systems::figure::Mirrored;
+use game::systems::portal::portal_colour;
 use game::systems::scene::SUN_DIRECTION;
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing::{self, Headless};
 use game::systems::tools::Toolbelt;
 use game::systems::tools::land_tool::LandTool;
+use game::systems::tools::muzzle::MuzzleLight;
 use game::systems::tools::water_tool::WaterTool;
 
 const WIDTH: u32 = 1280;
@@ -223,6 +226,10 @@ fn a_tools_key_brings_it_out_and_puts_it_away() {
         (KeyCode::Digit1, None),
         (KeyCode::Digit2, Some(1)),
         (KeyCode::Digit2, None),
+        (KeyCode::Digit3, Some(2)),
+        (KeyCode::Digit1, Some(0)),
+        (KeyCode::Digit3, Some(2)),
+        (KeyCode::Digit3, None),
     ] {
         testing::tap(&mut app, key);
         testing::run(&mut app, FRAME);
@@ -403,7 +410,10 @@ fn the_wheel_turns_the_dial_of_the_tool_that_is_out() {
         "the land tool's wheel turned the water tool's dial"
     );
 
-    let brush = |app: &App| app.world().resource::<Aim>().brush.expect("a brush is out");
+    let brush = |app: &App| {
+        let marker = app.world().resource::<Aim>().marker;
+        marker.expect("a brush is out").radius
+    };
     let narrow = brush(&app);
     testing::wheel(&mut app, 4);
     testing::run(&mut app, FRAME);
@@ -412,6 +422,81 @@ fn the_wheel_turns_the_dial_of_the_tool_that_is_out() {
         "more land a second did not widen the brush: {:?} from {narrow:?}",
         brush(&app)
     );
+}
+
+/// The wheel turns the portal tool's own dial, the diameter of the portals it shoots, which
+/// the marker on its target widens with, and leaves the other tools' dials alone.
+#[test]
+fn the_wheel_turns_the_width_of_the_portals_the_portal_tool_shoots() {
+    let mut app = testing::headless();
+    look_down(&mut app, 0.35);
+    testing::tap(&mut app, KeyCode::Digit3);
+    testing::run(&mut app, FRAME);
+    let dials = |app: &App| {
+        let settings = app.world().resource::<Settings>();
+        (settings.portal.0, settings.flow.0, settings.build.0)
+    };
+    let marked = |app: &App| {
+        let marker = app.world().resource::<Aim>().marker;
+        marker.expect("the portal tool marks its target").radius
+    };
+    let ((width, flow, build), narrow) = (dials(&app), marked(&app));
+    testing::wheel(&mut app, 2);
+    testing::run(&mut app, FRAME);
+    let (wider, same_flow, same_build) = dials(&app);
+    assert!(
+        wider > width,
+        "the wheel turned up did not widen the portals: {wider}"
+    );
+    assert_eq!((same_flow, same_build), (flow, build));
+    assert!(
+        marked(&app) > narrow,
+        "wider portals did not widen the marker: {:?} from {narrow:?}",
+        marked(&app)
+    );
+}
+
+/// The portal tool's muzzle lights up as it shoots, in the colour of the portal it shot, the
+/// left button's blue and the right button's orange, and goes out again a moment after.
+#[test]
+fn the_portal_tools_muzzle_flashes_in_the_colour_it_shot() {
+    let mut app = testing::headless();
+    look_down(&mut app, 0.35);
+    testing::tap(&mut app, KeyCode::Digit3);
+    testing::run(&mut app, FRAME);
+    // the colours of the muzzles that are lit, whichever tool's they are
+    let muzzle = |app: &mut App| -> Vec<Color> {
+        let world = app.world_mut();
+        let mut rings = world.query::<&MuzzleLight>();
+        let lit = rings.iter(world).filter(|ring| ring.firing);
+        lit.map(|ring| ring.colour).collect()
+    };
+    assert!(
+        muzzle(&mut app).is_empty(),
+        "a muzzle is lit before anything is shot"
+    );
+    for (button, colour) in [
+        (MouseButton::Left, MouthColour::Blue),
+        (MouseButton::Right, MouthColour::Orange),
+    ] {
+        testing::button(&mut app, button, true);
+        testing::run(&mut app, FRAME);
+        testing::button(&mut app, button, false);
+        testing::run(&mut app, FRAME);
+        assert_eq!(muzzle(&mut app), [portal_colour(colour)], "{button:?}");
+        let sim = app.world().resource::<Simulation>();
+        assert!(
+            sim.drum.mouths.get(colour).is_some(),
+            "{button:?} shot a portal"
+        );
+        testing::run(&mut app, Seconds(0.5));
+        assert!(
+            muzzle(&mut app).is_empty(),
+            "the muzzle stays lit after {button:?}"
+        );
+        turn(&mut app, [0.0, (0.6f64).sin(), 0.0, (0.6f64).cos()]);
+        testing::run(&mut app, FRAME);
+    }
 }
 
 /// A tool that is out is seen before the eye, low and to the right where a hand would hold
@@ -425,11 +510,13 @@ fn the_tool_that_is_out_is_seen_before_the_eye() {
     let water = sights.draw("day-water-tool");
     testing::tap(&mut sights.app, KeyCode::Digit2);
     let land = sights.draw("day-land-tool");
-    testing::tap(&mut sights.app, KeyCode::Digit2);
+    testing::tap(&mut sights.app, KeyCode::Digit3);
+    let portal = sights.draw("day-portal-tool");
+    testing::tap(&mut sights.app, KeyCode::Digit3);
     let away = sights.draw("day-put-away");
 
     let region = (WIDTH * HEIGHT / 4) as usize;
-    for (name, tool) in [("water", &water), ("land", &land)] {
+    for (name, tool) in [("water", &water), ("land", &land), ("portal", &portal)] {
         let seen = changed(&bare, tool, LOWER_RIGHT);
         assert!(
             seen > region / 12,
@@ -441,11 +528,17 @@ fn the_tool_that_is_out_is_seen_before_the_eye() {
             "the {name} tool changes {elsewhere} pixels of the upper left of the view"
         );
     }
-    let apart = changed(&water, &land, LOWER_RIGHT);
-    assert!(
-        apart > region / 25,
-        "the two tools differ in only {apart} pixels"
-    );
+    for (names, a, b) in [
+        ("water and land", &water, &land),
+        ("land and portal", &land, &portal),
+        ("portal and water", &portal, &water),
+    ] {
+        let apart = changed(a, b, LOWER_RIGHT);
+        assert!(
+            apart > region / 25,
+            "the {names} tools differ in only {apart} pixels"
+        );
+    }
     let left = changed(&bare, &away, WHOLE);
     assert!(
         left < region / 200,

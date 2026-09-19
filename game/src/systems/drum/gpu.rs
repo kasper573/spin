@@ -26,12 +26,12 @@ use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
 use super::landscape::{Grid, PATCH};
-use super::{Drum, Ring};
+use super::{Drum, DrumSurface, Mouth, MouthColour, MouthCoords, Ring};
 use crate::core::fluid::{
     Fluid, FluidBuffers, FluidFrame, FluidStep, MAX_PARTICLES, ReadOnce, Resolution,
 };
 use crate::core::units::{Metres, RadiansPerSecond, RadiansPerSecondSquared};
-use crate::core::vessel::{VesselBinding, VesselLayout};
+use crate::core::vessel::{Vessel, VesselBinding, VesselLayout};
 
 const SHADER: &str = "embedded://game/systems/drum/shaders/drum.wgsl";
 const SURVEY_SHADER: &str = "embedded://game/systems/drum/shaders/columns.wgsl";
@@ -75,6 +75,38 @@ pub struct DrumUniform {
     patches: u32,
     table_mask: u32,
     atlas: u32,
+    passable: f32,
+    openings: [OpeningUniform; 2],
+}
+
+/// A mouth as the water has it, in its frame and units; `drum.wgsl` says what rides along in
+/// each fourth place.
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+struct OpeningUniform {
+    centre: Vec4,
+    across: Vec4,
+    up: Vec4,
+    inward: Vec4,
+}
+
+impl OpeningUniform {
+    fn of(drum: &Drum, mouth: &Mouth, length: f64) -> OpeningUniform {
+        let frame = drum.water_frame();
+        let centre = frame.to_water(drum.mouth_point(mouth, MouthCoords::default()));
+        let [across, up, inward] = drum
+            .mouth_frame(mouth, MouthCoords::default())
+            .map(|axis| frame.vector_to_water(axis).map(|c| c as f32));
+        let on_the_wall = match mouth.surface() {
+            DrumSurface::Wall => 1.0,
+            DrumSurface::Cap(_) => 0.0,
+        };
+        OpeningUniform {
+            centre: Vec3::from(centre.map(|c| (c / length) as f32)).extend(1.0),
+            across: Vec3::from(across).extend(0.0),
+            up: Vec3::from(up).extend(0.0),
+            inward: Vec3::from(inward).extend(on_the_wall),
+        }
+    }
 }
 
 impl DrumUniform {
@@ -109,6 +141,14 @@ impl DrumUniform {
             patches: ground.patches,
             table_mask: ground.table_mask,
             atlas: ATLAS_PATCHES as u32,
+            passable: (drum.mouths.passable() / length) as f32,
+            openings: MouthColour::BOTH.map(|colour| {
+                drum.mouths
+                    .get(colour)
+                    .map_or_else(OpeningUniform::default, |mouth| {
+                        OpeningUniform::of(drum, mouth, length)
+                    })
+            }),
         }
     }
 }

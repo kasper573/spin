@@ -5,8 +5,9 @@ Live: https://kasper573.github.io/spin/
 A browser simulation of a ring world: a glass drum spinning in zero g with ground all the way
 round its inside, spun at exactly the rate that gives you your Earth weight on that ground. You
 are a body in it, flown on thrusters, with a tool floating before you: a number key brings one
-out and puts it away again, and with them you can flood it with water and sculpt the landscape,
-then resize the ring, whose wall keeps the ground and the water where they lie on it. The water is a position-based fluid solved in compute shaders and drawn as an isosurface
+out and puts it away again, and with them you can flood it with water, sculpt the landscape and
+join two places of it with a pair of portals, which bodies, water and light go through as they
+would through any opening, then resize the ring, whose wall keeps the ground and the water where they lie on it. The water is a position-based fluid solved in compute shaders and drawn as an isosurface
 the GPU extracts every frame; the amount of water and the size of the ring are only limited by
 the dials.
 
@@ -42,8 +43,8 @@ One crate, `game/`, in two layers plus thin binaries:
   voices, units and the browser page glue. Core may not reference `systems/`; `just lint`
   checks.
 - `src/systems/` — the simulation itself: the drum and its landscape, the stepped world, water
-  rendering, the player's camera and body, the tools and what the mirrors show of them,
-  controls, settings, HUD, persistence, and the script
+  rendering, the player's camera and body, the tools and what the mirrors show of them, the
+  portals and what is seen and lit through them, controls, settings, HUD, persistence, and the script
   commands and status the tests and the page's `?probe` mode drive it through.
 - `src/bin/` — the browser client, the bench, the recorder and the layering lint.
 - `tests/` — contract tests against the public API, run headless.

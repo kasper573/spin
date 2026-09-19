@@ -1,5 +1,6 @@
-use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, norm, quat_integrate};
+use crate::core::math::{Quatd, Vec3d, add_scaled, cross, mat3mul, norm, quat_integrate, quat_mul};
 use crate::core::units::{MetresPerSecond, Newtons, RadiansPerSecond};
+use crate::core::vessel::Passage;
 
 /// What the water did to a body over the substeps of a frame: the buoyancy impulse and torque,
 /// and the flow around the hull weighted by how strongly each wetted sample coupled to it, as a
@@ -217,6 +218,16 @@ impl Body {
         self.v = [0.0; 3];
         self.w = [0.0; 3];
         self.update_rotation();
+    }
+
+    /// The body as it is once it has gone through an opening of the vessel: where it came out,
+    /// with its attitude, its velocity and its spin all turned the way the opening turns things.
+    pub fn carried_through(&mut self, passage: &Passage) {
+        let (v, w) = (passage.turned(self.v), passage.turned(self.w));
+        self.place(passage.point, quat_mul(&passage.turn, &self.q));
+        self.v = v;
+        self.w = w;
+        self.ground = None;
     }
 
     #[inline]

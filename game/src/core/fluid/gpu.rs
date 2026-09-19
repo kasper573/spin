@@ -21,7 +21,7 @@ use bevy::render::{Render, RenderStartup, RenderSystems};
 use super::frame::{
     ACCUMULATORS_PER_FRAME, FluidFrame, GpuBodies, Params, STAMP_SLOT, accumulators_of,
 };
-use super::surface::{self, SurfaceBuffers, SurfaceParams, TABLE_SLOTS};
+use super::surface::{self, MAX_MOTES, SurfaceBuffers, SurfaceParams, TABLE_SLOTS};
 use super::{FluidReady, ITERATIONS, MAX_PARTICLES, MAX_SAMPLES, TABLE_CELLS};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
@@ -120,10 +120,13 @@ enum Kernel {
     Lambda,
     Delta,
     UpdateVelocities,
+    Squeeze,
     Viscosity,
     Place,
     Buoyancy,
     Drag,
+    Shed,
+    Fly,
     Mark,
     List,
     PrepareDispatch,
@@ -138,6 +141,7 @@ const PARTICLES: &str = "embedded://game/core/fluid/shaders/particles.wgsl";
 const SORT: &str = "embedded://game/core/fluid/shaders/sort.wgsl";
 const BODIES: &str = "embedded://game/core/fluid/shaders/bodies.wgsl";
 const SURFACE: &str = "embedded://game/core/fluid/shaders/surface.wgsl";
+const SPRAY: &str = "embedded://game/core/fluid/shaders/spray.wgsl";
 
 /// Which bindings of each group a kernel uses. Binding 0 of groups 0, 2 and 3 is a uniform, the
 /// rest are storage buffers; group 1 is the vessel's.
@@ -157,13 +161,14 @@ struct Spec {
 
 const NONE: &[(usize, u32)] = &[];
 const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (0, 14), (2, 2), (2, 3)];
-const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12), (2, 1)];
+const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 6), (0, 9), (0, 12), (2, 1)];
 /// The surface is smoothed this many times back and forth, and once more into the buffer
 /// it is drawn from.
 const POLISH_PASSES: usize = 1;
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
+const SPRAY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 24] = [
+const SPECS: [Spec; 27] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -234,7 +239,7 @@ const SPECS: [Spec; 24] = [
         kernel: Kernel::Predict,
         shader: PARTICLES,
         entry: "predict",
-        particles: &[0, 1, 2, 5, 7],
+        particles: &[0, 1, 2, 4, 5, 7],
         vessel: true,
         bodies: &[],
         surface: &[],
@@ -289,9 +294,20 @@ const SPECS: [Spec; 24] = [
         kernel: Kernel::UpdateVelocities,
         shader: PARTICLES,
         entry: "update_velocities",
-        particles: &[0, 1, 2, 5, 7],
+        particles: &[0, 1, 2, 4, 5, 7],
         vessel: true,
         bodies: &[],
+        surface: &[],
+        read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Squeeze,
+        shader: PARTICLES,
+        entry: "squeeze",
+        particles: &[0, 1, 2, 5, 9, 12],
+        vessel: true,
+        bodies: &[0, 2],
         surface: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
@@ -300,7 +316,7 @@ const SPECS: [Spec; 24] = [
         kernel: Kernel::Viscosity,
         shader: PARTICLES,
         entry: "viscosity",
-        particles: &[0, 1, 2, 4, 7, 9, 12],
+        particles: &[0, 1, 2, 4, 5, 6, 7, 9, 12],
         vessel: true,
         bodies: &[0, 2, 3],
         surface: &[],
@@ -312,7 +328,7 @@ const SPECS: [Spec; 24] = [
         shader: BODIES,
         entry: "place",
         particles: &[0],
-        vessel: false,
+        vessel: true,
         bodies: &[0, 1, 2],
         surface: &[],
         read_only: BODY_READS,
@@ -324,7 +340,7 @@ const SPECS: [Spec; 24] = [
         entry: "buoyancy",
         particles: &[0, 1, 2, 9, 12],
         vessel: true,
-        bodies: &[0, 2, 3, 4],
+        bodies: &[0, 1, 2, 3, 4],
         surface: &[],
         read_only: BODY_READS,
         workgroup: WORKGROUP,
@@ -333,19 +349,41 @@ const SPECS: [Spec; 24] = [
         kernel: Kernel::Drag,
         shader: BODIES,
         entry: "drag",
-        particles: &[0, 1, 2, 4, 9, 12],
+        particles: &[0, 1, 2, 6, 9, 12],
         vessel: true,
-        bodies: &[0, 2, 4],
+        bodies: &[0, 1, 2, 4],
         surface: &[],
         read_only: BODY_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Shed,
+        shader: SPRAY,
+        entry: "shed",
+        particles: &[0, 1, 2, 4],
+        vessel: true,
+        bodies: &[],
+        surface: &[13],
+        read_only: SPRAY_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Fly,
+        shader: SPRAY,
+        entry: "fly",
+        particles: &[0, 1, 9, 12],
+        vessel: true,
+        bodies: &[],
+        surface: &[13],
+        read_only: SPRAY_READS,
         workgroup: WORKGROUP,
     },
     Spec {
         kernel: Kernel::Mark,
         shader: SURFACE,
         entry: "mark",
-        particles: &[0, 1, 9, 12],
-        vessel: false,
+        particles: &[0, 1, 2, 9, 12],
+        vessel: true,
         bodies: &[],
         surface: &[0, 3, 4, 11, 12],
         read_only: SURFACE_READS,
@@ -482,6 +520,7 @@ struct RawBuffers {
     table: Buffer,
     cell_table: Buffer,
     dispatch: Buffer,
+    motes: Buffer,
 }
 
 fn init_pipelines(
@@ -721,6 +760,7 @@ fn prepare(
         table: surface[3].clone(),
         cell_table: surface[7].clone(),
         dispatch: surface[6].clone(),
+        motes: surface[12].clone(),
     });
 }
 
@@ -840,6 +880,8 @@ fn dispatch(
         bin(encoder, to, vessel_now, thin.count);
         let remaining = Threads::Count(thin.pending);
         d.run(encoder, Kernel::Thin, 0, to, 0, vessel_now, remaining);
+        // the spray is measured in the water's units, which thinning the water changes
+        encoder.clear_buffer(&raw.motes, 0, None);
     }
     if frame.inject.pending > 0 {
         let joining = Threads::Count(frame.inject.pending);
@@ -893,10 +935,14 @@ fn dispatch(
         if coupled {
             d.run(encoder, Kernel::Buoyancy, 0, po, bo, vo, samples);
         }
-        d.run(encoder, Kernel::Viscosity, 0, po, bo, vo, count);
+        d.run(encoder, Kernel::Squeeze, variant, po, bo, vo, count);
+        d.run(encoder, Kernel::Viscosity, variant, po, bo, vo, count);
         if coupled {
-            d.run(encoder, Kernel::Drag, 0, po, bo, vo, samples);
+            d.run(encoder, Kernel::Drag, variant, po, bo, vo, samples);
         }
+        d.run(encoder, Kernel::Shed, 0, po, bo, vo, count);
+        let motes = Threads::Count(MAX_MOTES as u32);
+        d.run(encoder, Kernel::Fly, 0, po, bo, vo, motes);
         encoder.copy_buffer_to_buffer(
             &raw.velocity_next,
             0,

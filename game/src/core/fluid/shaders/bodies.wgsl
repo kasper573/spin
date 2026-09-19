@@ -5,12 +5,12 @@
 // CPU reads back: a late or doubled readback still finds each frame's and applies it exactly
 // once. The sums are per unit of the body's mass, which keeps them in the fixed-point range
 // whatever it weighs.
-#import vessel::vessel_gravity
+#import vessel::{Through, vessel_gravity, vessel_gone_through, vessel_turned}
 #import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell, FIXED}
 
 @group(0) @binding(1) var<storage, read> position: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> velocity: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> velocity_next: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> pred_out: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read> cell_start: array<u32>;
 @group(0) @binding(12) var<storage, read> key: array<u32>;
 
@@ -57,6 +57,30 @@ fn poly(r2: f32) -> f32 {
     return params.poly * t * t * t;
 }
 
+/// Where a sample of a body is: on its body, and beyond whatever opening of the vessel that
+/// part of the body has gone in at, where the water meets it.
+struct Sample {
+    arm: vec3<f32>,
+    weight: f32,
+    gone: Through,
+}
+
+fn sample_of(b: u32, k: u32) -> Sample {
+    let body = bodies.items[b];
+    let local = samples[body.slots.x + (k - body.slots.z)];
+    let arm = rotate(b, local.xyz);
+    return Sample(arm, local.w, vessel_gone_through(body.position.xyz + arm));
+}
+
+/// What the water does to a sample, as the body has it: brought back through the opening the
+/// sample has gone in at.
+fn felt(sample: Sample, v: vec3<f32>) -> vec3<f32> {
+    if (sample.gone.there) {
+        return vessel_turned(v, 1u - sample.gone.opening);
+    }
+    return v;
+}
+
 @compute @workgroup_size(64)
 fn place(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = id.x;
@@ -65,11 +89,12 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let b = body_of_sample(k);
     let body = bodies.items[b];
-    let local = samples[body.slots.x + (k - body.slots.z)];
-    let r = rotate(b, local.xyz);
-    let world = body.position.xyz + r;
-    let vel = body.velocity.xyz + cross(body.angular.xyz, r);
-    boundary[k] = Boundary(vec4(world, local.w), vec4(vel, f32(b)));
+    let sample = sample_of(b, k);
+    var vel = body.velocity.xyz + cross(body.angular.xyz, sample.arm);
+    if (sample.gone.there) {
+        vel = vessel_turned(vel, sample.gone.opening);
+    }
+    boundary[k] = Boundary(vec4(sample.gone.p, sample.weight), vec4(vel, f32(b)));
 }
 
 /// Hydrostatic buoyancy on bodies. PBF pressure is a per-step correction, not a depth-integrated
@@ -119,10 +144,11 @@ fn buoyancy(@builtin(global_invocation_id) id: vec3<u32>) {
     let wet = min(rho / params.wet_ref, 1.0);
     let force = -params.rest_density * body.extra.x * wet * vessel_gravity(x);
     sample_state[k] = SampleState(vec4(fv, rho), vec4(force, wet));
-    let impulse = force * params.dt * body.extra.y;
+    let sample = sample_of(b, k);
+    let impulse = felt(sample, force) * params.dt * body.extra.y;
     let base = b * ACC_STRIDE;
     add_fixed3(base + ACC_BUOYANCY, impulse);
-    add_fixed3(base + ACC_BUOYANCY_TORQUE, cross(x - body.position.xyz, impulse));
+    add_fixed3(base + ACC_BUOYANCY_TORQUE, cross(sample.arm, impulse));
     add_fixed(base + ACC_WET, wet / f32(body.slots.y));
 }
 
@@ -152,7 +178,7 @@ fn drag(@builtin(global_invocation_id) id: vec3<u32>) {
             let kj = key[j];
             let pj = position[j];
             let vj = velocity[j];
-            let scale = velocity_next[j].w;
+            let scale = pred_out[j].w;
             if (kj != k) {
                 continue;
             }
@@ -169,7 +195,7 @@ fn drag(@builtin(global_invocation_id) id: vec3<u32>) {
     if (coupling <= 0.0) {
         return;
     }
-    flow *= body.extra.y;
+    flow = felt(sample_of(b, k), flow) * body.extra.y;
     coupling *= body.extra.y;
     let base = b * ACC_STRIDE;
     add_fixed3(base + ACC_FLOW, flow);

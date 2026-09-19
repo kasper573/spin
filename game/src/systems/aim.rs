@@ -1,23 +1,22 @@
 //! Where the crosshair points: the first terrain the view ray meets, or otherwise the far wall or
-//! cap of the drum where the ray leaves the glass interior. Cast in the drum's frame from the
-//! avatar's eye, in double precision and without ever forming the ring's radius squared, so it
-//! holds at any size of ring.
+//! cap of the drum where the ray leaves the glass interior, and on from there wherever that is
+//! the open mouth of a portal. Cast in the drum's frame from the avatar's eye, in double
+//! precision and without ever forming the ring's radius squared, so it holds at any size of
+//! ring.
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use crate::core::avatar;
-use crate::core::math::mat3mul;
-use crate::core::units::Metres;
-use crate::systems::drum::{Drum, PATCH, Place, Round};
-use crate::systems::scene::Viewpoint;
+use crate::core::math::{Quatd, quat_mul, quat_rotate};
+use crate::core::units::{Metres, Radians};
+use crate::systems::drum::{
+    CapSide, Drum, DrumSurface, Mouth, MouthColour, MouthCoords, PATCH, Round,
+};
+use crate::systems::scene::{
+    LinesBeyondBlue, LinesBeyondOrange, SettleVantages, Vantage, Vantages,
+};
 use crate::systems::sim::{SimSet, Simulation};
 
 const EPS: f64 = 1e-9;
-/// How many points an outline has, at least and at most, and how many per feature of the
-/// ground it crosses.
-const OUTLINE_LEAST: usize = 48;
-const OUTLINE_MOST: usize = 512;
-const OUTLINE_PER_FEATURE: f64 = 2.0;
 /// The shortest step the ray is marched in, as a share of the ground's cells, and how many
 /// times the step it crossed the ground in is halved to find where.
 const FINEST_STEP: f64 = 0.125;
@@ -27,21 +26,45 @@ const HALVINGS: usize = 12;
 /// which holds only while they are less than half a turn apart.
 const QUARTER_TURN: f64 = std::f64::consts::FRAC_PI_2;
 
+/// How many portals a ray is followed through: two mouths that face each other would
+/// otherwise be gone through for ever.
+const MOST_PASSES: usize = 4;
+/// How far either side of an open mouth the ray is taken up again, as a share of how far it
+/// has come.
+const THROUGH: f64 = 1e-9;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AimPoint {
     pub point: DVec3,
     /// Inward-facing surface normal at the point.
     pub normal: DVec3,
+    pub surface: DrumSurface,
+    /// How far the ray ran to get there, and the turn the portals it went through on the way
+    /// put it through: what turns a direction at the eye into that direction at the point.
+    pub range: f64,
+    pub turn: Quatd,
+    /// The first portal mouth the ray met, on its way or at its end.
+    pub mouth: Option<MouthColour>,
+}
+
+/// What the crosshair's marker outlines: a disc this big on this mouth's place, which is
+/// wherever a tool has it, with the mouth's top marked where that matters, and marked as
+/// refused where what the tool would put there cannot go.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AimMarker {
+    pub mouth: Mouth,
+    pub radius: Metres,
+    pub top: bool,
+    pub refused: bool,
 }
 
 /// The current crosshair target, refreshed every frame before commands run, and what is
-/// drawn there: the outline of the brush at work, if one is, and whether the crosshair is
-/// live.
+/// drawn there: the marker of the tool at work, if one is, and whether the crosshair is live.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
 pub struct Aim {
     pub target: Option<AimPoint>,
-    /// The radius of the brush at work on the target, when one is.
-    pub brush: Option<Metres>,
+    /// The marker of the tool at work on the target, when one is.
+    pub marker: Option<AimMarker>,
     /// Whether the viewer is at the controls: the crosshair is being steered, so its marker
     /// is drawn bright, and the tool that is out answers to the mouse.
     pub engaged: bool,
@@ -51,6 +74,8 @@ pub struct Aim {
 /// this share of its own radius above the surface, clear of it at any size of ring.
 const MARKER_AT_REST: Metres = Metres(0.3);
 const MARKER_LIFT: f64 = 0.01;
+/// Where the tick that marks a marker's top starts, as a share of the way out to its rim.
+const TICK_FROM: f64 = 0.6;
 
 pub struct AimPlugin;
 
@@ -58,11 +83,69 @@ impl Plugin for AimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Aim>()
             .add_systems(Update, update.before(SimSet::Command))
-            .add_systems(Update, marker.in_set(SimSet::Observe));
+            .add_systems(Update, marker.in_set(SimSet::Observe).after(SettleVantages));
     }
 }
 
+/// What a ray from a point of the drum's frame meets, followed through whatever open portals
+/// it goes into.
 pub fn cast(origin: DVec3, dir: DVec3, drum: &Drum) -> Option<AimPoint> {
+    let (mut origin, mut dir) = (origin, dir);
+    let mut met: Option<AimPoint> = None;
+    for _ in 0..=MOST_PASSES {
+        let Some(hit) = cast_once(origin, dir, drum) else {
+            break;
+        };
+        let so_far = met.unwrap_or(AimPoint {
+            range: 0.0,
+            turn: [0.0, 0.0, 0.0, 1.0],
+            mouth: None,
+            ..hit
+        });
+        let here = AimPoint {
+            range: so_far.range + hit.range,
+            turn: so_far.turn,
+            mouth: so_far.mouth.or(hit.mouth),
+            ..hit
+        };
+        met = Some(here);
+        let step = THROUGH * here.range.max(1.0);
+        let Some(passage) = drum.passage_through_mouths(
+            (hit.point - dir * step).to_array(),
+            (hit.point + dir * step).to_array(),
+        ) else {
+            break;
+        };
+        origin = DVec3::from_array(passage.point);
+        dir = DVec3::from_array(passage.turned(dir.to_array()));
+        met = Some(AimPoint {
+            turn: quat_mul(&passage.turn, &here.turn),
+            ..here
+        });
+    }
+    met
+}
+
+/// A disc about an aim point, the way the surface lies there.
+pub fn disc_at(drum: &Drum, at: AimPoint) -> Mouth {
+    Mouth {
+        anchor: drum.mouth_anchor(at.point.to_array(), at.surface),
+        roll: Radians(0.0),
+    }
+}
+
+/// The outline of a disc of `radius` about an aim point, wrapped onto the surface it rests on
+/// and held `lift` above it: over the ground it runs round the wall and along the axis at that
+/// distance, rising and falling with whatever the ground does there, so that it outlines just
+/// what a brush of that size would touch; on a cap it lies flat on the cap.
+pub fn outline(drum: &Drum, at: AimPoint, radius: f64, lift: f64) -> Vec<DVec3> {
+    drum.mouth_rim(&disc_at(drum, at), radius, lift)
+        .into_iter()
+        .map(DVec3::from_array)
+        .collect()
+}
+
+fn cast_once(origin: DVec3, dir: DVec3, drum: &Drum) -> Option<AimPoint> {
     let (radius, half_width) = (drum.ring.radius.0 as f64, drum.ring.half_width.0 as f64);
     let mut t_in = f64::NEG_INFINITY;
     let mut t_out = f64::INFINITY;
@@ -107,74 +190,91 @@ pub fn cast(origin: DVec3, dir: DVec3, drum: &Drum) -> Option<AimPoint> {
 
     let point = origin + dir * t_out;
     let at_cap = (drum.axial(point.to_array()).abs() - half_width).abs() < 1e-4 * half_width;
-    let normal = if at_cap {
-        DVec3::new(0.0, if point.y + axial > 0.0 { -1.0 } else { 1.0 }, 0.0)
+    let (normal, surface) = if at_cap {
+        let side = if point.y + axial > 0.0 {
+            CapSide::High
+        } else {
+            CapSide::Low
+        };
+        (DVec3::new(0.0, -side.sign(), 0.0), DrumSurface::Cap(side))
     } else {
         let (_, outward) = drum.depth_and_outward(point.to_array());
-        -DVec3::from_array(outward)
+        (-DVec3::from_array(outward), DrumSurface::Wall)
     };
-    Some(AimPoint { point, normal })
+    Some(met_at(point, normal, surface, t_out, drum))
 }
 
-/// The outline of a disc of `radius` about an aim point, wrapped onto the surface it rests on
-/// and held `lift` above it: over the ground it runs round the wall and along the axis at that
-/// distance, rising and falling with whatever the ground does there, so that it outlines just
-/// what a brush of that size would touch; on a cap it lies flat on the cap.
-pub fn outline(drum: &Drum, at: AimPoint, radius: f64, lift: f64) -> Vec<DVec3> {
-    let landscape = &drum.landscape;
-    let grid = landscape.grid();
-    let feature = grid.arc.min(grid.along);
-    let points = ((std::f64::consts::TAU * radius / feature * OUTLINE_PER_FEATURE) as usize)
-        .clamp(OUTLINE_LEAST, OUTLINE_MOST);
-    let angles = (0..points).map(|k| k as f64 / points as f64 * std::f64::consts::TAU);
-    if at.normal.y.abs() > 0.5 {
-        let centre = at.point + at.normal * lift;
-        return angles
-            .map(|a| centre + DVec3::new(a.cos() * radius, 0.0, a.sin() * radius))
-            .collect();
+fn met_at(point: DVec3, normal: DVec3, surface: DrumSurface, range: f64, drum: &Drum) -> AimPoint {
+    AimPoint {
+        point,
+        normal,
+        surface,
+        range,
+        turn: [0.0, 0.0, 0.0, 1.0],
+        mouth: drum.mouth_under(point.to_array(), surface),
     }
-    let ring = drum.ring;
-    let (ring_radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
-    let turn = drum.turn_to(at.point.to_array());
-    let axial = drum.axial(at.point.to_array());
-    angles
-        .map(|a| {
-            let turn = turn + a.cos() * radius / ring_radius;
-            let y = (axial + a.sin() * radius).clamp(-half_width, half_width);
-            let place = Place {
-                round: drum.site.round.on(turn * ring_radius, grid),
-                along: y,
-            };
-            let height = landscape.sample(place).0 + lift;
-            let on_glass = drum.wall_point(turn, y - drum.site.y);
-            let (_, outward) = drum.depth_and_outward(on_glass);
-            DVec3::from_array(on_glass) - DVec3::from_array(outward) * height
-        })
-        .collect()
 }
 
 fn update(sim: Res<Simulation>, mut aim: ResMut<Aim>) {
-    let hull = sim.avatar();
-    let eye = DVec3::from_array(avatar::eye(hull));
-    let forward = DVec3::from_array(mat3mul(&hull.m, &[0.0, 0.0, -1.0]));
-    aim.target = cast(eye, forward, &sim.drum);
+    let (eye, attitude) = sim.eye();
+    let forward = DVec3::from_array(quat_rotate(&attitude, &[0.0, 0.0, -1.0]));
+    aim.target = cast(DVec3::from_array(eye), forward, &sim.drum);
 }
 
-/// The marker on the target: the outline of the brush at work, or of the marker at rest,
-/// wrapped onto the surface there.
-fn marker(aim: Res<Aim>, sim: Res<Simulation>, viewpoint: Res<Viewpoint>, mut gizmos: Gizmos) {
+/// The marker on the target: the outline of what the tool at work marks, or of the marker at
+/// rest, wrapped onto the surface there, and drawn for every vantage it may be seen from.
+fn marker(
+    aim: Res<Aim>,
+    sim: Res<Simulation>,
+    vantages: Res<Vantages>,
+    mut own: Gizmos,
+    mut beyond_blue: Gizmos<LinesBeyondBlue>,
+    mut beyond_orange: Gizmos<LinesBeyondOrange>,
+) {
     let Some(target) = aim.target else {
         return;
     };
-    let radius = aim.brush.unwrap_or(MARKER_AT_REST).0 as f64;
-    let colour = if aim.engaged {
-        Color::srgba(1.0, 1.0, 1.0, 0.9)
+    let marked = aim.marker.unwrap_or(AimMarker {
+        mouth: disc_at(&sim.drum, target),
+        radius: MARKER_AT_REST,
+        top: false,
+        refused: false,
+    });
+    let radius = marked.radius.0 as f64;
+    let alpha = if aim.engaged { 0.9 } else { 0.35 };
+    let colour = if marked.refused {
+        Color::srgba(1.0, 0.15, 0.1, alpha)
     } else {
-        Color::srgba(1.0, 1.0, 1.0, 0.35)
+        Color::srgba(1.0, 1.0, 1.0, alpha)
     };
-    let outline = outline(&sim.drum, target, radius, radius * MARKER_LIFT);
-    let closed = outline.iter().chain(outline.first());
-    gizmos.linestrip(closed.map(|p| viewpoint.local(p.to_array())), colour);
+    let lift = radius * MARKER_LIFT;
+    let mut outline = sim.drum.mouth_rim(&marked.mouth, radius, lift);
+    outline.extend(outline.first().copied());
+    let up = |v: f64| MouthCoords { u: 0.0, v, h: lift };
+    let tick = marked.top.then(|| {
+        [TICK_FROM, 1.0].map(|share| sim.drum.mouth_point(&marked.mouth, up(share * radius)))
+    });
+    let strips = [
+        Some(outline.as_slice()),
+        tick.as_ref().map(|t| t.as_slice()),
+    ];
+    let [seen, blue, orange] = vantages.0;
+    for strip in strips.into_iter().flatten() {
+        draw(&mut own, seen, strip, colour);
+        draw(&mut beyond_blue, blue, strip, colour);
+        draw(&mut beyond_orange, orange, strip, colour);
+    }
+}
+
+fn draw<Lines: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<Lines>,
+    vantage: Option<Vantage>,
+    strip: &[[f64; 3]],
+    colour: Color,
+) {
+    if let Some(vantage) = vantage {
+        gizmos.linestrip(strip.iter().map(|p| vantage.local(*p)), colour);
+    }
 }
 
 /// The first crossing of the ground along the ray between `t0` and `t1`. Bare ground lies at
@@ -187,10 +287,8 @@ fn march_terrain(origin: DVec3, dir: DVec3, t0: f64, t1: f64, drum: &Drum) -> Op
     }
     let hit = |t: f64| {
         let point = origin + dir * t;
-        AimPoint {
-            point,
-            normal: DVec3::from_array(drum.ground_normal(point.to_array())),
-        }
+        let normal = DVec3::from_array(drum.ground_normal(point.to_array()));
+        met_at(point, normal, DrumSurface::Wall, t, drum)
     };
     let bare = below(origin, dir, t0, drum.landscape.base() as f64, drum).filter(|t| *t <= t1);
     let stretches = over_sculpted(origin, dir, t0, t1, drum);

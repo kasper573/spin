@@ -20,13 +20,14 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
 use super::gpu::{COLUMN_FIXED, Columns, GroundLayout, SURVEY_SLOTS};
-use super::landscape::PATCH;
-use super::{Drum, DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Round, Site, TILE};
+use super::landscape::{Landscape, PATCH};
+use super::{DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Round, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
-use crate::systems::scene::{SPACE, Sky, Viewpoint};
+use crate::systems::portal::{MouthsUniform, Pictures, SolidCopies, SolidMaterial, solid};
+use crate::systems::scene::{SPACE, SeenFrom, SettleVantages, VANTAGES, Vantages};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
 use crate::systems::water::WATER_IOR;
@@ -91,7 +92,8 @@ impl Plugin for DrumPlugin {
             Update,
             (rebuild, place, light, wet, feed_water)
                 .chain()
-                .in_set(SimSet::Observe),
+                .in_set(SimSet::Observe)
+                .after(SettleVantages),
         )
         .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
@@ -144,6 +146,15 @@ struct GlassMaterial {
     /// The viewer's own figure, for the glass to mirror; see `systems/figure.rs`.
     #[uniform(10)]
     figure: FigureUniform,
+    /// The portals let into the caps; see `systems/portal`.
+    #[uniform(11)]
+    mouths: MouthsUniform,
+    /// What is seen through each portal, for where it is open.
+    #[texture(12)]
+    #[sampler(14)]
+    through_blue: Option<Handle<Image>>,
+    #[texture(13)]
+    through_orange: Option<Handle<Image>>,
 }
 
 impl Material for GlassMaterial {
@@ -203,6 +214,15 @@ struct TerrainMaterial {
     air: AirUniform,
     #[storage(1, read_only)]
     columns: Handle<ShaderBuffer>,
+    /// The portals let into the ground; see `systems/portal`.
+    #[uniform(11)]
+    mouths: MouthsUniform,
+    /// What is seen through each portal, for where it is open.
+    #[texture(12)]
+    #[sampler(14)]
+    through_blue: Option<Handle<Image>>,
+    #[texture(13)]
+    through_orange: Option<Handle<Image>>,
 }
 
 impl Material for TerrainMaterial {
@@ -221,7 +241,25 @@ impl Material for TerrainMaterial {
     }
 }
 
-/// Something fixed to the wheel: where it sits in the drum's frame.
+/// The wheel as it is drawn about a site of its wall, which is the viewer's own or, through a
+/// portal, the one a far mouth stands at: its meshes are built in the frame about that site.
+struct Wheel<'a> {
+    ring: Ring,
+    site: Site,
+    landscape: &'a Landscape,
+}
+
+impl Wheel<'_> {
+    fn wall_point(&self, turn: f64, axial: f64) -> Vec3d {
+        self.ring.wall_point(turn, axial)
+    }
+
+    fn depth_and_outward(&self, p: Vec3d) -> (f64, Vec3d) {
+        self.ring.depth_and_outward(p)
+    }
+}
+
+/// Something fixed to the wheel: where it sits in the frame of the vantage it is seen from.
 #[derive(Component)]
 struct Placed(Vec3d);
 
@@ -232,18 +270,26 @@ struct Structure;
 #[derive(Component)]
 struct Terrain;
 
-/// What the wheel's meshes were last built for.
+/// What the wheel's meshes were last built for, for each vantage.
 #[derive(Resource, Default)]
-struct Built {
+struct Built([BuiltFor; VANTAGES]);
+
+#[derive(Default)]
+struct BuiltFor {
     structure: Option<(Ring, Site, f64)>,
     terrain: Option<(Ring, u64, Site, f64)>,
 }
 
-/// The materials the wheel is built with.
+/// The materials the wheel is built with: the metal is the same from wherever it is seen, the
+/// glass and the ground are told where they are seen from.
 #[derive(Resource)]
 struct WheelMaterials {
+    metal: [Handle<SolidMaterial>; VANTAGES],
+    seen: [SeenMaterials; VANTAGES],
+}
+
+struct SeenMaterials {
     glass: Handle<GlassMaterial>,
-    metal: Handle<StandardMaterial>,
     terrain: Handle<TerrainMaterial>,
 }
 
@@ -251,10 +297,11 @@ fn spawn(
     mut commands: Commands,
     frame: Res<DrumFrame>,
     mut glass: ResMut<Assets<GlassMaterial>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
+    mut standard: ResMut<Assets<SolidMaterial>>,
+    mut copies: ResMut<SolidCopies>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
-    commands.insert_resource(WheelMaterials {
+    let seen = [(); VANTAGES].map(|()| SeenMaterials {
         glass: glass.add(GlassMaterial {
             tint: LinearRgba::new(0.9, 0.96, 0.98, 1.0),
             to_stars: Vec4::new(0.0, 0.0, 0.0, 1.0),
@@ -265,12 +312,9 @@ fn spawn(
             ground: ground_albedo(),
             air: AirUniform::default(),
             figure: FigureUniform::default(),
-        }),
-        metal: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.16, 0.17, 0.2),
-            metallic: 0.8,
-            perceptual_roughness: 0.45,
-            ..default()
+            mouths: MouthsUniform::default(),
+            through_blue: None,
+            through_orange: None,
         }),
         terrain: terrain.add(TerrainMaterial {
             dirt: DIRT.into(),
@@ -285,115 +329,157 @@ fn spawn(
             scatter: water::SCATTERING.extend(0.0),
             air: AirUniform::default(),
             columns: frame.columns.clone(),
+            mouths: MouthsUniform::default(),
+            through_blue: None,
+            through_orange: None,
         }),
+    });
+    let metal = standard.add(solid(StandardMaterial {
+        base_color: Color::srgb(0.16, 0.17, 0.2),
+        metallic: 0.8,
+        perceptual_roughness: 0.45,
+        ..default()
+    }));
+    commands.insert_resource(WheelMaterials {
+        metal: std::array::from_fn(|k| copies.seen_from(&metal, k, &mut standard)),
+        seen,
     });
     commands.init_resource::<Built>();
 }
 
-/// Rebuild whatever the ring, the site or the landscape has outdated.
+/// Rebuild whatever the ring, a vantage's site or the landscape has outdated, and take down
+/// what was built for a vantage that nothing is seen from any more.
 #[allow(clippy::too_many_arguments)]
 fn rebuild(
     mut commands: Commands,
     sim: Res<Simulation>,
-    viewpoint: Res<Viewpoint>,
+    vantages: Res<Vantages>,
     materials: Res<WheelMaterials>,
     mut built: ResMut<Built>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glass: ResMut<Assets<GlassMaterial>>,
-    structures: Query<Entity, With<Structure>>,
-    terrains: Query<Entity, With<Terrain>>,
+    structures: Query<(Entity, &SeenFrom), With<Structure>>,
+    terrains: Query<(Entity, &SeenFrom), With<Terrain>>,
 ) {
-    let drum = &sim.drum;
-    let (ring, site, standoff) = (drum.ring, drum.site, viewpoint.standoff);
-    let phase = site;
-    if built.structure != Some((ring, site, standoff)) {
-        built.structure = Some((ring, site, standoff));
-        for entity in &structures {
-            commands.entity(entity).despawn();
+    let (ring, landscape) = (sim.drum.ring, &sim.drum.landscape);
+    for (k, vantage) in vantages.0.iter().enumerate() {
+        let seen = SeenFrom(k);
+        let about = vantage.map(|v| (v.frame.site, v.viewpoint.standoff));
+        let structure = about.map(|(site, standoff)| (ring, site, standoff));
+        if built.0[k].structure != structure {
+            built.0[k].structure = structure;
+            for (entity, _) in structures.iter().filter(|(_, of)| **of == seen) {
+                commands.entity(entity).despawn();
+            }
+            if let Some((site, standoff)) = about {
+                let wheel = Wheel {
+                    ring,
+                    site,
+                    landscape,
+                };
+                let columns = columns(ring, standoff);
+                let spans = spans(&wheel, standoff);
+                if let Some(mut material) = glass.get_mut(&materials.seen[k].glass) {
+                    material.panes = Vec4::new(
+                        pane_round(ring) as f32,
+                        PANE as f32,
+                        BEVEL,
+                        GLASS_THICKNESS as f32,
+                    );
+                }
+                let mut structure = |mesh: Mesh| {
+                    (
+                        Structure,
+                        seen,
+                        seen.layers(),
+                        Placed([0.0; 3]),
+                        Mesh3d(meshes.add(mesh)),
+                        NoFrustumCulling,
+                        Transform::default(),
+                    )
+                };
+                let glass_wall = glass_mesh(&wheel, &columns, &spans, &depths(ring, standoff));
+                commands.spawn((
+                    structure(glass_wall),
+                    MeshMaterial3d(materials.seen[k].glass.clone()),
+                    NotShadowCaster,
+                ));
+                for side in [-1.0, 1.0] {
+                    let rim = rim_mesh(&wheel, &columns, side);
+                    commands.spawn((structure(rim), MeshMaterial3d(materials.metal[k].clone())));
+                }
+                let struts = strut_mesh(&wheel, &spans);
+                commands.spawn((
+                    structure(struts),
+                    MeshMaterial3d(materials.metal[k].clone()),
+                ));
+            }
         }
-        let columns = columns(ring, standoff);
-        let spans = spans(drum, standoff);
-        if let Some(mut material) = glass.get_mut(&materials.glass) {
-            material.panes = Vec4::new(
-                pane_round(ring) as f32,
-                PANE as f32,
-                BEVEL,
-                GLASS_THICKNESS as f32,
-            );
-        }
-        let mut structure = |mesh: Mesh| {
-            (
-                Structure,
-                Placed([0.0; 3]),
-                Mesh3d(meshes.add(mesh)),
-                NoFrustumCulling,
-                Transform::default(),
-            )
-        };
-        let glass_wall = glass_mesh(drum, phase, &columns, &spans, &depths(ring, standoff));
-        commands.spawn((
-            structure(glass_wall),
-            MeshMaterial3d(materials.glass.clone()),
-            NotShadowCaster,
-        ));
-        for side in [-1.0, 1.0] {
-            let rim = rim_mesh(drum, &columns, side);
-            commands.spawn((structure(rim), MeshMaterial3d(materials.metal.clone())));
-        }
-        let struts = strut_mesh(drum, &spans);
-        commands.spawn((structure(struts), MeshMaterial3d(materials.metal.clone())));
-    }
-    let landscape = &drum.landscape;
-    let version = landscape.version();
-    if built.terrain != Some((ring, version, site, standoff)) {
-        built.terrain = Some((ring, version, site, standoff));
-        for entity in &terrains {
-            commands.entity(entity).despawn();
-        }
-        if !landscape.is_empty() {
-            let columns = ground_columns(drum, standoff);
-            let rows = ground_rows(drum, standoff);
-            commands.spawn((
-                Terrain,
-                Placed([0.0; 3]),
-                Mesh3d(meshes.add(terrain_mesh(drum, phase, &columns, &rows))),
-                MeshMaterial3d(materials.terrain.clone()),
-                NoFrustumCulling,
-                Transform::default(),
-            ));
+        let version = landscape.version();
+        let terrain = about.map(|(site, standoff)| (ring, version, site, standoff));
+        if built.0[k].terrain != terrain {
+            built.0[k].terrain = terrain;
+            for (entity, _) in terrains.iter().filter(|(_, of)| **of == seen) {
+                commands.entity(entity).despawn();
+            }
+            if let Some((site, standoff)) = about.filter(|_| !landscape.is_empty()) {
+                let wheel = Wheel {
+                    ring,
+                    site,
+                    landscape,
+                };
+                let columns = ground_columns(&wheel, standoff);
+                let rows = ground_rows(&wheel, standoff);
+                commands.spawn((
+                    Terrain,
+                    seen,
+                    seen.layers(),
+                    Placed([0.0; 3]),
+                    Mesh3d(meshes.add(terrain_mesh(&wheel, &columns, &rows))),
+                    MeshMaterial3d(materials.seen[k].terrain.clone()),
+                    NoFrustumCulling,
+                    Transform::default(),
+                ));
+            }
         }
     }
 }
 
-/// Everything fixed to the wheel is placed about the viewpoint.
-fn place(viewpoint: Res<Viewpoint>, mut placed: Query<(&Placed, &mut Transform)>) {
-    for (Placed(at), mut transform) in &mut placed {
-        *transform = viewpoint.place(*at);
+/// Everything fixed to the wheel is placed about the viewpoint of the vantage it is seen from.
+fn place(vantages: Res<Vantages>, mut placed: Query<(&Placed, &SeenFrom, &mut Transform)>) {
+    for (Placed(at), seen, mut transform) in &mut placed {
+        if let Some(vantage) = vantages.0[seen.0] {
+            *transform = vantage.viewpoint.place(*at);
+        }
     }
 }
 
 /// The glass mirrors space wherever the sky has turned it.
 fn light(
     sim: Res<Simulation>,
-    viewpoint: Res<Viewpoint>,
-    sky: Res<Sky>,
+    vantages: Res<Vantages>,
+    pictures: Res<Pictures>,
     air: Res<Air>,
     materials: Res<WheelMaterials>,
     mut glass: ResMut<Assets<GlassMaterial>>,
 ) {
-    if let Some(mut material) = glass.get_mut(&materials.glass) {
+    for (k, (vantage, seen)) in vantages.0.iter().zip(&materials.seen).enumerate() {
+        let (Some(vantage), Some(mut material)) = (vantage, glass.get_mut(&seen.glass)) else {
+            continue;
+        };
         material.air = air.uniform(sim.drum.spin);
-        let stars = sky.rotation.inverse();
+        material.mouths = MouthsUniform::of(&sim.drum, vantage, pictures.found_from(k), sim.time);
+        [material.through_blue, material.through_orange] = pictures.read_from(k);
+        let stars = vantage.sky.rotation.inverse();
         material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
-        let [x, y, z] = viewpoint.origin;
-        material.origin = Vec4::new(x as f32, (y + sim.drum.site.y) as f32, z as f32, 0.0);
+        let [x, y, z] = vantage.viewpoint.origin;
+        material.origin = Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0);
         let ring = sim.drum.ring;
-        let enclosed = sim.drum.encloses(sim.avatar().p);
-        let medium = if sim.submerged() { WATER_IOR } else { 1.0 };
+        let medium = if vantage.submerged { WATER_IOR } else { 1.0 };
         material.ring = Vec4::new(
             ring.radius.0,
             ring.half_width.0,
-            if enclosed { 1.0 } else { 0.0 },
+            if vantage.enclosed { 1.0 } else { 0.0 },
             medium,
         );
     }
@@ -404,54 +490,58 @@ fn mirror(
     materials: Res<WheelMaterials>,
     mut glass: ResMut<Assets<GlassMaterial>>,
 ) {
-    if let Some(mut material) = glass.get_mut(&materials.glass) {
+    if let Some(mut material) = glass.get_mut(&materials.seen[0].glass) {
         material.figure = figure.0.clone();
     }
 }
 
-/// The ground is told where the site lies on the ring and where the viewpoint lies about the
-/// site, so it can look up the water surveyed over each of its points.
+/// The ground is told where each vantage's site lies on the ring and where its viewpoint lies
+/// about the site, so it can look up the water surveyed over each of its points.
+#[allow(clippy::too_many_arguments)]
 fn wet(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
-    viewpoint: Res<Viewpoint>,
+    vantages: Res<Vantages>,
+    pictures: Res<Pictures>,
     air: Res<Air>,
     materials: Res<WheelMaterials>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
-    let Some(mut material) = terrain.get_mut(&materials.terrain) else {
-        return;
-    };
-    material.air = air.uniform(sim.drum.spin);
     let drum = &sim.drum;
     let resolution = fluid.resolution();
-    let arc = drum
-        .water
-        .round
-        .arc_to(drum.site.round, drum.landscape.grid());
-    material.site = Vec4::new(
-        arc as f32,
-        (drum.site.y - drum.water.y) as f32,
-        drum.ring.radius.0,
-        (SURVEY_SLOTS - 1) as f32,
-    );
-    let [x, y, z] = viewpoint.origin;
-    material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
     let columns = Columns::of(drum.ring, resolution);
     let (across, along) = (columns.arc(resolution), resolution.length());
     let particle = resolution.length().powi(3);
-    material.grid = Vec4::new(
-        across as f32,
-        along as f32,
-        drum.ring.half_width.0,
-        (particle / (across * along)) as f32,
-    );
-    material.clock = Vec4::new(
-        sim.time.0,
-        (resolution.length() / COLUMN_FIXED) as f32,
-        (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
-        columns.round as f32,
-    );
+    for (k, (vantage, seen)) in vantages.0.iter().zip(&materials.seen).enumerate() {
+        let (Some(vantage), Some(mut material)) = (vantage, terrain.get_mut(&seen.terrain)) else {
+            continue;
+        };
+        material.air = air.uniform(drum.spin);
+        material.mouths = MouthsUniform::of(drum, vantage, pictures.found_from(k), sim.time);
+        [material.through_blue, material.through_orange] = pictures.read_from(k);
+        let site = vantage.frame.site;
+        let arc = drum.water.round.arc_to(site.round, drum.landscape.grid());
+        material.site = Vec4::new(
+            arc as f32,
+            (site.y - drum.water.y) as f32,
+            drum.ring.radius.0,
+            (SURVEY_SLOTS - 1) as f32,
+        );
+        let [x, y, z] = vantage.viewpoint.origin;
+        material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        material.grid = Vec4::new(
+            across as f32,
+            along as f32,
+            drum.ring.half_width.0,
+            (particle / (across * along)) as f32,
+        );
+        material.clock = Vec4::new(
+            sim.time.0,
+            (resolution.length() / COLUMN_FIXED) as f32,
+            (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
+            columns.round as f32,
+        );
+    }
 }
 
 /// The turns round the ring the meshes are sampled at, from the site round to it again: the
@@ -466,7 +556,7 @@ fn columns(ring: Ring, standoff: f64) -> Vec<f64> {
 }
 
 /// The places along the axis, from the site, the meshes are sampled at, cap to cap.
-fn spans(drum: &Drum, standoff: f64) -> Vec<f64> {
+fn spans(drum: &Wheel, standoff: f64) -> Vec<f64> {
     let half_width = drum.ring.half_width.0 as f64;
     let flat = |_: f64| f64::INFINITY;
     let below = samples(standoff, half_width + drum.site.y, flat);
@@ -496,7 +586,7 @@ fn samples(standoff: f64, reach: f64, limit: impl Fn(f64) -> f64) -> Vec<f64> {
 
 /// The turns round the ring the ground is sampled at: as the glass is, and finer over sculpted
 /// ground.
-fn ground_columns(drum: &Drum, standoff: f64) -> Vec<f64> {
+fn ground_columns(drum: &Wheel, standoff: f64) -> Vec<f64> {
     let ring = drum.ring;
     let radius = ring.radius.0 as f64;
     let grid = drum.landscape.grid();
@@ -522,7 +612,7 @@ fn ground_columns(drum: &Drum, standoff: f64) -> Vec<f64> {
 
 /// The places along the axis, from the site, the ground is sampled at, cap to cap: as the glass
 /// is, and finer over sculpted ground.
-fn ground_rows(drum: &Drum, standoff: f64) -> Vec<f64> {
+fn ground_rows(drum: &Wheel, standoff: f64) -> Vec<f64> {
     let half_width = drum.ring.half_width.0 as f64;
     let grid = drum.landscape.grid();
     let reach = PATCH as f64 * grid.along;
@@ -609,8 +699,8 @@ fn cells(along: f64, phase: f64, size: f64) -> f32 {
 
 /// The glass: its wall over the columns and spans, and a cap at each end over the columns and
 /// the depths in from the wall.
-fn glass_mesh(drum: &Drum, phase: Site, columns: &[f64], spans: &[f64], depths: &[f64]) -> Mesh {
-    let ring = drum.ring;
+fn glass_mesh(drum: &Wheel, columns: &[f64], spans: &[f64], depths: &[f64]) -> Mesh {
+    let (ring, phase) = (drum.ring, drum.site);
     let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
     let pane = pane_round(ring);
     let phase_arc = phase.arc(ring);
@@ -689,7 +779,7 @@ fn grid_indices(
 
 /// The struts: square beams along the axis just outside the glass, evenly round the ring,
 /// each gridded along the spans so that the one the viewer stands by is drawn finely.
-fn strut_mesh(drum: &Drum, spans: &[f64]) -> Mesh {
+fn strut_mesh(drum: &Wheel, spans: &[f64]) -> Mesh {
     let mut rows = Vec::with_capacity(spans.len() + 2);
     rows.push(spans[0] - STRUT_OVERHANG);
     rows.extend_from_slice(spans);
@@ -737,7 +827,7 @@ fn strut_mesh(drum: &Drum, spans: &[f64]) -> Mesh {
 }
 
 /// A rim: a tube round one edge of the glass, along the columns.
-fn rim_mesh(drum: &Drum, columns: &[f64], side: f64) -> Mesh {
+fn rim_mesh(drum: &Wheel, columns: &[f64], side: f64) -> Mesh {
     let y = side * (drum.ring.half_width.0 as f64 + RIM_RADIUS) - drum.site.y;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -781,7 +871,8 @@ fn rim_mesh(drum: &Drum, columns: &[f64], side: f64) -> Mesh {
 /// slope and not by the drop beside it. Bare glass gets no triangles, and nothing is placed on
 /// the glass itself, which would fight it for depth. The tiles round and along and the height
 /// above the glass ride along as attributes.
-fn terrain_mesh(drum: &Drum, phase: Site, columns: &[f64], rows: &[f64]) -> Mesh {
+fn terrain_mesh(drum: &Wheel, columns: &[f64], rows: &[f64]) -> Mesh {
+    let phase = drum.site;
     let landscape = &drum.landscape;
     let ring = drum.ring;
     let radius = ring.radius.0 as f64;

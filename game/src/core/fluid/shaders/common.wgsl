@@ -8,24 +8,46 @@
 // count.
 #define_import_path fluid_common
 
+/// What a particle carries beside its velocity: a whole number it is given when it joins and
+/// keeps, which tells it from every other, and after the point the share of its water the air
+/// has torn to spray.
+const TOLD_APART: f32 = 1024.0;
+
+fn spray_of(carried: f32) -> f32 {
+    return fract(carried) / 0.999;
+}
+
+fn carrying(carried: f32, spray: f32) -> f32 {
+    return floor(carried) + clamp(spray, 0.0, 1.0) * 0.999;
+}
+
 struct Params {
     dt: f32,
     h: f32,
     h_sq: f32,
     poly: f32,
     spiky: f32,
-    w_zero: f32,
     mass: f32,
     rest_density: f32,
-    scorr_k: f32,
-    scorr_wq: f32,
+    // the scale of the kernel the density is held with, which `spiky` is the slope's scale of
+    crowding: f32,
+    // how far under its rest density the air's pressure can hold water together
+    hold: f32,
     eps_lambda: f32,
     max_delta: f32,
     max_speed: f32,
     margin: f32,
-    air_k: f32,
-    wall_keep: f32,
-    viscosity: f32,
+    // what a wall's drag takes of the speed along it, per unit of that speed
+    wall_friction: f32,
+    // how much of a neighbour's velocity is taken on, per unit of how fast it goes by
+    eddy: f32,
+    // the air's density against the water's, which is none in a vacuum; the width of the
+    // drop the air leaves whole, times the square of its speed through it, and the narrowest
+    // the air tears drops to; and what the air tears off a parcel in a step, per unit of speed
+    air: f32,
+    shatter: f32,
+    finest_drop: f32,
+    breakup: f32,
     body_drag: f32,
     wet_ref: f32,
     spacing: f32,

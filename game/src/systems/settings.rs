@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::avatar;
 use crate::core::units::{
-    EARTH_GRAVITY, LitresPerSecond, Metres, MetresPerSecondSquared, RadiansPerSecond,
+    EARTH_GRAVITY, KilogramsPerCubicMetre, LitresPerSecond, Metres, MetresPerSecondSquared,
+    RadiansPerSecond,
 };
+use crate::systems::air::Air;
 use crate::systems::drum::{DEFAULT_RING, Ring};
 use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
 
@@ -21,8 +23,8 @@ pub struct Settings {
     pub flow: LitresPerSecond,
     /// How much land the land tool puts down, or takes up.
     pub build: LitresPerSecond,
-    pub viscosity: f32,
-    pub wall_friction: f32,
+    /// How wide the portal tool makes its portals.
+    pub portal: Metres,
     pub air: bool,
     /// Whether the avatar is solid to the drum and the water, or a ghost.
     pub collisions: bool,
@@ -42,8 +44,7 @@ impl Default for Settings {
             spin,
             flow: LitresPerSecond(20_000.0),
             build: LitresPerSecond(4_000.0),
-            viscosity: 0.15,
-            wall_friction: 0.5,
+            portal: Metres(2.5),
             air: true,
             collisions: true,
             help: true,
@@ -97,20 +98,18 @@ pub enum Dial {
     Spin,
     Flow,
     Build,
-    Viscosity,
-    WallFriction,
+    Portal,
     Diameter,
     Width,
     Thrust,
 }
 
 impl Dial {
-    pub const ALL: [Dial; 8] = [
+    pub const ALL: [Dial; 7] = [
         Dial::Spin,
         Dial::Flow,
         Dial::Build,
-        Dial::Viscosity,
-        Dial::WallFriction,
+        Dial::Portal,
         Dial::Diameter,
         Dial::Width,
         Dial::Thrust,
@@ -121,12 +120,10 @@ impl Dial {
     pub fn key(self) -> Option<KeyCode> {
         match self {
             Dial::Spin => Some(KeyCode::F1),
-            Dial::Viscosity => Some(KeyCode::F2),
-            Dial::WallFriction => Some(KeyCode::F3),
             Dial::Diameter => Some(KeyCode::F4),
             Dial::Width => Some(KeyCode::F5),
             Dial::Thrust => Some(KeyCode::F6),
-            Dial::Flow | Dial::Build => None,
+            Dial::Flow | Dial::Build | Dial::Portal => None,
         }
     }
 
@@ -142,8 +139,7 @@ impl Dial {
             Dial::Spin => "spin",
             Dial::Flow => "flow",
             Dial::Build => "build",
-            Dial::Viscosity => "viscosity",
-            Dial::WallFriction => "wall friction",
+            Dial::Portal => "portal",
             Dial::Diameter => "ring diameter",
             Dial::Width => "ring width",
             Dial::Thrust => "thruster power",
@@ -152,25 +148,21 @@ impl Dial {
 
     pub fn min(self) -> f32 {
         match self {
-            Dial::Spin
-            | Dial::Flow
-            | Dial::Build
-            | Dial::Viscosity
-            | Dial::WallFriction
-            | Dial::Thrust => 0.0,
+            Dial::Spin | Dial::Flow | Dial::Build | Dial::Thrust => 0.0,
             Dial::Diameter => 6.0,
             Dial::Width => 2.0,
+            Dial::Portal => 0.5,
         }
     }
 
-    /// The rates run up to 999 of their unit, the fractions to one, and the ring's size has no
-    /// end: the simulation represents any size.
+    /// The rates run up to 999 of their unit, and the ring's size has no
+    /// end, nor has a portal's: the simulation represents any size, and whether a portal fits
+    /// where it is wanted is for the place to say.
     pub fn max(self) -> f32 {
         match self {
             Dial::Spin | Dial::Thrust => 999.0,
             Dial::Flow | Dial::Build => 999_000.0,
-            Dial::Viscosity | Dial::WallFriction => 1.0,
-            Dial::Diameter | Dial::Width => f32::MAX,
+            Dial::Diameter | Dial::Width | Dial::Portal => f32::MAX,
         }
     }
 
@@ -180,8 +172,8 @@ impl Dial {
             Dial::Spin => 0.05,
             Dial::Flow => 5000.0,
             Dial::Build => 500.0,
-            Dial::Viscosity | Dial::WallFriction => 0.05,
             Dial::Diameter | Dial::Width => 1.0,
+            Dial::Portal => 0.1,
             Dial::Thrust => 0.5,
         }
     }
@@ -200,8 +192,7 @@ impl Dial {
             Dial::Spin => s.spin.0,
             Dial::Flow => s.flow.0,
             Dial::Build => s.build.0,
-            Dial::Viscosity => s.viscosity,
-            Dial::WallFriction => s.wall_friction,
+            Dial::Portal => s.portal.0,
             Dial::Diameter => s.diameter.0,
             Dial::Width => s.width.0,
             Dial::Thrust => s.thrust.0 as f32,
@@ -214,8 +205,7 @@ impl Dial {
             Dial::Spin => s.spin = RadiansPerSecond(value),
             Dial::Flow => s.flow = LitresPerSecond(value),
             Dial::Build => s.build = LitresPerSecond(value),
-            Dial::Viscosity => s.viscosity = value,
-            Dial::WallFriction => s.wall_friction = value,
+            Dial::Portal => s.portal = Metres(value),
             Dial::Diameter => s.diameter = Metres(value),
             Dial::Width => s.width = Metres(value),
             Dial::Thrust => s.thrust = MetresPerSecondSquared(value as f64),
@@ -240,8 +230,7 @@ impl Dial {
         match self {
             Dial::Spin => format!("{v:.3}"),
             Dial::Flow | Dial::Build => format!("{:.1}", v / 1000.0),
-            Dial::Thrust => format!("{v:.1}"),
-            Dial::Viscosity | Dial::WallFriction => format!("{v:.2}"),
+            Dial::Thrust | Dial::Portal => format!("{v:.1}"),
             Dial::Diameter | Dial::Width => format!("{v:.0}"),
         }
     }
@@ -250,8 +239,7 @@ impl Dial {
         match self {
             Dial::Spin => "rad/s",
             Dial::Flow | Dial::Build => "m3/s",
-            Dial::Viscosity | Dial::WallFriction => "",
-            Dial::Diameter | Dial::Width => "m",
+            Dial::Diameter | Dial::Width | Dial::Portal => "m",
             Dial::Thrust => "m/s2",
         }
     }
@@ -370,13 +358,15 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-fn apply(settings: Res<Settings>, mut sim: ResMut<Simulation>) {
+fn apply(settings: Res<Settings>, air: Res<Air>, mut sim: ResMut<Simulation>) {
     sim.resize(settings.ring());
     sim.drum.target_spin = settings.spin;
     sim.thrusters.power = settings.thrust;
-    sim.params.viscosity = settings.viscosity;
-    sim.params.wall_friction = settings.wall_friction;
-    sim.params.air = settings.air;
+    sim.params.air_density = if settings.air {
+        air.density()
+    } else {
+        KilogramsPerCubicMetre(0.0)
+    };
     sim.body_params.air = settings.air;
     sim.avatar_mut().solid = settings.collisions;
 }

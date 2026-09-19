@@ -93,7 +93,7 @@ fn draw(
     let Some(Projection::Perspective(lens)) = cameras.iter().next() else {
         return;
     };
-    let view = viewpoint.view(sim.avatar());
+    let view = viewpoint.view(sim.eye());
     let half_height = DEPTH * (lens.fov / 2.0).tan();
     let half_width = half_height * lens.aspect_ratio;
     let arm = ARM * half_height;

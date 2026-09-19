@@ -34,6 +34,20 @@ struct DrumUniform {
     patches: u32,
     table_mask: u32,
     atlas: u32,
+    // how far from the middle of a mouth it is open, which is nowhere while it is shut
+    passable: f32,
+    openings: array<Opening, 2>,
+}
+
+/// A mouth of the pair the drum may be joined to itself by: its middle, with 1 when it stands;
+/// the way across it and up it on its surface; and the way off its surface into the room, with
+/// 1 when it is on the wall, where how far off the surface something is is its height over the
+/// ground, rather than on a cap, which is flat.
+struct Opening {
+    centre: vec4<f32>,
+    across: vec4<f32>,
+    up: vec4<f32>,
+    inward: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> drum: DrumUniform;
@@ -182,11 +196,170 @@ fn landscape_penetration(p: vec3<f32>, margin: f32) -> Penetration {
     return Penetration(f / len, -grad / len);
 }
 
+const VESSEL_OPENINGS: u32 = 2u;
+
+/// A point as it is beyond an opening, where it is near enough to it to be, and where it is
+/// in the chart of the opening it is before.
+struct Through {
+    p: vec3<f32>,
+    there: bool,
+    opening: u32,
+    chart: vec3<f32>,
+}
+
+fn pair_is_open() -> bool {
+    return drum.passable > 0.0 && drum.openings[0].centre.w > 0.0 && drum.openings[1].centre.w > 0.0;
+}
+
+fn height_over_ground(p: vec3<f32>) -> f32 {
+    return wall(p).height - ground_under(p).x;
+}
+
+/// A point in a mouth's chart: across it, up it, and off its surface into the room.
+fn charted(o: Opening, p: vec3<f32>) -> vec3<f32> {
+    let d = p - o.centre.xyz;
+    var h = dot(d, o.inward.xyz);
+    if (o.inward.w > 0.0) {
+        h = height_over_ground(p);
+    }
+    return vec3(dot(d, o.across.xyz), dot(d, o.up.xyz), h);
+}
+
+/// The point of a mouth's chart that the other mouth's `c` is joined to: as far across it the
+/// other way, as far up it, and as far off its surface on the other side of it.
+fn joined_to(o: Opening, c: vec3<f32>) -> vec3<f32> {
+    let flat = o.centre.xyz - o.across.xyz * c.x + o.up.xyz * c.y;
+    if (o.inward.w > 0.0) {
+        let w = wall(flat);
+        return flat + w.outward * (w.height - ground_under(flat).x + c.z);
+    }
+    return flat - o.inward.xyz * c.z;
+}
+
+/// How far from a mouth's middle a point is, along its surface as nearly as a flat one tells.
+fn across_opening(o: Opening, p: vec3<f32>) -> f32 {
+    let d = p - o.centre.xyz;
+    let off = dot(d, o.inward.xyz);
+    return sqrt(max(dot(d, d) - off * off, 0.0));
+}
+
+/// The mouth that the ground or the cap a point is at is open by, or -1.
+fn opening_at(p: vec3<f32>, on_the_wall: f32) -> i32 {
+    if (!pair_is_open()) {
+        return -1;
+    }
+    for (var i = 0u; i < VESSEL_OPENINGS; i++) {
+        let o = drum.openings[i];
+        let d = p - o.centre.xyz;
+        if (o.inward.w == on_the_wall && dot(d, d) < 4.0 * drum.passable * drum.passable
+            && across_opening(o, p) < drum.passable) {
+            return i32(i);
+        }
+    }
+    return -1;
+}
+
+/// What keeps a point over what is open of a mouth `margin` clear of the mouth's edge, which
+/// is all there is of the surface there: how far it is pushed, and which way.
+fn lip(o: Opening, p: vec3<f32>, margin: f32) -> Penetration {
+    let d = p - o.centre.xyz;
+    let flat = d - o.inward.xyz * dot(d, o.inward.xyz);
+    let across = length(flat);
+    let gap = drum.passable - across;
+    let h = charted(o, p).z;
+    let clear = sqrt(gap * gap + h * h);
+    if (clear >= margin || across < 1e-6) {
+        return Penetration(0.0, o.inward.xyz);
+    }
+    var away = o.inward.xyz;
+    if (clear > 1e-6) {
+        away = (o.inward.xyz * h - flat / across * gap) / clear;
+    }
+    return Penetration(margin - clear, away);
+}
+
+/// Where a point within `reach` of what is open of a mouth is beyond it.
+fn vessel_through(p: vec3<f32>, opening: u32, reach: f32) -> Through {
+    var out = Through(p, false, opening, vec3(0.0));
+    if (!pair_is_open()) {
+        return out;
+    }
+    let o = drum.openings[opening];
+    let d = p - o.centre.xyz;
+    let span = drum.passable + reach;
+    if (dot(d, d) >= span * span) {
+        return out;
+    }
+    out.chart = charted(o, p);
+    out.p = joined_to(drum.openings[1u - opening], out.chart);
+    out.there = true;
+    return out;
+}
+
+/// Where a point that has sunk into what is open of a mouth has come out of the other.
+fn vessel_gone_through(p: vec3<f32>) -> Through {
+    var out = Through(p, false, 0u, vec3(0.0));
+    if (!pair_is_open()) {
+        return out;
+    }
+    for (var i = 0u; i < VESSEL_OPENINGS; i++) {
+        let o = drum.openings[i];
+        let d = p - o.centre.xyz;
+        if (dot(d, d) >= 4.0 * drum.passable * drum.passable || across_opening(o, p) >= drum.passable) {
+            continue;
+        }
+        let c = charted(o, p);
+        if (c.z < 0.0) {
+            return Through(joined_to(drum.openings[1u - i], c), true, i, c);
+        }
+    }
+    return out;
+}
+
+/// A vector carried through a mouth: turned as the two surfaces lie.
+fn vessel_turned(v: vec3<f32>, opening: u32) -> vec3<f32> {
+    let o = drum.openings[opening];
+    let far = drum.openings[1u - opening];
+    return -dot(v, o.across.xyz) * far.across.xyz + dot(v, o.up.xyz) * far.up.xyz
+        - dot(v, o.inward.xyz) * far.inward.xyz;
+}
+
+/// From a point beyond a mouth to a point before it that was brought through, as the side
+/// the point was brought from has it, with 1 where the straight way between them leads through
+/// what is open of the mouth. The two are told apart in the chart the mouths share, where the
+/// one is as far off the mouths' surface on its side as the other is on the other's: so that
+/// each of the two has the other exactly as far off, and the opposite way, which what they
+/// do to each other rests on, however the ground the mouths are let into is shaped.
+fn vessel_apart(brought: Through, other: vec3<f32>) -> vec4<f32> {
+    let o = drum.openings[brought.opening];
+    let c = brought.chart;
+    let d = charted(drum.openings[1u - brought.opening], other);
+    let r = vec3(c.x + d.x, c.y - d.y, c.z + d.z);
+    var t = 0.5;
+    if (c.z + d.z > 0.0) {
+        t = clamp(c.z / (c.z + d.z), 0.0, 1.0);
+    }
+    let crossing = mix(c.xy, vec2(-d.x, d.y), t);
+    if (dot(crossing, crossing) >= drum.passable * drum.passable) {
+        return vec4(0.0);
+    }
+    return vec4(o.across.xyz * r.x + o.up.xyz * r.y + o.inward.xyz * r.z, 1.0);
+}
+
 fn vessel_confine(p_in: vec3<f32>, margin: f32) -> Confined {
     var p = p_in;
     var out = Confined(p, vec4(0.0), vec4(0.0));
     var count = 0u;
-    if (drum.patches == 0u) {
+    let hole = opening_at(p, 1.0);
+    if (hole >= 0) {
+        // no ground stands where a mouth is open, only the mouth's edge
+        let pen = lip(drum.openings[hole], p, margin);
+        if (pen.depth > 0.0) {
+            p += pen.normal * pen.depth;
+            out.first = vec4(pen.normal, 1.0);
+            count = 1u;
+        }
+    } else if (drum.patches == 0u) {
         // the ground is level all round, so it is the glass brought in by its depth
         let w = wall(p);
         let lift = drum.base + margin - w.height;
@@ -211,7 +384,14 @@ fn vessel_confine(p_in: vec3<f32>, margin: f32) -> Confined {
     let cap = drum.half_width - margin;
     let axial = drum.along + p.y;
     var cap_normal = vec4(0.0);
-    if (axial > cap) {
+    let port = opening_at(p, 0.0);
+    if (port >= 0) {
+        let pen = lip(drum.openings[port], p, margin);
+        if (pen.depth > 0.0) {
+            p += pen.normal * pen.depth;
+            cap_normal = vec4(pen.normal, 1.0);
+        }
+    } else if (axial > cap) {
         p.y = cap - drum.along;
         cap_normal = vec4(0.0, -1.0, 0.0, 1.0);
     } else if (axial < -cap) {

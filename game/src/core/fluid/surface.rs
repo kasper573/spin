@@ -25,6 +25,8 @@ pub const CELL_SLOTS: usize = 2 * MAX_VERTICES;
 pub const MAX_INDICES: usize = 6 * 6 * MAX_PARTICLES;
 /// Every particle may be a droplet.
 pub const MAX_DROPLETS: usize = MAX_PARTICLES;
+/// As many motes of spray as particles; see `spray.wgsl`.
+pub const MAX_MOTES: usize = MAX_PARTICLES;
 const ISO: f32 = 0.9;
 /// The extraction grid's cell, and how far a particle's splat reaches, in spacings.
 const CELL: f32 = 0.8 * canonical::SPACING;
@@ -57,15 +59,17 @@ impl SurfaceParams {
     }
 }
 
-/// How far from the origin of the water's frame the grid reaches along each axis: a block's
-/// key holds ten bits per axis about it.
+/// How far from the origin of the water's frame the grid reaches along each axis, in spacings:
+/// a block's key holds ten bits per axis about it.
+pub const GRID_REACH: f32 = 512.0 * 4.0 * CELL;
+
 pub fn grid_reach(resolution: Resolution) -> Metres {
-    Metres(512.0 * 4.0 * cell(resolution))
+    Metres(GRID_REACH * resolution.spacing.0)
 }
 
-/// The grid's cell in metres at this resolution.
-fn cell(resolution: Resolution) -> f32 {
-    CELL * resolution.spacing.0
+/// The grid's cell at this resolution.
+pub fn surface_cell(resolution: Resolution) -> Metres {
+    Metres(CELL * resolution.spacing.0)
 }
 
 #[derive(Clone)]
@@ -89,13 +93,17 @@ pub struct SurfaceBuffers {
     /// The vertices as drawn, smoothed.
     pub polished: Handle<ShaderBuffer>,
     /// Whether each particle is a droplet, left out of the surface, and the droplets: each a
-    /// vec4 of position like a vertex's and foam.
+    /// vec4 of position like a vertex's and foam, one of velocity and what it carries, and one
+    /// of the wall it lies on.
     pub lone: Handle<ShaderBuffer>,
     pub droplets: Handle<ShaderBuffer>,
+    /// The spray: two vec4 per mote, where it is with how wide its drops are, and its velocity
+    /// with how long it has flown.
+    pub motes: Handle<ShaderBuffer>,
 }
 
 impl SurfaceBuffers {
-    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 12] {
+    pub fn handles(&self) -> [&Handle<ShaderBuffer>; 13] {
         [
             &self.vertices,
             &self.indices,
@@ -109,6 +117,7 @@ impl SurfaceBuffers {
             &self.polished,
             &self.lone,
             &self.droplets,
+            &self.motes,
         ]
     }
 
@@ -133,6 +142,7 @@ pub fn create_buffers(make: &mut impl FnMut(usize) -> Handle<ShaderBuffer>) -> S
         cell_value: make(CELL_SLOTS * 4),
         polished: make(MAX_VERTICES * 48),
         lone: make(MAX_PARTICLES * 4),
-        droplets: make(MAX_DROPLETS * 16),
+        droplets: make(MAX_DROPLETS * 48),
+        motes: make(MAX_MOTES * 32),
     }
 }

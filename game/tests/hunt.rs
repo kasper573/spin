@@ -20,7 +20,7 @@ use game::core::units::{
 };
 use game::systems::air::{Air, Suspension};
 use game::systems::drum::GROUND_DEPTH;
-use game::systems::drum::{Place, Ring, Round};
+use game::systems::drum::{DrumSurface, MouthColour, Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::Settings;
 use game::systems::sim::{Footing, Simulation, standing_spin};
@@ -78,6 +78,9 @@ struct Case {
     nudge: f64,
     /// How far round the wheel has turned, which is where the sun stands.
     angle: Radians,
+    /// A pair of portals shot into the ground about where the eye stands, if any: how wide, and
+    /// how far round the ring and along it from the eye each of the two lies.
+    portals: Option<(Metres, [[f64; 2]; 2])>,
 }
 
 /// What was found in a case: what it looked like, and whether the world behind it holds together.
@@ -159,7 +162,8 @@ fn walking_any_ring_leaves_it_standing() {
     use game::core::avatar::Thruster::*;
     let mut app = testing::headless();
     let mut wrong: Vec<String> = Vec::new();
-    for diameter in [8.0f32, 21.0, 200.0, 2_000.0, 20_000.0, 100_000.0] {
+    let diameters = [8.0f32, 21.0, 200.0, 2_000.0, 20_000.0, 100_000.0];
+    for (diameter, portals) in diameters.into_iter().flat_map(|d| [(d, false), (d, true)]) {
         let ring = Ring {
             radius: Metres(diameter / 2.0),
             half_width: Metres((diameter / 4.0).clamp(1.0, 500.0)),
@@ -206,6 +210,19 @@ fn walking_any_ring_leaves_it_standing() {
                     },
                 );
             }
+            // an open pair, the one mouth in the walker's way and the other behind it
+            for (colour, round) in [(MouthColour::Blue, -3.0), (MouthColour::Orange, 8.0)] {
+                if !portals {
+                    break;
+                }
+                let at = sim.drum.wall_point(round / ring.radius.0 as f64, 0.0);
+                let wanted =
+                    sim.drum
+                        .mouth_at(at, DrumSurface::Wall, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+                let width = Metres(1.6f32.min(ring.half_width.0));
+                let fit = sim.drum.fit_mouth(colour, wanted, width);
+                sim.drum.put_mouth(colour, fit, width);
+            }
         }
         let centre = {
             let sim = app.world().resource::<Simulation>();
@@ -241,21 +258,21 @@ fn walking_any_ring_leaves_it_standing() {
                 if !p.iter().all(|c| c.is_finite()) || !sim.avatar().v.iter().all(|c| c.is_finite())
                 {
                     wrong.push(format!(
-                        "{diameter} m: the walker stopped being a number at {p:?}"
+                        "{diameter} m, portals {portals}: the walker stopped being a number at {p:?}"
                     ));
                     break;
                 }
                 let inside = sim.drum.height_above_glass(p);
                 if inside < -reach {
                     wrong.push(format!(
-                        "{diameter} m: the walker went {inside:.3} m through the glass"
+                        "{diameter} m, portals {portals}: the walker went {inside:.3} m through the glass"
                     ));
                     break;
                 }
                 let axial = sim.drum.axial(p).abs();
                 if axial > sim.drum.ring.half_width.0 as f64 + reach {
                     wrong.push(format!(
-                        "{diameter} m: the walker went {axial:.3} m out past the cap"
+                        "{diameter} m, portals {portals}: the walker went {axial:.3} m out past the cap"
                     ));
                     break;
                 }
@@ -279,7 +296,7 @@ fn walking_any_ring_leaves_it_standing() {
         let footing = app.world().resource::<Simulation>().footing();
         if !standing(footing) {
             wrong.push(format!(
-                "{diameter} m: after {waited} s the walker is {footing:?} rather than standing at one g"
+                "{diameter} m, portals {portals}: after {waited} s the walker is {footing:?} rather than standing at one g"
             ));
         }
     }
@@ -308,12 +325,14 @@ fn nothing_thrown_at_the_hull_gets_out_of_it() {
             radius: Metres(diameter / 2.0),
             half_width: Metres((diameter / 4.0).clamp(1.0, 500.0)),
         };
-        // at a cap, into the floor, and at the corner where the two meet
-        for way in [
-            [0.0, 1.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [-0.7, 0.7, 0.0],
+        // at a cap, into the floor, at the corner where the two meet, and into a portal let into
+        // the floor, whose pair throws it as hard at whatever is across the ring from that
+        for (way, portals) in [
+            ([0.0, 1.0, 0.0], false),
+            ([0.0, -1.0, 0.0], false),
+            ([-1.0, 0.0, 0.0], false),
+            ([-0.7, 0.7, 0.0], false),
+            ([-1.0, 0.0, 0.0], true),
         ] {
             {
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
@@ -344,6 +363,31 @@ fn nothing_thrown_at_the_hull_gets_out_of_it() {
                 sim.gyros = Gyros::holding(sim.avatar());
                 let here = sim.avatar().p;
                 sim.resite(here);
+                for (colour, round) in [(MouthColour::Blue, 0.0), (MouthColour::Orange, 8.0)] {
+                    if !portals {
+                        break;
+                    }
+                    let at = sim.drum.wall_point(round / ring.radius.0 as f64, 0.0);
+                    let wanted =
+                        sim.drum
+                            .mouth_at(at, DrumSurface::Wall, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+                    let width = Metres(3.0f32.min(ring.half_width.0 * 1.5));
+                    let fit = sim.drum.fit_mouth(colour, wanted, width);
+                    sim.drum.put_mouth(colour, fit, width);
+                }
+            }
+            if portals {
+                let mut sim = app.world_mut().resource_mut::<Simulation>();
+                let (p, q, v) = (sim.avatar().p, sim.avatar().q, sim.avatar().v);
+                sim.avatar_mut().v = [0.0; 3];
+                drop(sim);
+                testing::run(
+                    &mut app,
+                    Seconds(2.0 * game::systems::drum::OPENING.0 as f32),
+                );
+                let mut sim = app.world_mut().resource_mut::<Simulation>();
+                sim.avatar_mut().place(p, q);
+                sim.avatar_mut().v = v;
             }
             let reach = {
                 let sim = app.world().resource::<Simulation>();
@@ -357,7 +401,7 @@ fn nothing_thrown_at_the_hull_gets_out_of_it() {
                 let past = sim.drum.axial(p).abs() - sim.drum.ring.half_width.0 as f64;
                 if out > reach || past > reach {
                     wrong.push(format!(
-                        "{diameter} m: a body thrown {way:?} ended {out:.2} m through the wall and {past:.2} m past the cap"
+                        "{diameter} m, portals {portals}: a body thrown {way:?} ended {out:.2} m through the wall and {past:.2} m past the cap"
                     ));
                     break;
                 }
@@ -419,7 +463,9 @@ fn nothing_thrown_at_the_hull_gets_out_of_it() {
 fn cases(count: usize) -> Vec<Case> {
     let mut rng = SmallRng::seed_from_u64(SEED);
     let mut cases = Vec::with_capacity(count);
-    for _ in 0..count {
+    for n in 0..count {
+        // drawn apart from the rest, so that the worlds are the ones they were before portals
+        let mut shots = SmallRng::seed_from_u64(SEED ^ (n as u64 + 1));
         let diameter = log_uniform(&mut rng, 6.0, 100_000.0);
         let width = log_uniform(&mut rng, 2.0, 20_000.0);
         let ring = Ring {
@@ -463,6 +509,13 @@ fn cases(count: usize) -> Vec<Case> {
             look: gaze(&mut rng, ring, eye),
             nudge: rng.random_range(0.2..1.0),
             angle: Radians(rng.random_range(0.0..std::f64::consts::TAU)),
+            portals: shots.random_bool(0.5).then(|| {
+                let width = Metres(shots.random_range(0.6..6.0));
+                (
+                    width,
+                    [(); 2].map(|_| [(); 2].map(|_| shots.random_range(-15.0..15.0))),
+                )
+            }),
         });
     }
     cases
@@ -580,6 +633,8 @@ impl Hunt {
         }
         self.aim(case, 0.0);
         testing::draw_into(&mut self.app, &self.image);
+        // the lamps are sorted into the view's clusters a frame behind the view's own size
+        testing::frame(&mut self.app, Seconds(0.0));
         testing::frame(&mut self.app, Seconds(0.0));
         let first = testing::capture(&mut self.app, &self.image);
         self.aim(case, 0.0);
@@ -636,6 +691,22 @@ impl Hunt {
                 sim.drum
                     .landscape
                     .sculpt(at, brush(Settings::default().build).0 as f64, raise);
+            }
+        }
+        if let Some((width, shots)) = case.portals {
+            let half_width = case.ring.half_width.0 as f64;
+            let mut sim = self.app.world_mut().resource_mut::<Simulation>();
+            let (radius, grid) = (case.ring.radius.0 as f64, sim.drum.landscape.grid());
+            for (colour, [round, along]) in MouthColour::BOTH.into_iter().zip(shots) {
+                let place = Round::default().on(case.eye[0] + round, grid);
+                let turn = sim.drum.site.round.arc_to(place, grid) / radius;
+                let axial = (case.eye[1] + along).clamp(-half_width, half_width);
+                let at = sim.drum.wall_point(turn, axial - sim.drum.site.y);
+                let wanted =
+                    sim.drum
+                        .mouth_at(at, DrumSurface::Wall, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+                let fit = sim.drum.fit_mouth(colour, wanted, width);
+                sim.drum.put_mouth(colour, fit, width);
             }
         }
         if case.sea > 0.0 {

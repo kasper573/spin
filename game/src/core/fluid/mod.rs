@@ -24,7 +24,7 @@ use bevy::shader::Shader;
 
 use crate::core::math::{Rng, Vec3d, norm};
 use crate::core::rigid::{Body, BodyShape, WaterCoupling};
-use crate::core::units::{Litres, Metres, MetresPerSecond, Seconds};
+use crate::core::units::{KilogramsPerCubicMetre, Litres, Metres, MetresPerSecond, Seconds};
 use crate::core::vessel::WaterFrame;
 
 mod frame;
@@ -36,7 +36,8 @@ pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
 pub use gpu::{FluidBuffers, FluidStep};
 pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_ORIGIN, STEP_RATE, canonical};
 pub use surface::{
-    MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_VERTICES, SurfaceBuffers, SurfaceParams, grid_reach,
+    MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, MAX_VERTICES, SurfaceBuffers, SurfaceParams,
+    GRID_REACH, grid_reach, surface_cell,
 };
 
 /// Set by the render world once every kernel has compiled and the vessel is bound; until then
@@ -63,14 +64,35 @@ pub const MAX_BODIES: usize = 16;
 pub const MAX_SAMPLES: usize = 2048;
 /// Substeps a single frame may run; beyond that the simulation falls behind real time.
 pub const MAX_SUBSTEPS_PER_FRAME: usize = 4;
-const EPS_LAMBDA: f32 = 0.02;
-const ITERATIONS: usize = 3;
-const SCORR_K: f32 = 0.001;
+/// What a rough bed takes of the dynamic pressure of the water running over it: Manning's
+/// roughness of earth and short grass, under a particle's depth of water.
+const BED_FRICTION: f32 = 0.008;
+/// Smagorinsky's constant: the share of a particle's width that the eddies too small for the
+/// particles to show mix momentum across.
+const SMAGORINSKY: f32 = 0.17;
+/// Water's surface tension, in newtons a metre, and the Weber number past which the air tears
+/// a drop apart: what it leaves whole is as wide as has that number at the speed it meets.
+const SURFACE_TENSION: f64 = 0.072;
+/// The air's pressure over its density, at the temperature of a room, in metres squared per
+/// second squared: what tells how hard air of a given density presses.
+const AIR_STIFFNESS: f64 = 84_400.0;
+/// How fast a squeeze runs through the solver's water, in spacings a step: what tells how far
+/// the water gives under a pressure.
+const SOUND: f64 = 1.3;
+const SHATTERING_WEBER: f64 = 12.0;
+/// How long the air takes to tear a drop apart, counted in the time the drop takes to cross
+/// its own width through the air, scaled by the root of how much denser than the air it is.
+const BREAKUP_TIME: f32 = 5.0;
+/// The narrowest drops the air tears water to.
+const FINEST_DROP: Metres = Metres(0.001);
+
+const EPS_LAMBDA: f32 = 0.1;
+const ITERATIONS: usize = 2;
 const WET_REF: f32 = 300.0;
 /// The random nudge new water gets, in the canonical water's units.
 /// How far off its lattice site, in spacings, water is put down, so that no two rows of it are
 /// ever exactly in line.
-const JITTER: f64 = 0.05;
+const JITTER: f64 = 0.01;
 /// How many sites a placement offers per particle, and at least, so that water placed onto
 /// water finds free room round it.
 const SITES_PER_PARTICLE: usize = 64;
@@ -81,7 +103,7 @@ const LEAST_SITES: usize = 512;
 fn lattice_ball() -> &'static [[i32; 3]] {
     static BALL: std::sync::OnceLock<Vec<[i32; 3]>> = std::sync::OnceLock::new();
     BALL.get_or_init(|| {
-        let reach = (3.0 * gpu::SITES as f64 / (4.0 * std::f64::consts::PI))
+        let reach = (3.0 * 2.0 * gpu::SITES as f64 / (4.0 * std::f64::consts::PI))
             .cbrt()
             .ceil() as i32
             + 1;
@@ -95,30 +117,30 @@ fn lattice_ball() -> &'static [[i32; 3]] {
         }
         let d2 = |o: &[i32; 3]| o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
         ball.sort_by_key(d2);
-        ball.truncate(gpu::SITES);
+        // a placement by a wall finds half its sites outside the vessel
+        ball.truncate(2 * gpu::SITES);
         ball
     })
 }
 /// Resolutions remembered by the frame they took effect, for reading back what an older frame
 /// left on the GPU.
 const GENERATIONS_KEPT: usize = 64;
-const SHADERS: [&str; 5] = [
+const SHADERS: [&str; 7] = [
     "embedded://game/core/fluid/shaders/common.wgsl",
+    "embedded://game/core/fluid/shaders/views.wgsl",
     "embedded://game/core/fluid/shaders/particles.wgsl",
     "embedded://game/core/fluid/shaders/sort.wgsl",
     "embedded://game/core/fluid/shaders/bodies.wgsl",
     "embedded://game/core/fluid/shaders/surface.wgsl",
+    "embedded://game/core/fluid/shaders/spray.wgsl",
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FluidParams {
-    pub viscosity: f32,
-    pub wall_friction: f32,
     pub body_drag: f32,
-    pub air: bool,
-    /// Time constant for the vessel's air to bring free water to rest in the vessel's frame, in
-    /// seconds of the water's own clock, so that big water is slow to settle as it is to fall.
-    pub air_tau: Seconds,
+    /// How dense the air the vessel holds is, which drags on the water it meets: none in a
+    /// vacuum.
+    pub air_density: KilogramsPerCubicMetre,
     /// A safety clamp on the particles' speed through the vessel, well above anything they
     /// could be thrown at.
     pub max_speed: MetresPerSecond,
@@ -127,11 +149,8 @@ pub struct FluidParams {
 impl Default for FluidParams {
     fn default() -> Self {
         FluidParams {
-            viscosity: 0.15,
-            wall_friction: 0.5,
             body_drag: 0.5,
-            air: true,
-            air_tau: Seconds(12.0),
+            air_density: KilogramsPerCubicMetre(1.2),
             max_speed: MetresPerSecond(40.0),
         }
     }
@@ -313,32 +332,36 @@ impl Fluid {
     /// in it: each takes a site of the water's rest lattice, the free sites nearest the point
     /// first, so that water is added as gently as can be and water placed onto water spreads
     /// round it rather than into it. Once a frame has offered all the sites it can, the rest
-    /// take the nearest sites free or not. `place` gets the final say on every site. Returns
-    /// how many were added.
+    /// take the nearest sites free or not. Only sites the vessel `has_room` at are offered:
+    /// a site outside it is no site, and moving it inside would lay it on top of another.
+    /// Returns how many were added.
     pub fn inject(
         &mut self,
         centre: Vec3d,
         count: u32,
-        mut place: impl FnMut(Vec3d) -> Vec3d,
+        mut has_room: impl FnMut(Vec3d) -> bool,
     ) -> u32 {
-        let length = self.resolution.length();
-        let base = centre.map(|x| (x / length).floor());
-        let mut site = |offset: &[i32; 3], rng: &mut Rng| {
-            let mut nudge = |x: f64| x + 0.5 + (rng.next_f32() as f64 - 0.5) * JITTER;
-            place([
-                nudge(base[0] + offset[0] as f64) * length,
-                nudge(base[1] + offset[1] as f64) * length,
-                nudge(base[2] + offset[2] as f64) * length,
-            ])
-        };
+        let pitch = self.resolution.lattice().0 as f64;
+        let base = centre.map(|x| (x / pitch).floor());
         let room = gpu::SITES - self.sites.len();
         let offered = (count as usize * SITES_PER_PARTICLE)
             .max(LEAST_SITES)
             .min(room);
-        if let Some(farthest) = lattice_ball().iter().take(offered).next_back() {
-            let spacings = norm(&farthest.map(|x| x as f64)) + 1.0;
-            self.reached(Metres((norm(&centre) + spacings * length) as f32));
+        let mut farthest = 0.0f64;
+        let mut sites = Vec::with_capacity(offered.max(count as usize));
+        for offset in lattice_ball() {
+            if sites.len() >= offered.max(count as usize) {
+                break;
+            }
+            let mut nudge = |x: f64| x + 0.5 + (self.rng.next_f32() as f64 - 0.5) * JITTER;
+            let site = [0, 1, 2].map(|c| nudge(base[c] + offset[c] as f64) * pitch);
+            if has_room(site) {
+                farthest = farthest.max(norm(&offset.map(|x| x as f64)));
+                sites.push(site);
+            }
         }
+        self.reached(Metres((norm(&centre) + (farthest + 1.0) * pitch) as f32));
+        let count = count.min(sites.len() as u32);
         let mut added = 0;
         if offered >= count as usize {
             while added < count && self.reserve() {
@@ -346,13 +369,12 @@ impl Fluid {
             }
             self.joining += added;
             let length = self.resolution.length();
-            for offset in lattice_ball().iter().take(offered) {
-                let p = site(offset, &mut self.rng).map(|x| (x / length) as f32);
+            for site in sites.iter().take(offered) {
+                let p = site.map(|x| (x / length) as f32);
                 self.sites.push([p[0], p[1], p[2], 0.0]);
             }
         } else {
-            for offset in lattice_ball().iter().take(count as usize) {
-                let position = site(offset, &mut self.rng);
+            for &position in sites.iter().take(count as usize) {
                 let particle = Particle {
                     position,
                     velocity: [0.0; 3],
@@ -427,13 +449,16 @@ impl Fluid {
         let sites = std::mem::take(&mut self.sites);
         let res = self.resolution;
         let (length, time) = (res.length(), res.time());
+        let mut serial = self.issued.wrapping_mul(40_503);
         let pending = self
             .pending
             .drain(..)
             .flat_map(|p| {
                 let x = p.position.map(|x| (x / length) as f32);
                 let v = p.velocity.map(|v| (v * time / length) as f32);
-                [[x[0], x[1], x[2], p.foam], [v[0], v[1], v[2], 0.0]]
+                serial = serial.wrapping_add(1);
+                let told_apart = (serial.wrapping_mul(2_654_435_761) >> 22) as f32;
+                [[x[0], x[1], x[2], p.foam], [v[0], v[1], v[2], told_apart]]
             })
             .collect::<Vec<_>>();
         self.issued = self.issued.wrapping_add(1);
@@ -674,6 +699,8 @@ impl Plugin for FluidPlugin {
         embedded_asset!(app, "shaders/sort.wgsl");
         embedded_asset!(app, "shaders/bodies.wgsl");
         embedded_asset!(app, "shaders/surface.wgsl");
+        embedded_asset!(app, "shaders/views.wgsl");
+        embedded_asset!(app, "shaders/spray.wgsl");
         let shaders = FluidShaders(
             SHADERS.map(|path| app.world().resource::<AssetServer>().load::<Shader>(path)),
         );
@@ -701,7 +728,7 @@ impl Plugin for FluidPlugin {
 }
 
 #[derive(Resource)]
-struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 5]);
+struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 7]);
 
 /// Hand the render world the surface parameters once they change.
 fn sync_surface(fluid: Res<Fluid>, mut surface: ResMut<SurfaceParams>) {

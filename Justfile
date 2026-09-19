@@ -18,6 +18,12 @@ gpu:
 # The whole gate before pushing: what the runners check, plus everything they cannot afford.
 verify: lint test gpu e2e
 
+# The water held against real water: every measurement, how far it is from the real thing, and
+# the least it has been. `WATER_PHYSICS_ACCEPT=1 just reference` keeps readings that got better.
+reference:
+    cargo test --release -p game --test water_physics -- --ignored --test-threads=1
+    cargo test --release -p game --test water_physics the_scoreboard -- --ignored --exact --nocapture
+
 # Fixed fluid workload; prints microseconds per particle-substep.
 bench:
     cargo run --release -p game --bin bench

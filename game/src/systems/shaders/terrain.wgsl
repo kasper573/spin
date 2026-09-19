@@ -6,7 +6,7 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_directional_shadow
-#import optics::{bounce, sunlight, lamplight_at, through_ring_air}
+#import optics::{bounce, sunlight, lamplight_at, sunbeams_at, rooms_beyond_at, through_ring_air}
 #import ring::{ring_up, short_way_round}
 #ifdef DISTANCE_FOG
 // with the eye under water the fog carries the water round it: its colour just under the
@@ -16,6 +16,7 @@
 #endif
 #import ripples::{carried, crossing_length, noise3, waves_carried}
 #import air::Air
+#import portals::{mouths, painted, WALL}
 
 struct Terrain {
     dirt: vec4<f32>,
@@ -62,6 +63,9 @@ const KEYED_ALONG: i32 = 32768;
 // water standing this deep has laid its bed down over the ground and drowned what grew there,
 // over a stretch of shore rather than at a line, since a shore is never a line
 const BED_BY: f32 = 0.9;
+// water that fills less than the first share of the height it reaches is in flight over the
+// ground, and water that fills the second stands on it as a body
+const STANDING: vec2<f32> = vec2(0.35, 0.65);
 
 // the ripple marks a current leaves in a sandy bed: their spacing, their height, how far
 // their crests meander and turn out of true, and the spacing and depth of the grain
@@ -144,28 +148,30 @@ fn column_at(round: i32, along: i32) -> vec4<f32> {
 /// A column holds the particles standing over it, and the columns are as far apart as the
 /// particles, so over shallow water a column catches one particle or none, its count stepping
 /// between whole particles and its top jumping by a particle's width. Nothing about the water's
-/// surface is known finer than that, so the field is gathered over the four columns round the
-/// point, which is smooth to the width of one of them.
+/// surface is known finer than that, so the field is gathered over the columns round the point.
 fn column_over(p: vec3<f32>) -> Column {
     let arc = terrain.site.x + terrain.site.z * atan2(p.z, terrain.site.z + p.x);
     let u = arc / terrain.grid.x - 0.5;
     let v = (terrain.site.y + p.y) / terrain.grid.y - 0.5;
-    let i = i32(floor(u));
-    let j = i32(floor(v));
-    let fu = u - floor(u);
-    let fv = v - floor(v);
     // how much water stands over a column is a density, and gathers by area. How high it
     // reaches and which way it flows belong to the water that is there rather than to the
     // column, so they gather weighted by it: a column with no water in it has no height to lend
-    // its neighbours.
+    // its neighbours. The gathering is over the three columns nearest each way, weighted as a
+    // bell a column and a half wide: particles spread a little unevenly over shallow water
+    // leave a column here and there with none of them, which is no dry spot in the water.
+    let i = i32(round(u));
+    let j = i32(round(v));
+    let fu = u - round(u);
+    let fv = v - round(v);
+    let bell_u = vec3(0.5 * (0.5 - fu) * (0.5 - fu), 0.75 - fu * fu, 0.5 * (0.5 + fu) * (0.5 + fu));
+    let bell_v = vec3(0.5 * (0.5 - fv) * (0.5 - fv), 0.75 - fv * fv, 0.5 * (0.5 + fv) * (0.5 + fv));
     var thickness = 0.0;
     var carried = vec2(0.0);
     var top = 0.0;
-    for (var dj = 0; dj <= 1; dj++) {
-        let wv = select(1.0 - fv, fv, dj == 1);
-        for (var di = 0; di <= 1; di++) {
-            let w = select(1.0 - fu, fu, di == 1) * wv;
-            let column = column_at(i + di, j + dj);
+    for (var dj = 0; dj < 3; dj++) {
+        for (var di = 0; di < 3; di++) {
+            let w = bell_u[di] * bell_v[dj];
+            let column = column_at(i + di - 1, j + dj - 1);
             thickness += column.x * w;
             carried += column.yz * (column.x * w);
             top += column.w * (column.x * w);
@@ -248,34 +254,36 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
     let at = p + terrain.origin.xyz;
     let up = ring_up(at, terrain.site.z);
     var water = column_over(at);
-    // How deep the water lies over this ground: the height its top reaches above the ground,
-    // which is what light crossing it has to cross. The particles counted over a column say how
-    // much water is there, but only in whole particles, which over shallow water is a handful:
-    // taking the depth from that count would put the count's own steps into the ground's colour
-    // and its light. The count is still what tells water lying on the ground from spray flying
-    // over it, which reaches no deeper than the water it is made of.
+    // How deep the water lies over this ground. The particles counted over a column say how
+    // much water is there, but only in whole particles, which the columns catch unevenly: taking
+    // the depth from that count would put the count's own steps into the ground's colour and
+    // its light. The height the water's top reaches above the ground has no such steps, but is
+    // the water's depth only where water fills that height, as a body standing on the ground
+    // does and spray flying over it does not. The share of the height the counted water fills
+    // tells the two apart on a ring of any size and in water of any depth, since the count is
+    // uneven by a share of itself: a body is as deep as it stands, and anything else as deep as
+    // the water counted in it.
     let span = max(water.top - height, 0.0);
-    let lying = 1.0 - smoothstep(0.3, 0.8, span - water.depth);
-    water.depth = span * lying;
+    let standing = smoothstep(STANDING.x, STANDING.y, water.depth / max(span, 1e-6));
+    let body = span * standing;
+    water.depth = mix(min(water.depth, span), span, standing);
     if (underside) {
         albedo = terrain.dirt.rgb;
         water.depth = 0.0;
     }
     // where water stands, the ground is the water's bed: the carbonate settled out of it, with
     // nothing growing under it, shading back into the bank over the shallows at the shore
-    albedo = mix(albedo, terrain.bed.rgb, smoothstep(0.0, BED_BY, span * lying));
+    albedo = mix(albedo, terrain.bed.rgb, smoothstep(0.0, BED_BY, body));
     // a stray drop dampens a patch, a body of water soaks it
     let wet = smoothstep(0.0, WET_BY * terrain.grid.w, water.depth);
     albedo *= 1.0 - WET * wet;
     // the bed's ripples and grain, which are what the light coming down through the water has
     // to break over: without them the sand takes the light evenly and reads as a flat sheet
-    let bedded = smoothstep(0.0, BED_BY, span * lying);
+    let bedded = smoothstep(0.0, BED_BY, body);
     if (bedded > 0.0) {
-        // the ripples lie across the water's run, or across the ring where it barely moves
-        let spinward = normalize(vec3(-at.z, 0.0, terrain.site.z + at.x));
-        let run = water.flow - up * dot(water.flow, up);
-        let side = cross(up, run);
-        let along = select(spinward, side / max(length(side), 1e-6), length(side) > 1e-3);
+        // the ripples are the work of the currents there have been rather than of the water's
+        // run now, and the currents of a ring run round it as it is spun up and slowed
+        let along = cross(up, normalize(vec3(-at.z, 0.0, terrain.site.z + at.x)));
         // no bed is a corrugation: the crests turn slowly out of true, meander over a few
         // wavelengths, and give out over stretches the water has left alone
         let turn = (noise3(at / (SAND_RIPPLE * 40.0)) - 0.5) * SAND_TURN;
@@ -286,17 +294,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
         let worked = smoothstep(0.3, 0.7, noise3(at / (SAND_RIPPLE * 25.0)));
         // each of the three scales is left at its mean once a pixel is too wide to draw it,
         // so what a bed loses with distance is its grain first and its patchiness last
-        let crisp = 1.0 - smoothstep(0.25 * SAND_RIPPLE, 0.5 * SAND_RIPPLE, footprint);
+        let crisp = 1.0 - smoothstep(0.08 * SAND_RIPPLE, 0.25 * SAND_RIPPLE, footprint);
         let relief = SAND_RELIEF * bedded * crisp * worked;
         let slope = relief * cos(phase) * 2.0 * PI / SAND_RIPPLE;
         n = normalize(n - across * slope);
-        let grained = 1.0 - smoothstep(0.25 * SAND_GRAIN, 0.5 * SAND_GRAIN, footprint);
+        let grained = 1.0 - smoothstep(0.08 * SAND_GRAIN, 0.25 * SAND_GRAIN, footprint);
         let grain = (noise3(at / SAND_GRAIN) - 0.5) * SAND_MOTTLE * grained;
         let broad = 1.0 - smoothstep(0.25 * SAND_PATCH, 0.5 * SAND_PATCH, footprint);
         // sand the water has worked lies looser and darker than sand it has left flat
         let coarse = ((noise3(at / SAND_PATCH) - 0.5) * SAND_PATCHY - worked * SAND_WORKED) * broad;
         albedo *= 1.0 + (grain + coarse) * bedded;
     }
+    // a portal let into the ground here is part of the ground: what is filled in of it takes
+    // the light as the ground does, in its own colour
+    let portal = painted(p, WALL, from_above, footprint);
+    albedo = mix(albedo, portal.albedo, portal.paint);
     let extinction = terrain.absorption.rgb + terrain.scatter.rgb;
     let dimmed = exp(-extinction * water.depth);
 
@@ -320,7 +332,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
         colour += sunlight(i) * albedo / PI * ndl * shadow * through;
     }
     // the light bounced round the ring comes down through the water too, and any lamp's
-    colour += (bounce() + lamplight_at(p, n, in.position.xy) / PI) * albedo * dimmed;
+    colour += (bounce() + (lamplight_at(p, n, in.position.xy) + sunbeams_at(p, n) + rooms_beyond_at(p, n)) / PI) * albedo * dimmed;
+    // its fire shines through whatever water lies over it, and what is open of it shows
+    // nothing of the ground but what is seen through it
+    colour = mix(colour, portal.beyond, portal.open) + portal.glow * dimmed;
     let away = p - view.world_position;
     let reach = length(away);
     let toward = -away / max(reach, 1e-6);
@@ -329,6 +344,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
     let rise = -dot(toward, ring_up(view.world_position + terrain.origin.xyz, terrain.site.z));
     return vec4(through_water(colour, fog.base_color.rgb, fog.be, rise, reach), 1.0);
 #else
-    return vec4(through_ring_air(colour, terrain.air, at, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
+    return vec4(through_ring_air(colour, terrain.air, p + mouths.about.xyz, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
 #endif
 }

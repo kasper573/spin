@@ -10,10 +10,11 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import optics::through_water
 #endif
-#import optics::{ring_seen, seen_through, fresnel, glint, lamp_glint_at, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
+#import optics::{diffuse_light_at, ring_seen, seen_through, fresnel, glint, lamp_glint_at, sunbeam_glints_at, sunlight, sun_shadow, depth_of, saturated, through_ring_air}
 #import figure::mirrored
 #import ring::ring_up
 #import air::Air
+#import portals::{painted, CAP}
 
 struct Glass {
     // how much of each colour a pane lets through
@@ -31,6 +32,7 @@ struct Glass {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> glass: Glass;
 
+const PI: f32 = 3.14159265;
 // the glass's index against the air it is seen through rather than against vacuum
 const IOR: f32 = 1.52 / 1.000293;
 // glass mirrors this much face on
@@ -139,7 +141,7 @@ fn shade(face: vec3<f32>, n: vec3<f32>, p: vec3<f32>, v: vec3<f32>, uv: vec2<f32
         let l = lights.directional_lights[i].direction_to_light;
         colour += sunlight(i) * glint(face, v, l, ROUGHNESS, f0) * sun_shadow(i, p, face, pixel);
     }
-    colour += lamp_glint_at(p, face, v, ROUGHNESS, f0, pixel);
+    colour += lamp_glint_at(p, face, v, ROUGHNESS, f0, pixel) + sunbeam_glints_at(p, face, v, ROUGHNESS, f0);
     return colour;
 }
 
@@ -171,7 +173,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         colour = mix(colour, shade(face, n, p, v, uv, spread), facet.share);
     }
 #endif
-    let out = vec4(saturated(colour), 1.0);
+    // a portal let into a cap is part of the cap: the glass there is what the portal shows,
+    // lit as a matte surface where it is filled in
+    let from_the_room = glass.ring.z > 0.5;
+    let range = length(view.world_position - p);
+    let footprint = range * 1.15 / view.viewport.w / max(dot(n, v), 0.02);
+    let portal = painted(p, CAP, from_the_room, footprint);
+    if (portal.paint + portal.open > 0.0) {
+        let lit = portal.albedo * diffuse_light_at(p, n, in.position.xy) / PI;
+        colour = mix(colour, lit, portal.paint) * (1.0 - portal.open);
+    }
+    let out = vec4(saturated(colour) + portal.beyond * portal.open + portal.glow, 1.0);
     let away = p - view.world_position;
     let reach = length(away);
     let toward = -away / max(reach, 1e-6);

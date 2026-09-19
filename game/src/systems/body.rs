@@ -8,6 +8,7 @@ use bevy::prelude::*;
 
 use crate::core::avatar;
 use crate::systems::figure::{Mirrored, MirroredFinish};
+use crate::systems::portal::{SolidMaterial, solid};
 use crate::systems::scene::Viewpoint;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -29,17 +30,22 @@ const ENAMEL: Color = Color::srgb(0.86, 0.87, 0.88);
 const DARK_GLASS: Color = Color::srgb(0.02, 0.02, 0.025);
 const GRAPHITE: Color = Color::srgb(0.12, 0.125, 0.135);
 
+/// The root of the avatar's body, which its parts hang from.
 #[derive(Component)]
-struct AvatarBody;
+pub struct AvatarBody;
 
 fn spawn(
     mut commands: Commands,
     sim: Res<Simulation>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<SolidMaterial>>,
 ) {
-    let mut finish =
-        |material: StandardMaterial| (MirroredFinish::of(&material), materials.add(material));
+    let mut finish = |material: StandardMaterial| {
+        (
+            MirroredFinish::of(&material),
+            materials.add(solid(material)),
+        )
+    };
     let enamel = finish(StandardMaterial {
         base_color: ENAMEL,
         perceptual_roughness: 0.45,

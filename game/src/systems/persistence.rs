@@ -12,7 +12,7 @@ use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
-use crate::systems::drum::{Grid, Ground, Landscape, Patch, Ring, Round, Site};
+use crate::systems::drum::{Grid, Ground, Landscape, Mouths, Patch, Ring, Round, Site};
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -38,6 +38,8 @@ pub struct Snapshot {
     pub fluid: Vec<f32>,
     /// The ground, whose patches storage keeps apart from the rest, each on its own.
     pub landscape: Ground,
+    #[serde(default)]
+    pub portals: Mouths,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -111,6 +113,7 @@ pub fn apply(
     sim.drum.water = site_on(snapshot.water_site, ring);
     sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
+    sim.drum.load_mouths(&snapshot.portals);
     let margin = fluid.resolution().margin().0 as f64;
     for chunk in snapshot.fluid.chunks_exact(7) {
         if chunk.iter().all(|v| v.is_finite()) {
@@ -211,6 +214,7 @@ fn kept(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
             base: sim.drum.landscape.base(),
             patches: Vec::new(),
         },
+        portals: sim.drum.mouths,
     }
 }
 

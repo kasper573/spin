@@ -138,6 +138,19 @@ fn air_crossed(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, ring: vec
     return out;
 }
 
+/// The light a short stretch of air turns into a ray that crosses it between two distances from
+/// `at`, where that stretch is lit from one way only, by something too narrow for
+/// `air_crossed` to have found: a shaft of light. It reaches the ray's start dimmed by the air
+/// before it.
+fn air_shaft(air: Air, at: vec3<f32>, dir: vec3<f32>, begins: f32, ends: f32, radius: f32, light: vec3<f32>, to_light: vec3<f32>) -> vec3<f32> {
+    let cosine = dot(dir, to_light);
+    let turning = air.rayleigh.rgb * rayleigh_phase(cosine) + air.mie.rgb * mie_phase(air.mie.w, cosine);
+    let middle = 0.5 * (begins + ends);
+    let density = air_density(air, at + dir * middle, radius);
+    let before = 0.5 * (air_density(air, at, radius) + density);
+    return turning * density * light * (ends - begins) * exp(-air.taken.rgb * before * middle);
+}
+
 /// Where a ray ends up pointing after `distance` metres of air, having been bent by the air's
 /// own gradient: a ray in a medium whose index varies obeys `d(n t)/ds = grad n`, so it turns
 /// toward the denser air, which in a ring is toward the rim. `slowing` is `n - 1` at the rim

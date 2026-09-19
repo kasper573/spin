@@ -23,12 +23,12 @@ use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
-use crate::core::units::{Radians, RadiansPerSecond, Seconds};
+use crate::core::units::{Metres, Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::app;
 use crate::systems::controls::pilot;
-use crate::systems::drum::{Place, Round};
+use crate::systems::drum::{DrumSurface, MouthColour, Place, Round};
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
@@ -61,6 +61,14 @@ pub enum ScriptCommand {
     },
     /// Set the thrusters' power to what the standing gravity calls for.
     Equalize,
+    /// Put the blue portal, or the orange one, on the ground at a wheel angle and a place along
+    /// the axis.
+    Portal {
+        orange: bool,
+        phi: f64,
+        y: f64,
+        diameter: f32,
+    },
     /// Make the avatar a ghost and put its eye somewhere, looking at a point.
     Camera {
         x: f32,
@@ -123,6 +131,9 @@ pub struct ScriptStatus {
     pub sculpted: usize,
     /// The slot of the tool that is out, if one is.
     pub tool: Option<usize>,
+    /// How many portals stand, and how much of each is still filled in.
+    pub portals: usize,
+    pub portal_fill: f32,
     /// Saves storage has kept so far.
     pub saves: u32,
     /// The avatar's weight in g as the ground pushes back, zero when nothing does.
@@ -192,6 +203,24 @@ fn execute(world: &mut World, command: ScriptCommand) {
                     count,
                 )
             });
+        }
+        ScriptCommand::Portal {
+            orange,
+            phi,
+            y,
+            diameter,
+        } => {
+            let mut sim = world.resource_mut::<Simulation>();
+            let drum = &mut sim.drum;
+            let glass = drum.wall_point(phi - drum.site.phi, y - drum.site.y);
+            let colour = if orange {
+                MouthColour::Orange
+            } else {
+                MouthColour::Blue
+            };
+            let wanted = drum.mouth_at(glass, DrumSurface::Wall, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+            let fit = drum.fit_mouth(colour, wanted, Metres(diameter));
+            drum.put_mouth(colour, fit, Metres(diameter));
         }
         ScriptCommand::Sculpt {
             phi,
@@ -303,6 +332,8 @@ fn publish(
         landscape_max: sim.drum.landscape.max_height(),
         sculpted: sim.drum.landscape.patches().count(),
         tool: belt.wielded(),
+        portals: sim.drum.mouths.standing().count(),
+        portal_fill: sim.drum.mouths.fill() as f32,
         saves: saves.completed,
         weight: footing.weight,
         ground_speed: footing.ground_speed,
@@ -655,6 +686,34 @@ pub fn surface_demand(app: &mut App) -> SurfaceDemand {
         blocks: at(2),
         droplets: at(3),
     }
+}
+
+/// A mote of the spray: where it is in the water's frame and units, and how fast it flies.
+pub struct Mote {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+}
+
+/// The motes of spray in flight.
+pub fn spray(app: &mut App) -> Vec<Mote> {
+    let motes = app
+        .world()
+        .resource::<FluidBuffers>()
+        .surface
+        .motes
+        .clone();
+    let floats: Vec<f32> = read_back(app, Readback::buffer(motes))
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    floats
+        .chunks_exact(8)
+        .filter(|mote| mote[7] > 0.0)
+        .map(|mote| Mote {
+            position: [mote[0], mote[1], mote[2]],
+            velocity: [mote[4], mote[5], mote[6]],
+        })
+        .collect()
 }
 
 #[derive(Resource, Default)]

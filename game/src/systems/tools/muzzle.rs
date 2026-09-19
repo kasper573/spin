@@ -4,14 +4,16 @@ use bevy::prelude::*;
 
 use crate::core::units::Seconds;
 use crate::systems::figure::Mirrored;
+use crate::systems::portal::SolidMaterial;
 use crate::systems::sim::SimSet;
 use crate::systems::tools::Workbench;
 
-/// A barrel's ring light. The tool it is on says whether the barrel is firing.
+/// A barrel's ring light. The tool it is on says whether the barrel is firing, and may say in
+/// what colour.
 #[derive(Component)]
 pub struct MuzzleLight {
     pub firing: bool,
-    colour: Color,
+    pub colour: Color,
     /// How bright it is, 0 to 1, which follows the firing over a moment.
     level: f32,
     lamp: Entity,
@@ -83,10 +85,10 @@ fn glow(
     mut rings: Query<(
         &mut MuzzleLight,
         &mut Mirrored,
-        &MeshMaterial3d<StandardMaterial>,
+        &MeshMaterial3d<SolidMaterial>,
     )>,
     mut lamps: Query<(&mut PointLight, &mut Visibility)>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<SolidMaterial>>,
 ) {
     let step = time.delta_secs() / RISE.0;
     for (mut ring, mut mirrored, material) in &mut rings {
@@ -95,16 +97,19 @@ fn glow(
         } else {
             (ring.level - step).max(0.0)
         };
-        if level == ring.level {
+        if level == ring.level && !ring.is_changed() {
             continue;
         }
-        ring.level = level;
+        if level != ring.level {
+            ring.level = level;
+        }
         let given_off = ring.colour.to_linear() * (LUMINANCE * level);
         mirrored.finish.glow = given_off;
         if let Some(mut material) = materials.get_mut(&material.0) {
-            material.emissive = given_off;
+            material.base.emissive = given_off;
         }
         if let Ok((mut lamp, mut visibility)) = lamps.get_mut(ring.lamp) {
+            lamp.color = ring.colour;
             lamp.intensity = LUMENS * level;
             visibility.set_if_neq(if level > 0.0 {
                 Visibility::Inherited

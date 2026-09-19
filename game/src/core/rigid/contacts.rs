@@ -3,7 +3,7 @@
 use super::{Body, BodyShape, Ground};
 use crate::core::math::{Vec3d, add_scaled, cross, dot, mat3mul, norm};
 use crate::core::units::Newtons;
-use crate::core::vessel::Vessel;
+use crate::core::vessel::{Penetration, Vessel};
 
 /// Resolve the body's contacts with the vessel over a substep of `dt`, and remember the wall it
 /// stood on as its ground.
@@ -24,7 +24,15 @@ pub fn collide_vessel(body: &mut Body, shape: &BodyShape, vessel: &impl Vessel, 
     for _pass in 0..2 {
         for sphere in &shape.hull.spheres {
             let (c, radius) = (body.to_world(&sphere.centre), sphere.radius);
-            for pen in vessel.sphere_penetrations(c, radius).iter() {
+            // a part of the body that has gone through an opening meets the walls where it
+            // really is, and they push on the body the way they face as seen from its side
+            let through = vessel.passage(body.p, c);
+            let really = through.map_or(c, |passage| passage.point);
+            for pen in vessel.sphere_penetrations(really, radius).iter() {
+                let pen = Penetration {
+                    normal: through.map_or(pen.normal, |passage| passage.turned_back(pen.normal)),
+                    ..pen
+                };
                 let at = [
                     c[0] - pen.normal[0] * radius,
                     c[1] - pen.normal[1] * radius,
@@ -55,7 +63,7 @@ fn eff_mass(body: &Body, r: &Vec3d, n: &Vec3d) -> f64 {
 fn resolve_wall_contact(
     body: &mut Body,
     wp: &Vec3d,
-    pen: &crate::core::vessel::Penetration,
+    pen: &Penetration,
     restitution: f64,
     friction: f64,
 ) -> f64 {

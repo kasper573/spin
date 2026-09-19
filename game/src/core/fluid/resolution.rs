@@ -5,7 +5,6 @@
 //! finely only so many of its spacings from the origin of its frame, so how far the water
 //! reaches from there sets a floor on how fine it can be: water put in one place is as fine
 //! on a ring of any size, and water spread far is coarser.
-use std::f32::consts::PI;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,28 +14,58 @@ pub const REST_DENSITY: f32 = 1000.0;
 /// How far from the origin of its frame water may reach, in its own spacings.
 pub const SPACINGS_FROM_ORIGIN: f32 = 1500.0;
 /// How often the canonical water steps, in its own seconds.
-pub const STEP_RATE: Hertz = Hertz(60.0);
+pub const STEP_RATE: Hertz = Hertz(120.0);
 
 /// The canonical water's constants, in its own units: particles a unit apart, a kernel two
 /// units wide, and the rest density's worth of mass each.
 pub mod canonical {
-    use super::{PI, REST_DENSITY};
+    use std::f32::consts::SQRT_2;
+
+    use super::REST_DENSITY;
+
+    const SQRT_3: f32 = 1.732_050_8;
 
     pub const SPACING: f32 = 1.0;
     pub const H: f32 = 2.0;
     pub const H_SQ: f32 = H * H;
     pub const MASS: f32 = REST_DENSITY;
-    pub const POLY6: f32 = 315.0 / (64.0 * PI * (H_SQ * H_SQ * H_SQ * H_SQ * H));
-    pub const SPIKY: f32 = -45.0 / (PI * (H_SQ * H_SQ * H_SQ));
-    /// The poly6 kernel at zero distance.
-    pub const W_ZERO: f32 = POLY6 * H_SQ * H_SQ * H_SQ;
-    /// The poly6 kernel at the artificial pressure's reference distance, 0.3 h.
-    pub const SCORR_WQ: f32 =
-        POLY6 * (H_SQ - 0.09 * H_SQ) * (H_SQ - 0.09 * H_SQ) * (H_SQ - 0.09 * H_SQ);
-    /// The most a constraint iteration may move a particle.
-    pub const MAX_DELTA: f32 = 0.5 * SPACING;
+    /// The poly6 kernel's scale, which makes water standing on its lattice, a spacing apart,
+    /// exactly as dense as water at rest is: the kernel summed over a particle and the three
+    /// shells of neighbours within its reach. The integral's scale would have that water one
+    /// part in a hundred too dense, and pushing itself apart from where it was put at rest.
+    pub const POLY6: f32 = 1.0
+        / (H_SQ * H_SQ * H_SQ
+            + 6.0 * (H_SQ - 1.0) * (H_SQ - 1.0) * (H_SQ - 1.0)
+            + 12.0 * (H_SQ - 2.0) * (H_SQ - 2.0) * (H_SQ - 2.0)
+            + 8.0 * (H_SQ - 3.0) * (H_SQ - 3.0) * (H_SQ - 3.0));
+    /// How much of the room it took on its lattice water takes once it has settled: particles
+    /// left to themselves pack a little closer than a lattice stands them, and it is the
+    /// settled water that is as dense as water is.
+    pub const PACKED: f32 = 0.972;
+    /// How far apart water is put down on its lattice, so that it stands there exactly as
+    /// dense as settled water is, and settles from it without a push.
+    pub const LATTICE: f32 = 1.012 * SPACING;
+    /// The scale of the kernel the solver holds the water's density with, the cube of how far
+    /// within reach a neighbour is, whose slope is what the solver pushes along: a push along
+    /// any other kernel's slope would not be down the slope of the density it is there to put
+    /// right, and would work the water up where it should leave it be. Scaled as the poly6
+    /// kernel is, on water standing on its lattice.
+    pub const CROWDING: f32 = 1.0
+        / PACKED
+        / (H * H * H
+            + 6.0 * (H - 1.0) * (H - 1.0) * (H - 1.0)
+            + 12.0 * (H - SQRT_2) * (H - SQRT_2) * (H - SQRT_2)
+            + 8.0 * (H - SQRT_3) * (H - SQRT_3) * (H - SQRT_3));
+    pub const SPIKY: f32 = -3.0 * CROWDING;
+    /// The hardest the water is ever knocked, in its own units: about fifty times what it
+    /// weighs on the ground. The solver's pushes over a step move a particle no further than
+    /// that would, so that water put where water already is, which no motion brought there,
+    /// is eased apart rather than thrown apart faster the shorter the step.
+    pub const HARDEST_KNOCK: f32 = 1500.0;
     /// How far particles keep from the walls.
     pub const MARGIN: f32 = 0.5 * SPACING;
+    /// How wide a particle's water is as a drop on its own: a ball of a particle's volume.
+    pub const PARCEL: f32 = 1.2407 * SPACING;
 
     /// Akinci volume weights Ψ for boundary samples in canonical units: each sample stands in
     /// for the rest density its neighbours don't cover.
@@ -100,6 +129,11 @@ impl Resolution {
     pub fn litres_per_particle(self) -> Litres {
         let s = self.spacing.0;
         Litres(s * s * s * 1000.0)
+    }
+
+    /// How far apart water of this resolution is put down on its lattice.
+    pub fn lattice(self) -> Metres {
+        Metres(self.spacing.0 * canonical::LATTICE)
     }
 
     /// Metres per unit of the canonical water's length.

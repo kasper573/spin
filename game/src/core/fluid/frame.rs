@@ -8,7 +8,9 @@ use bevy::render::render_resource::ShaderType;
 
 use super::resolution::canonical;
 use super::{
-    EPS_LAMBDA, FluidParams, MAX_BODIES, REST_DENSITY, Resolution, SCORR_K, TABLE_CELLS, WET_REF,
+    AIR_STIFFNESS, BED_FRICTION, BREAKUP_TIME, EPS_LAMBDA, FINEST_DROP, FluidParams, ITERATIONS,
+    MAX_BODIES, REST_DENSITY, Resolution, SHATTERING_WEBER, SMAGORINSKY, SOUND, SURFACE_TENSION,
+    TABLE_CELLS, WET_REF,
 };
 use crate::core::math::{Vec3d, mat3mul, quat_rotate};
 use crate::core::rigid::{Body, BodyShape, HullSphere, WaterCoupling};
@@ -66,18 +68,20 @@ pub struct Params {
     pub h_sq: f32,
     pub poly: f32,
     pub spiky: f32,
-    pub w_zero: f32,
     pub mass: f32,
     pub rest_density: f32,
-    pub scorr_k: f32,
-    pub scorr_wq: f32,
+    pub crowding: f32,
+    pub hold: f32,
     pub eps_lambda: f32,
     pub max_delta: f32,
     pub max_speed: f32,
     pub margin: f32,
-    pub air_k: f32,
-    pub wall_keep: f32,
-    pub viscosity: f32,
+    pub wall_friction: f32,
+    pub eddy: f32,
+    pub air: f32,
+    pub shatter: f32,
+    pub finest_drop: f32,
+    pub breakup: f32,
     pub body_drag: f32,
     pub wet_ref: f32,
     pub spacing: f32,
@@ -99,28 +103,38 @@ pub struct Params {
 impl Params {
     pub fn new(dt: Seconds, p: &FluidParams, res: Resolution, count: u32, bodies: &Bodies) -> Self {
         let (length, time) = (res.length(), res.time());
+        let step = (dt.0 as f64 / time) as f32;
+        let air = (p.air_density.0 / REST_DENSITY as f64) as f32;
         Params {
-            dt: (dt.0 as f64 / time) as f32,
+            dt: step,
             h: canonical::H,
             h_sq: canonical::H_SQ,
             poly: canonical::POLY6,
             spiky: canonical::SPIKY,
-            w_zero: canonical::W_ZERO,
             mass: canonical::MASS,
             rest_density: REST_DENSITY,
-            scorr_k: SCORR_K,
-            scorr_wq: canonical::SCORR_WQ,
-            eps_lambda: EPS_LAMBDA,
-            max_delta: canonical::MAX_DELTA,
-            max_speed: (p.max_speed.0 as f64 * time / length) as f32,
-            margin: canonical::MARGIN,
-            air_k: if p.air {
-                (dt.0 as f64 / time) as f32 / p.air_tau.0
+            crowding: canonical::CROWDING,
+            hold: if dt.0 > 0.0 {
+                let sound = SOUND * length / dt.0 as f64;
+                (p.air_density.0 * AIR_STIFFNESS / (REST_DENSITY as f64 * sound * sound)) as f32
             } else {
                 0.0
             },
-            wall_keep: 1.0 - p.wall_friction,
-            viscosity: p.viscosity * canonical::MASS / REST_DENSITY,
+            eps_lambda: EPS_LAMBDA,
+            max_delta: 0.5 * canonical::HARDEST_KNOCK * step * step / ITERATIONS as f32,
+            max_speed: (p.max_speed.0 as f64 * time / length) as f32,
+            margin: canonical::MARGIN,
+            wall_friction: BED_FRICTION * step / canonical::SPACING,
+            eddy: eddy_mixing(step),
+            air,
+            shatter: if air > 0.0 {
+                (SHATTERING_WEBER * SURFACE_TENSION / p.air_density.0 * time * time
+                    / (length * length * length)) as f32
+            } else {
+                0.0
+            },
+            finest_drop: (FINEST_DROP.0 as f64 / length) as f32,
+            breakup: step / (BREAKUP_TIME * canonical::PARCEL * (1.0 / air.max(1e-12)).sqrt()),
             body_drag: p.body_drag,
             wet_ref: WET_REF,
             spacing: canonical::SPACING,
@@ -159,6 +173,16 @@ impl Params {
         self.accumulators = accumulators_of(ticket);
         self
     }
+}
+
+/// How much of a neighbour's velocity a particle takes on in a step, per unit of the speed the
+/// neighbour goes by at. Water's own viscosity is nothing at the size of a particle; what
+/// mixes momentum there is the eddies too small for the particles to show, which Smagorinsky
+/// has as a viscosity of the particle's width times that fraction of it squared times the rate
+/// of shear. Smoothing a velocity over the kernel by a share `c` a step is a viscosity of
+/// `c h^2 / (22 dt)`, the kernel's second moment being `3 h^2 / 11`.
+fn eddy_mixing(step: f32) -> f32 {
+    22.0 * SMAGORINSKY * SMAGORINSKY * canonical::SPACING * step / canonical::H_SQ
 }
 
 /// The first accumulator of a frame's slots.

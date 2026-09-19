@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
 use game::core::units::{Metres, RadiansPerSecond, Seconds};
-use game::systems::drum::Ring;
+use game::systems::drum::{DrumSurface, MouthColour, Ring};
 use game::systems::persistence::{Snapshot, apply, snapshot};
 use game::systems::player::Player;
 use game::systems::settings::{Dial, Settings};
@@ -70,6 +70,76 @@ fn snapshot_round_trips_through_json() {
     }
     assert_eq!(restored.fluid.len(), 40 * 7);
     assert_eq!(restored.fluid[0], particles[0].position[0] as f32);
+}
+
+/// A pair of portals put on the ground of a sculpted ring.
+fn with_a_pair_of_portals(sim: &mut Simulation) {
+    let hill = sim.drum.wall_point(0.3, 0.1);
+    sim.drum.sculpt(hill, 1.5, 0.4);
+    for (colour, turn, axial) in [
+        (MouthColour::Blue, 0.3, 0.1),
+        (MouthColour::Orange, 2.0, -1.5),
+    ] {
+        let at = sim.drum.wall_point(turn, axial);
+        let wanted = sim
+            .drum
+            .mouth_at(at, DrumSurface::Wall, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        let fit = sim.drum.fit_mouth(colour, wanted, Metres(1.8));
+        sim.drum.put_mouth(colour, fit, Metres(1.8));
+    }
+}
+
+/// Portals are saved with the world: a pair comes back where it was, as wide as it was, and
+/// open.
+#[test]
+fn portals_come_back_from_a_save_where_they_were() {
+    let mut app = testing::headless();
+    with_a_pair_of_portals(&mut app.world_mut().resource_mut::<Simulation>());
+    testing::run(&mut app, Seconds(3.0));
+    let world = app.world_mut();
+    let (sim, fluid) = (world.resource::<Simulation>(), world.resource::<Fluid>());
+    assert_eq!(sim.drum.mouths.fill(), 0.0, "the pair has opened");
+    let json = serde_json::to_string(&snapshot(&Settings::default(), sim, fluid)).unwrap();
+    let saved = sim.drum.mouths.clone();
+
+    let restored: Snapshot = serde_json::from_str(&json).unwrap();
+    let mut sim2 = Simulation::default();
+    let mut fluid2 = world.resource_mut::<Fluid>();
+    apply(&restored, &mut Settings::default(), &mut sim2, &mut fluid2);
+    for colour in MouthColour::BOTH {
+        assert_eq!(
+            sim2.drum.mouths.get(colour),
+            saved.get(colour),
+            "{colour:?}"
+        );
+    }
+    assert_eq!(sim2.drum.mouths.radius(), saved.radius());
+    assert_eq!(sim2.drum.mouths.fill(), 0.0, "a pair comes back open");
+}
+
+/// A save made before there were portals says nothing of them, and loads as a world without.
+#[test]
+fn a_save_from_before_portals_still_loads() {
+    let mut app = testing::headless();
+    with_a_pair_of_portals(&mut app.world_mut().resource_mut::<Simulation>());
+    let world = app.world_mut();
+    let (sim, fluid) = (world.resource::<Simulation>(), world.resource::<Fluid>());
+    let mut json: serde_json::Value =
+        serde_json::to_value(snapshot(&Settings::default(), sim, fluid)).unwrap();
+    let saved = json.as_object_mut().expect("a snapshot is an object");
+    assert!(saved.remove("portals").is_some(), "portals are saved");
+    let ground = sim.drum.landscape.ground();
+
+    let restored: Snapshot = serde_json::from_value(json).expect("an older save loads");
+    let mut sim2 = Simulation::default();
+    let mut fluid2 = world.resource_mut::<Fluid>();
+    apply(&restored, &mut Settings::default(), &mut sim2, &mut fluid2);
+    assert!(
+        MouthColour::BOTH
+            .iter()
+            .all(|c| sim2.drum.mouths.get(*c).is_none())
+    );
+    assert_eq!(sim2.drum.landscape.ground(), ground);
 }
 
 /// A ring kilometres across keeps what was sculpted on it and where its water lies, far round

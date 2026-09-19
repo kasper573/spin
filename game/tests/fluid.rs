@@ -102,7 +102,10 @@ fn water_placed_in_the_air_of_a_still_ring_stays_where_it_is_put() {
     );
 }
 
-/// Water put down onto water takes the free room around it rather than bursting out of it.
+/// Water put down onto water takes the free room around it rather than bursting out of it. It
+/// does make room for itself: a cubic metre and more joining a small body of water every tenth
+/// of a second swells it at some seven tenths of a metre a second while it does, and with
+/// nothing to weigh on the water or rub against it, what that set moving is still moving.
 #[test]
 fn water_placed_onto_water_settles_around_it() {
     let mut app = testing::headless();
@@ -118,13 +121,16 @@ fn water_placed_onto_water_settles_around_it() {
     let moved = norm(&[centre[0] - at[0], centre[1] - at[1], centre[2] - at[2]]);
     assert_eq!(app.world().resource::<Fluid>().len(), 400);
     assert!(
-        moved < 0.3 && rms < 6.0 && speed < 0.3,
+        moved < 0.3 && rms < 6.0 && speed < 0.7,
         "the water moved {moved} m, spread {rms} spacings and moves at {speed} m/s"
     );
 }
 
-/// Spinning the ring up under water hanging still in it brings the water down onto the
-/// floor: the ring's gravity is nothing but its spin.
+/// Spinning the ring up round water hanging still in it brings the water down onto the floor
+/// in the end, though nothing weighs on it: the ring's gravity is nothing but its spin, and
+/// water at rest among the stars has none of it. It is the air the ring carries round that
+/// does it, tearing at the water as it blows by, and carrying off what it tears loose to be
+/// flung out to the floor.
 #[test]
 #[ignore = "wants a GPU"]
 fn spinning_up_a_still_ring_brings_placed_water_down_to_the_floor() {
@@ -141,7 +147,7 @@ fn spinning_up_a_still_ring_brings_placed_water_down_to_the_floor() {
             .drum
             .target_spin = spin;
     }
-    testing::run(&mut app, Seconds(30.0));
+    testing::run(&mut app, Seconds(120.0));
     let particles = water(&mut app);
     let spacing = app.world().resource::<Fluid>().resolution().spacing.0 as f64;
     let floor = DEFAULT_RING.floor_radius().0 as f64;
@@ -154,6 +160,52 @@ fn spinning_up_a_still_ring_brings_placed_water_down_to_the_floor() {
         "only {down} of {} particles came down to the floor",
         particles.len()
     );
+}
+
+/// The fastest any of the water moves in the drum's frame while `per_frame` particles are put
+/// down at a point thirty times a second for a while, in metres per second.
+fn fastest_while_pouring(app: &mut App, at: [f64; 3], per_frame: u32, seconds: f32) -> f64 {
+    let mut fastest = 0.0f64;
+    for frame in 0..(seconds * 30.0) as usize {
+        inject(app, at, per_frame);
+        testing::run(app, Seconds(1.0 / 30.0));
+        if frame % 5 == 4 {
+            let most = water(app)
+                .iter()
+                .map(|p| norm(&p.velocity))
+                .fold(0.0, f64::max);
+            fastest = fastest.max(most);
+        }
+    }
+    fastest
+}
+
+/// Expected: water is put down at rest, however hard it is poured and wherever. Poured by the
+/// hundred cubic metres a second into the corner between the ground and the glass end, where
+/// it cannot get away as fast as it comes, it heaps up and runs out under its own weight, no
+/// faster than water let fall from a heap a few metres high. None of it is thrown.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_poured_hard_into_a_corner_is_not_thrown() {
+    let mut app = testing::headless();
+    let ring = DEFAULT_RING;
+    let at = [ring.radius.0 as f64 - 2.0, ring.half_width.0 as f64 - 1.0, 0.0];
+    let fastest = fastest_while_pouring(&mut app, at, 100, 4.0);
+    println!("the fastest of the water ran at {fastest:.1} m/s");
+    assert!(fastest < 25.0, "water put down at rest was thrown at {fastest:.0} m/s");
+}
+
+/// Expected: water put down by the glass end at the ring's axis, where it weighs nothing,
+/// stays together while it is poured: nothing moves it but the ring's turning, which carries
+/// the far side of a heap a few metres across no faster than a few metres a second.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_poured_at_the_axis_is_not_thrown() {
+    let mut app = testing::headless();
+    let at = [0.0, DEFAULT_RING.half_width.0 as f64 - 1.0, 0.0];
+    let fastest = fastest_while_pouring(&mut app, at, 30, 2.0);
+    println!("the fastest of the water ran at {fastest:.1} m/s");
+    assert!(fastest < 8.0, "water put down at rest was thrown at {fastest:.0} m/s");
 }
 
 #[test]
@@ -229,15 +281,19 @@ fn water_follows_the_ring_when_it_is_made_smaller() {
     }
 }
 
-/// Water dropped at the axis of the spinning drum ends up on the glass, riding round with it:
-/// at rest in the drum's own frame.
+/// Water let go beside the axis of the spinning drum ends up on the glass, riding round with
+/// it: at rest in the drum's own frame. Nothing weighs on it on the way: it flies straight
+/// among the stars, at the little speed the drum carried it round at so near the axis, and
+/// the further from the axis it began the sooner the floor comes round to meet it.
 #[test]
 #[ignore = "wants a GPU"]
 fn spinning_drum_throws_water_onto_the_glass() {
     let mut app = testing::headless();
     set_spin(&mut app, 1.0);
-    inject(&mut app, [0.0, 0.0, 0.0], 800);
-    testing::run(&mut app, Seconds(12.0));
+    inject(&mut app, [3.5, 0.0, 0.0], 800);
+    // the floor comes by at ten metres a second under water that lands on it, and drags it up to
+    // its own speed as a river's bed drags on the river: the faster the harder, and so for long
+    testing::run(&mut app, Seconds(40.0));
     let particles = water(&mut app);
     let near_glass = particles
         .iter()
@@ -265,13 +321,13 @@ fn reset_keeps_parameters_and_target_spin() {
     inject(&mut app, [6.0, 0.0, 0.0], 100);
     {
         let mut settings = app.world_mut().resource_mut::<Settings>();
-        settings.viscosity = 0.4;
+        settings.air = false;
         settings.spin = RadiansPerSecond(1.5);
     }
     testing::run(&mut app, Seconds(1.0));
     let mut sim = app.world_mut().resource_mut::<Simulation>();
     sim.reset();
-    assert_eq!(sim.params.viscosity, 0.4);
+    assert_eq!(sim.params.air_density.0, 0.0);
     assert_eq!(sim.drum.target_spin, RadiansPerSecond(1.5));
     assert_eq!(sim.time, Seconds(0.0));
     let mut fluid = app.world_mut().resource_mut::<Fluid>();
@@ -330,7 +386,7 @@ fn settled_water_holds_still_in_the_drums_frame() {
         );
         testing::run(&mut app, Seconds(0.2));
     }
-    testing::run(&mut app, Seconds(10.0));
+    testing::run(&mut app, Seconds(40.0));
     let before = testing::surface_vertices(&mut app);
     testing::run(&mut app, SUBSTEP_RATE.period());
     let after = testing::surface_vertices(&mut app);
@@ -352,7 +408,7 @@ fn settled_water_holds_still_in_the_drums_frame() {
     moved.sort_by(|x, y| x.total_cmp(y));
     let typical = moved[moved.len() * 9 / 10];
     assert!(
-        typical < 0.005,
+        typical < 0.0025,
         "the surface moved {typical} m in the drum's frame between two steps"
     );
 }

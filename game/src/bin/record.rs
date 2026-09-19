@@ -23,7 +23,7 @@ use game::core::units::{
     KilogramsPerCubicMetre, Litres, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
 };
 use game::systems::air::{Air, Suspension};
-use game::systems::drum::{Place, Ring, Round};
+use game::systems::drum::{CapSide, DrumSurface, MouthColour, Place, Ring, Round};
 use game::systems::player::{PilotInput, Player};
 use game::systems::scene::{SUN_DIRECTION, Sky};
 use game::systems::settings::{Dial, Settings};
@@ -44,6 +44,9 @@ const SUPERSAMPLE: u32 = 2;
 #[derive(Clone, Copy, PartialEq)]
 enum Cue {
     None,
+    /// Let a portal into the floor of the pool and its pair into the glass at the ring's end,
+    /// over the water.
+    Waterfall,
     /// Pour water in all round the ring.
     Flood,
     /// Make the ring bigger.
@@ -145,18 +148,21 @@ struct Work {
     tool: Option<usize>,
     left: bool,
     right: bool,
+    middle: bool,
     wheel: i32,
 }
 
 /// The tools' slots on the belt.
 const WATER_TOOL: usize = 0;
 const LAND_TOOL: usize = 1;
+const PORTAL_TOOL: usize = 2;
 
 impl Work {
     const WATER_TOOL_OUT: Work = Work {
         tool: Some(WATER_TOOL),
         left: false,
         right: false,
+        middle: false,
         wheel: 0,
     };
     const POURING: Work = Work {
@@ -167,6 +173,7 @@ impl Work {
         tool: Some(LAND_TOOL),
         left: false,
         right: false,
+        middle: false,
         wheel: 0,
     };
     const RAISING: Work = Work {
@@ -176,6 +183,25 @@ impl Work {
     const LOWERING: Work = Work {
         right: true,
         ..Work::LAND_TOOL_OUT
+    };
+    const PORTAL_TOOL_OUT: Work = Work {
+        tool: Some(PORTAL_TOOL),
+        left: false,
+        right: false,
+        middle: false,
+        wheel: 0,
+    };
+    const SHOOTING_BLUE: Work = Work {
+        left: true,
+        ..Work::PORTAL_TOOL_OUT
+    };
+    const SHOOTING_ORANGE: Work = Work {
+        right: true,
+        ..Work::PORTAL_TOOL_OUT
+    };
+    const TAKING_AWAY: Work = Work {
+        middle: true,
+        ..Work::PORTAL_TOOL_OUT
     };
 }
 
@@ -612,6 +638,207 @@ fn tools_script() -> Vec<Phase> {
 /// The water: poured in all round the ring and left to settle, looked into and across, waded
 /// into until the eye is under it, looked at from below, flown out of and looked down on,
 /// set flowing by spinning the ring up, and poured from the crosshair.
+/// The portal tool at work: a portal put on the ground alone, its pair put beside it so that
+/// both are seen to open, and both taken away again.
+fn portals_script() -> Vec<Phase> {
+    use Thruster::*;
+    let phase = |seconds, held: &[Thruster], level: f32, work: Work, caption| {
+        let mut pilot = PilotInput::default();
+        for thruster in held {
+            pilot.levels[*thruster as usize] = level;
+        }
+        Phase {
+            pace: 1.0,
+            seconds,
+            pilot,
+            caption,
+            cue: Cue::None,
+            work,
+            hold: None,
+        }
+    };
+    let (glance, pan) = (0.5, 0.25);
+    vec![
+        phase(
+            1.5,
+            &[],
+            0.0,
+            Work::PORTAL_TOOL_OUT,
+            "3: the portal tool comes up",
+        ),
+        phase(
+            turn_time(0.45, glance),
+            &[PitchDown],
+            glance,
+            Work::PORTAL_TOOL_OUT,
+            "looking down at the ground ahead: the marker shows where a portal would go, and which way up",
+        ),
+        phase(
+            0.2,
+            &[],
+            0.0,
+            Work::SHOOTING_BLUE,
+            "left button: the blue portal",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work::PORTAL_TOOL_OUT,
+            "alone, a portal is filled in: a vortex of its colour in a ring of fire, brighter toward its top",
+        ),
+        phase(
+            turn_time(0.5, pan),
+            &[YawLeft],
+            pan,
+            Work::PORTAL_TOOL_OUT,
+            "turning to the ground beside it",
+        ),
+        phase(
+            0.2,
+            &[],
+            0.0,
+            Work::SHOOTING_ORANGE,
+            "right button: the orange portal",
+        ),
+        phase(
+            3.5,
+            &[],
+            0.0,
+            Work::PORTAL_TOOL_OUT,
+            "with its pair standing, both open from the middle out",
+        ),
+        phase(
+            turn_time(0.25, pan),
+            &[YawRight],
+            pan,
+            Work::PORTAL_TOOL_OUT,
+            "both portals in view",
+        ),
+        phase(
+            turn_time(0.25, pan),
+            &[YawRight],
+            pan,
+            Work::PORTAL_TOOL_OUT,
+            "back to the blue one: through it, what is seen out of the orange one",
+        ),
+        phase(
+            2.0,
+            &[],
+            0.0,
+            Work::PORTAL_TOOL_OUT,
+            "the crosshair's marker lies where the aim comes down beyond the pair",
+        ),
+        phase(
+            4.0,
+            &[Forward],
+            1.0,
+            Work::PORTAL_TOOL_OUT,
+            "walking into it",
+        ),
+        phase(
+            3.0,
+            &[],
+            0.0,
+            Work::PORTAL_TOOL_OUT,
+            "out of the orange one, with the speed of the fall",
+        ),
+        phase(
+            0.2,
+            &[],
+            0.0,
+            Work::TAKING_AWAY,
+            "middle button on a portal: it is taken away, and the one left fills in again",
+        ),
+        phase(1.5, &[], 0.0, Work::PORTAL_TOOL_OUT, ""),
+    ]
+}
+
+/// Water shot at the middle of a cap from outside the ring, where there is nothing for it to
+/// land on but the glass.
+fn outside_script() -> Vec<Phase> {
+    let ring = game::systems::drum::DEFAULT_RING;
+    let (axis, cap) = (ring.radius.0 as f64, ring.half_width.0 as f64);
+    let view = View {
+        eye: [0.0, cap + 14.0, axis],
+        at: [0.0, cap, axis],
+        daylight: true,
+        ashore: false,
+    };
+    let phase = |seconds, work, caption| Phase {
+        pace: 1.0,
+        seconds,
+        pilot: PilotInput::default(),
+        caption,
+        cue: Cue::None,
+        work,
+        hold: Some(view),
+    };
+    vec![
+        Phase {
+            cue: Cue::Here,
+            hold: None,
+            ..phase(0.1, Work::default(), "")
+        },
+        phase(
+            1.0,
+            Work::WATER_TOOL_OUT,
+            "outside the ring, facing the middle of a cap",
+        ),
+        phase(6.0, Work::POURING, "water shot at the middle of the cap"),
+        phase(5.0, Work::WATER_TOOL_OUT, "and left to itself"),
+    ]
+}
+
+fn waterfall_script() -> Vec<Phase> {
+    let phase = |cue, seconds, eye, at, caption| {
+        let view = View {
+            eye,
+            at,
+            daylight: true,
+            ashore: false,
+        };
+        Phase {
+            pace: 1.0,
+            seconds,
+            pilot: PilotInput::default(),
+            caption,
+            cue,
+            work: Work::default(),
+            hold: Some(view),
+        }
+    };
+    let (across, close) = ([-2.0, 3.0, 4.2], [3.0, -2.5, 4.0]);
+    let (pool, fall) = ([-2.0, -6.0, 3.0], [-2.0, -5.0, 2.6]);
+    vec![
+        Phase {
+            cue: Cue::Basin,
+            ..phase(
+                Cue::None,
+                0.5,
+                across,
+                pool,
+                "a pool about a metre deep, dammed between two ridges",
+            )
+        },
+        phase(
+            Cue::None,
+            2.5,
+            across,
+            pool,
+            "a pool about a metre deep, dammed between two ridges",
+        ),
+        phase(
+            Cue::Waterfall,
+            9.0,
+            across,
+            pool,
+            "a portal let into its floor, and its pair into the glass at the ring's end, over the water: the water's own weight presses it in at the one, and it falls back in from the other",
+        ),
+        phase(Cue::None, 7.0, close, fall, "the stream, closer"),
+    ]
+}
+
 fn water_script() -> Vec<Phase> {
     use Thruster::*;
     let phase = |seconds, held: &[Thruster], level: f32, caption| {
@@ -1377,6 +1604,45 @@ fn cue(app: &mut App, cue: Cue) {
             Dial::Width.set(&mut settings, 16.0);
         }
         Cue::Equalize => app.world_mut().resource_mut::<Settings>().equalize_thrust(),
+        Cue::Waterfall => {
+            // the pool's level is where nine in ten of its particles lie under
+            let particles = testing::particles(app);
+            let mut sim = app.world_mut().resource_mut::<Simulation>();
+            let mut depths: Vec<f64> = particles
+                .iter()
+                .map(|p| {
+                    let at = sim.drum.from_water(p.position);
+                    sim.drum.height_above_glass(at) - sim.drum.ground(at)
+                })
+                .collect();
+            depths.sort_by(f64::total_cmp);
+            let level = depths.get(depths.len() * 9 / 10).copied().unwrap_or(0.0);
+            let pool = Mark {
+                round: sim.drum.site.round,
+                y: sim.drum.site.y,
+                shore: 0.0,
+            };
+            let half_width = sim.drum.ring.half_width.0 as f64;
+            let over = level + WATERFALL_OVER + WATERFALL_PORTAL.0 as f64 / 2.0;
+            let floor = spot(&sim, pool, [POOL_DEEP, 3.0 - half_width, 0.0]);
+            let over = spot(&sim, pool, [POOL_DEEP, -half_width, over]);
+            let (_, outward) = sim.drum.depth_and_outward(over);
+            let up = outward.map(|c| -c);
+            let places = [
+                (MouthColour::Blue, floor, DrumSurface::Wall, [0.0, 0.0, 1.0]),
+                (
+                    MouthColour::Orange,
+                    over,
+                    DrumSurface::Cap(CapSide::Low),
+                    up,
+                ),
+            ];
+            for (colour, at, surface, up) in places {
+                let wanted = sim.drum.mouth_at(at, surface, up, [0.0, 0.0, 1.0]);
+                let fit = sim.drum.fit_mouth(colour, wanted, WATERFALL_PORTAL);
+                sim.drum.put_mouth(colour, fit, WATERFALL_PORTAL);
+            }
+        }
         Cue::Basin => {
             let pool = {
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
@@ -1561,6 +1827,10 @@ const HEAP_CLEARANCE: f64 = 1.8;
 const HEAP_INTERVAL: f32 = 1.0;
 /// Where the pool lies deepest: the middle of the valley between the ridges.
 const POOL_DEEP: f64 = -2.0;
+/// The portals a pool is set running round through, and how far over the pool the lower edge
+/// of the one in the ring's end is let in.
+const WATERFALL_PORTAL: Metres = Metres(1.6);
+const WATERFALL_OVER: f64 = 1.0;
 
 /// The sea: a ring wide enough for the water to run deep, a headland raised across it to stand
 /// on and to shelve away into the shallows, and this many heaps of water laid all round it.
@@ -1643,7 +1913,9 @@ fn main() {
     fs::create_dir_all(out).expect("create target/record");
     let mut app = testing::headless();
     // the film shows the HUD as the game does, its lettering as large on the finished frame
-    app.world_mut().resource_mut::<Settings>().help = true;
+    let wanted = std::env::args().nth(1);
+    // the list of keys would stand in front of a film that is all held shots
+    app.world_mut().resource_mut::<Settings>().help = wanted.as_deref() != Some("waterfall");
     app.insert_resource(UiScale(SUPERSAMPLE as f32));
     let image = testing::render_to_image(&mut app, WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE);
     testing::watch(&mut app, Seconds(0.5));
@@ -1651,7 +1923,7 @@ fn main() {
     let frame_time = Seconds(1.0 / FPS as f32);
     let mut srt = String::new();
     let mut soundtrack = Soundtrack::new(out.join("thrusters.wav"));
-    let script = match std::env::args().nth(1).as_deref() {
+    let script = match wanted.as_deref() {
         None => script(),
         Some("marker") => marker_script(),
         Some("water") => water_script(),
@@ -1659,9 +1931,12 @@ fn main() {
         Some("survey") => survey_script(),
         Some("sea") => sea_script(),
         Some("air") => air_script(),
+        Some("portals") => portals_script(),
+        Some("waterfall") => waterfall_script(),
+        Some("outside") => outside_script(),
         Some(other) => {
             panic!(
-                "unknown script {other:?}: the others are `marker`, `water`, `tools`, `survey`, `sea` and `air`"
+                "unknown script {other:?}: the others are `marker`, `water`, `tools`, `survey`, `sea`, `air`, `portals` and `waterfall`"
             )
         }
     };
@@ -1727,6 +2002,7 @@ fn main() {
 struct Hands {
     left: bool,
     right: bool,
+    middle: bool,
 }
 
 impl Hands {
@@ -1741,6 +2017,7 @@ impl Hands {
         for (button, held, wanted) in [
             (MouseButton::Left, &mut self.left, work.left),
             (MouseButton::Right, &mut self.right, work.right),
+            (MouseButton::Middle, &mut self.middle, work.middle),
         ] {
             if *held != wanted {
                 testing::button(app, button, wanted);

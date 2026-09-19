@@ -319,6 +319,16 @@ impl Air {
         w * w / (2.0 * specific * self.temperature.0)
     }
 
+    /// How dense it is where it meets the ground.
+    pub fn density(&self) -> KilogramsPerCubicMetre {
+        let warmth = self.specific_gas_constant() * self.temperature.0;
+        KilogramsPerCubicMetre(if warmth > 0.0 {
+            self.pressure.0 / warmth
+        } else {
+            0.0
+        })
+    }
+
     pub fn specific_gas_constant(&self) -> f64 {
         let molar = self.molar_mass();
         if molar <= 0.0 { 0.0 } else { MOLAR_GAS / molar }

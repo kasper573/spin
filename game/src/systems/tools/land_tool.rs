@@ -8,7 +8,7 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
 use crate::core::units::{LitresPerSecond, Metres};
-use crate::systems::aim::Aim;
+use crate::systems::aim::{self, Aim, AimMarker};
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::tools::muzzle::MuzzleLight;
@@ -25,8 +25,6 @@ pub fn brush(flow: LitresPerSecond) -> Metres {
 pub struct LandTool {
     pub raising: bool,
     pub lowering: bool,
-    /// The brush at work, while the tool is.
-    brush: Option<Metres>,
 }
 
 impl Tool for LandTool {
@@ -163,7 +161,7 @@ pub struct LandToolPlugin;
 impl Plugin for LandToolPlugin {
     fn build(&self, app: &mut App) {
         app.add_tool::<LandTool, _>(operate)
-            .add_systems(Update, (light, outline).in_set(SimSet::Observe));
+            .add_systems(Update, light.in_set(SimSet::Observe));
     }
 }
 
@@ -250,7 +248,7 @@ fn operate(
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
-    aim: Res<Aim>,
+    mut aim: ResMut<Aim>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
 ) {
@@ -258,7 +256,15 @@ fn operate(
         Dial::Build.adjust(&mut settings, scroll.delta.y.signum() as i32);
     }
     let brush = brush(settings.build);
-    tool.brush = (brush.0 > 0.0).then_some(brush);
+    aim.marker = aim
+        .target
+        .filter(|_| brush.0 > 0.0)
+        .map(|target| AimMarker {
+            mouth: aim::disc_at(&sim.drum, target),
+            radius: brush,
+            top: false,
+            refused: false,
+        });
     tool.raising = aim.target.is_some() && mouse.pressed(MouseButton::Left);
     tool.lowering = aim.target.is_some() && mouse.pressed(MouseButton::Right);
     let way = f32::from(tool.raising) - f32::from(tool.lowering);
@@ -282,12 +288,5 @@ fn light(tool: Res<LandTool>, mut rings: Query<(&Barrel, &mut MuzzleLight)>) {
         if ring.firing != firing {
             ring.firing = firing;
         }
-    }
-}
-
-/// While the tool is out, the crosshair's marker outlines its brush.
-fn outline(tool: Res<LandTool>, mut aim: ResMut<Aim>) {
-    if aim.brush != tool.brush {
-        aim.brush = tool.brush;
     }
 }

@@ -54,10 +54,18 @@ struct Carried {
     weight_a: f32,
 }
 
+// how fast the particles of water at rest still jostle, in metres per second
+const JOSTLING: f32 = 0.12;
+
 fn carried(x: vec3<f32>, flow: vec3<f32>, t: f32) -> Carried {
     let phase_a = fract(t / FLOW_PERIOD);
     let phase_b = fract(t / FLOW_PERIOD + 0.5);
-    let ride = flow * min(1.0, CARRY / (FLOW_PERIOD * max(length(flow), 1e-3)));
+    // ripples ride a current, not the jostling of the particles the flow is read from, which
+    // differs from one to the next and would wring the ripples between them into rings: water
+    // moving slower than its ripples run carries them nowhere they were not going
+    let speed = length(flow);
+    let current = flow * smoothstep(JOSTLING, 3.0 * JOSTLING, speed);
+    let ride = current * min(1.0, CARRY / (FLOW_PERIOD * max(speed, 1e-3)));
     var out: Carried;
     out.a = x - ride * phase_a * FLOW_PERIOD;
     out.b = x - ride * phase_b * FLOW_PERIOD;
@@ -88,7 +96,7 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
     for (var i = 0; i < 6; i++) {
         let wave = kinds[i];
         let length = wave.w;
-        let resolved = smoothstep(length * 0.5, length * 0.1, footprint);
+        let resolved = smoothstep(length * 0.25, length * 0.08, footprint);
         if (resolved <= 0.0) {
             continue;
         }

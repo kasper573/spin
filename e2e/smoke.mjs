@@ -112,6 +112,10 @@ try {
   await tapKey(2);
   const away = await status();
   check("and puts it away again", away.tool === null, `${away.tool}`);
+  await tapKey(3);
+  const gun = await status();
+  check("the third key brings the portal tool out", gun.tool === 2, `${gun.tool}`);
+  await screenshot("portal-tool");
   await tapKey(1);
 
   await command({ cmd: "thrust", forward: 1, seconds: 4 });
@@ -155,6 +159,18 @@ try {
   await screenshot("landscape-inside");
   await command({ cmd: "camera", x: Math.cos(a) * 16.0, y: 7.0, z: Math.sin(a) * 16.0, look_x: Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
   await screenshot("landscape-outside");
+  await command({ cmd: "portal", orange: false, phi: a + still.angle + 0.45, y: 2.0, diameter: 2.5 });
+  await command({ cmd: "advance", seconds: 1 });
+  const lone = await status();
+  check("a portal alone is filled in", lone.portals === 1 && lone.portal_fill === 1, JSON.stringify({ portals: lone.portals, fill: lone.portal_fill }));
+  const b = a + 0.45;
+  await command({ cmd: "camera", x: Math.cos(b) * 7.0, y: 0.0, z: Math.sin(b) * 7.0, look_x: Math.cos(b) * 10.0, look_y: 2.0, look_z: Math.sin(b) * 10.0 });
+  await screenshot("portal-lone");
+  await command({ cmd: "portal", orange: true, phi: a + still.angle + 2.4, y: -2.0, diameter: 2.5 });
+  await command({ cmd: "advance", seconds: 1.5 });
+  const pair = await status();
+  check("a pair of portals opens", pair.portals === 2 && pair.portal_fill === 0, JSON.stringify({ portals: pair.portals, fill: pair.portal_fill }));
+  await screenshot("portal-open");
   await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
   await command({ cmd: "spin", value: 1.0 });
   await command({ cmd: "advance", seconds: 4 });
@@ -181,6 +197,7 @@ try {
   await send("Page.reload");
   check("app restarts", await waitForApp());
   const restored = await status();
+  check("portals persist across reload", restored.portals === 2 && restored.portal_fill === 0, JSON.stringify({ portals: restored.portals, fill: restored.portal_fill }));
   check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && restored.sculpted === live.sculpted && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, sculpted: [live.sculpted, restored.sculpted], spin: restored.spin }));
   await screenshot("restored");
 

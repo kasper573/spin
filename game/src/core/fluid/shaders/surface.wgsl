@@ -10,7 +10,8 @@
 // be drawn as the drop of water it is. Vertices come out in the vessel's frame, in the water's
 // own units, and the mesh turns with the vessel between extractions.
 #import fluid_common::{params, coords_of, cell_key, cell_slot, neighbour_cell}
-#import vessel::{landscape_penetration, vessel_confine}
+#import vessel::vessel_confine
+#import fluid_views::{VIEWS, View, view_of, apart, brought_back}
 
 struct SurfaceParams {
     cell: f32,
@@ -28,8 +29,7 @@ struct Vertex {
     position: vec4<f32>,
     // xyz: normal, w: the key of the cell the vertex sits in, as bits
     normal: vec4<f32>,
-    // xyz: the water's velocity at the vertex, in the vessel's frame, w: how far the vertex
-    // stands clear of the ground under it, in cells
+    // xyz: the water's velocity at the vertex, in the vessel's frame
     velocity: vec4<f32>,
 }
 
@@ -57,17 +57,20 @@ struct Probe {
 @group(3) @binding(8) var<storage, read_write> cell_table: array<atomic<u32>>;
 @group(3) @binding(9) var<storage, read_write> cell_value: array<u32>;
 @group(3) @binding(10) var<storage, read_write> polished: array<Vertex>;
-// whether each particle is a droplet, and the droplets: xyz position like a vertex's, w foam
+// whether each particle is a droplet, and the droplets, three entries each: xyz position like
+// a vertex's, w foam; then xyz velocity, w what the particle carries beside it; then the wall
+// it has come down on
 @group(3) @binding(11) var<storage, read_write> lone: array<u32>;
 @group(3) @binding(12) var<storage, read_write> droplets: array<vec4<f32>>;
 
+// a parcel lies against a wall once it has come this much of the way to it from a particle's
+// width off
+const LAIN_BY: f32 = 0.8;
 const BLOCK: i32 = 4;
 // how far each vertex is drawn toward the middle of its neighbours when the surface is polished
 const POLISH: f32 = 0.7;
 // the surface is kept this far inside the vessel, in cells, so it never shows through its walls
 const CLEARANCE: f32 = 0.125;
-// thick enough that nothing takes water this deep for a film
-const DEEP: f32 = 64.0;
 const CORNERS_PER_BLOCK: u32 = 125u;
 const CELLS_PER_BLOCK: u32 = 64u;
 const COUNTER_VERTICES: u32 = 0u;
@@ -183,26 +186,37 @@ fn find_cell(key: u32) -> u32 {
     return NO_CELL;
 }
 
+/// How far a particle's splat reaches.
+fn splat_reach() -> f32 {
+    return inverseSqrt(surface.inv_r2);
+}
+
 /// Whether a particle is a droplet: whether it has no more than LONE others within its
 /// splat's reach, itself among those counted.
 fn is_lone(i: u32) -> bool {
     let p = position[i].xyz;
     var count = 0u;
-    let c = coords_of(p);
-    for (var n = 0u; n < 27u; n++) {
-        let cell = neighbour_cell(c, n);
-        let k = cell_key(cell);
-        let ci = cell_slot(cell);
-        let end = cell_start[ci + 1u];
-        for (var j = cell_start[ci]; j < end; j++) {
-            if (key[j] != k) {
-                continue;
-            }
-            let r = p - position[j].xyz;
-            if (dot(r, r) * surface.inv_r2 < 1.0) {
-                count++;
-                if (count > LONE + 1u) {
-                    return false;
+    for (var seen = 0u; seen < VIEWS; seen++) {
+        let view = view_of(p, seen, splat_reach());
+        if (!view.there) {
+            continue;
+        }
+        let c = coords_of(view.q);
+        for (var n = 0u; n < 27u; n++) {
+            let cell = neighbour_cell(c, n);
+            let k = cell_key(cell);
+            let ci = cell_slot(cell);
+            let end = cell_start[ci + 1u];
+            for (var j = cell_start[ci]; j < end; j++) {
+                if (key[j] != k) {
+                    continue;
+                }
+                let r = apart(view, position[j].xyz);
+                if (r.w > 0.0 && dot(r.xyz, r.xyz) * surface.inv_r2 < 1.0) {
+                    count++;
+                    if (count > LONE + 1u) {
+                        return false;
+                    }
                 }
             }
         }
@@ -223,7 +237,14 @@ fn mark(@builtin(global_invocation_id) id: vec3<u32>) {
     if (is_lone(i)) {
         lone[i] = 1u;
         let slot = atomicAdd(&counters[COUNTER_DROPLETS], 1u);
-        droplets[slot] = s;
+        droplets[3u * slot] = s;
+        droplets[3u * slot + 1u] = velocity[i];
+        // the wall the parcel has come down on, if any: which way it faces, and how much of the
+        // way the parcel has come from a particle's width off it to lying against it, where
+        // it never lies quite still
+        let lying = vessel_confine(s.xyz, 2.0 * params.margin).p - s.xyz;
+        let sunk = length(lying);
+        droplets[3u * slot + 2u] = vec4(lying / max(sunk, 1e-9), min(sunk / (LAIN_BY * params.margin), 1.0));
         return;
     }
     lone[i] = 0u;
@@ -275,27 +296,32 @@ fn corner_position(block: vec3<i32>, corner: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(block * BLOCK + corner) * surface.cell;
 }
 
-/// Splatted density at a corner of a block: the smooth kernel of every particle within reach.
-fn splat(b: vec3<i32>, corner: vec3<i32>) -> f32 {
-    let p = corner_position(b, corner);
+/// Splatted density at a point: the smooth kernel of every particle within reach.
+fn density_at(p: vec3<f32>) -> f32 {
     var d = 0.0;
-    let c = coords_of(p);
-    for (var n = 0u; n < 27u; n++) {
-        let cell = neighbour_cell(c, n);
-        let k = cell_key(cell);
-        let ci = cell_slot(cell);
-        let end = cell_start[ci + 1u];
-        for (var j = cell_start[ci]; j < end; j++) {
-            let kj = key[j];
-            let s = position[j];
-            if (kj != k || lone[j] != 0u) {
-                continue;
-            }
-            let r = p - s.xyz;
-            let q = dot(r, r) * surface.inv_r2;
-            if (q < 1.0) {
-                let w = (1.0 - q) * (1.0 - q);
-                d += w;
+    for (var seen = 0u; seen < VIEWS; seen++) {
+        let view = view_of(p, seen, splat_reach());
+        if (!view.there) {
+            continue;
+        }
+        let c = coords_of(view.q);
+        for (var n = 0u; n < 27u; n++) {
+            let cell = neighbour_cell(c, n);
+            let k = cell_key(cell);
+            let ci = cell_slot(cell);
+            let end = cell_start[ci + 1u];
+            for (var j = cell_start[ci]; j < end; j++) {
+                let kj = key[j];
+                let s = position[j];
+                if (kj != k || lone[j] != 0u) {
+                    continue;
+                }
+                let r = apart(view, s.xyz);
+                let q = dot(r.xyz, r.xyz) * surface.inv_r2;
+                if (r.w > 0.0 && q < 1.0) {
+                    let w = (1.0 - q) * (1.0 - q);
+                    d += w;
+                }
             }
         }
     }
@@ -311,26 +337,32 @@ fn probe(p: vec3<f32>) -> Probe {
     out.velocity = vec3(0.0);
     out.foam = 0.0;
     var weight = 0.0;
-    let c = coords_of(p);
-    for (var n = 0u; n < 27u; n++) {
-        let cell = neighbour_cell(c, n);
-        let k = cell_key(cell);
-        let ci = cell_slot(cell);
-        let end = cell_start[ci + 1u];
-        for (var j = cell_start[ci]; j < end; j++) {
-            let kj = key[j];
-            let s = position[j];
-            if (kj != k || lone[j] != 0u) {
-                continue;
-            }
-            let r = p - s.xyz;
-            let q = dot(r, r) * surface.inv_r2;
-            if (q < 1.0) {
-                let w = (1.0 - q) * (1.0 - q);
-                out.gradient += -4.0 * (1.0 - q) * surface.inv_r2 * r;
-                out.velocity += w * velocity[j].xyz;
-                out.foam += w * s.w;
-                weight += w;
+    for (var seen = 0u; seen < VIEWS; seen++) {
+        let view = view_of(p, seen, splat_reach());
+        if (!view.there) {
+            continue;
+        }
+        let c = coords_of(view.q);
+        for (var n = 0u; n < 27u; n++) {
+            let cell = neighbour_cell(c, n);
+            let k = cell_key(cell);
+            let ci = cell_slot(cell);
+            let end = cell_start[ci + 1u];
+            for (var j = cell_start[ci]; j < end; j++) {
+                let kj = key[j];
+                let s = position[j];
+                if (kj != k || lone[j] != 0u) {
+                    continue;
+                }
+                let r = apart(view, s.xyz);
+                let q = dot(r.xyz, r.xyz) * surface.inv_r2;
+                if (r.w > 0.0 && q < 1.0) {
+                    let w = (1.0 - q) * (1.0 - q);
+                    out.gradient += -4.0 * (1.0 - q) * surface.inv_r2 * r.xyz;
+                    out.velocity += w * brought_back(view, velocity[j].xyz);
+                    out.foam += w * s.w;
+                    weight += w;
+                }
             }
         }
     }
@@ -345,17 +377,6 @@ fn probe(p: vec3<f32>) -> Probe {
 /// water's units.
 fn inside(p: vec3<f32>) -> vec3<f32> {
     return vessel_confine(p, CLEARANCE * surface.cell).p;
-}
-
-/// How thick the water lies at a point of its surface, in cells, as far as the surface itself
-/// can tell: a point of the water's top stands as far clear of the ground as the water under it
-/// is deep, and where that is under a cell the water is a film whose edge the grid cannot make
-/// out. The water's underside rests on the ground however deep the water over it stands, so it
-/// says nothing about the thickness and is taken as deep.
-fn sheet_at(p: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let ground = landscape_penetration(p, 0.0);
-    let clear = max(-ground.depth, 0.0) / surface.cell;
-    return mix(DEEP, clear, clamp(dot(normal, ground.normal), 0.0, 1.0));
 }
 
 fn corner_at(c: vec3<i32>) -> f32 {
@@ -385,7 +406,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     var b = vec3(0);
     if (listed) {
         b = block_coords(blocks[block]);
-        field[t] = splat(b, vec3<i32>(i32(t / 25u), i32((t / 5u) % 5u), i32(t % 5u)));
+        field[t] = density_at(corner_position(b, vec3<i32>(i32(t / 25u), i32((t / 5u) % 5u), i32(t % 5u))));
     }
     workgroupBarrier();
     if (!listed || t >= CELLS_PER_BLOCK) {
@@ -432,7 +453,7 @@ fn extract(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     }
     let normal = -gradient / max(length(gradient), 1e-9);
     let key = cell_key_of(block, t);
-    vertices[slot] = Vertex(vec4(p, at.foam), vec4(normal, bitcast<f32>(key)), vec4(at.velocity, sheet_at(within * surface.cell, normal)));
+    vertices[slot] = Vertex(vec4(p, at.foam), vec4(normal, bitcast<f32>(key)), vec4(at.velocity, 0.0));
     insert_cell(key, (slot << 8u) | mask);
 }
 

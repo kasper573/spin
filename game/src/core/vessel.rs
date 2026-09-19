@@ -99,6 +99,31 @@ impl Penetrations {
     pub fn iter(&self) -> impl Iterator<Item = Penetration> + '_ {
         self.items.iter().flatten().copied()
     }
+
+    pub fn extend(&mut self, penetration: Option<Penetration>) {
+        if let Some(penetration) = penetration {
+            self.push(penetration);
+        }
+    }
+}
+
+/// Where something that went through an opening in the vessel's walls really is, the vessel
+/// being joined to itself there: the point it came out at, and the turn that every vector it
+/// carries is put through on the way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Passage {
+    pub point: Vec3d,
+    pub turn: Quatd,
+}
+
+impl Passage {
+    pub fn turned(&self, v: Vec3d) -> Vec3d {
+        quat_rotate(&self.turn, &v)
+    }
+
+    pub fn turned_back(&self, v: Vec3d) -> Vec3d {
+        quat_rotate(&quat_conjugate(&self.turn), &v)
+    }
 }
 
 /// The vessel as the bodies meet it, in their frame.
@@ -118,4 +143,9 @@ pub trait Vessel {
     fn penetrations(&self, p: Vec3d) -> Penetrations;
     /// Every wall a sphere overlaps, from whichever side of the wall it is on.
     fn sphere_penetrations(&self, centre: Vec3d, radius: f64) -> Penetrations;
+    /// Where a point reached from `from`, which is in the vessel's room, really is when the way
+    /// to it led through an opening in a wall. A vessel without openings has none to go through.
+    fn passage(&self, _from: Vec3d, _to: Vec3d) -> Option<Passage> {
+        None
+    }
 }

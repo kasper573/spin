@@ -83,7 +83,7 @@ fn ride(
     viewpoint: Res<Viewpoint>,
     mut cameras: Query<&mut Transform, With<PlayerCamera>>,
 ) {
-    let view = viewpoint.view(sim.avatar());
+    let view = viewpoint.view(sim.eye());
     for mut camera in &mut cameras {
         *camera = view;
     }
