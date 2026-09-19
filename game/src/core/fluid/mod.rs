@@ -344,13 +344,20 @@ impl Fluid {
     /// round it rather than into it. Once a frame has offered all the sites it can, the rest
     /// take the nearest sites free or not. Only sites the vessel `has_room` at are offered:
     /// a site outside it is no site, and moving it inside would lay it on top of another.
-    /// Returns how many were added.
+    /// Water that would overfill the budget is made coarser first, and what is asked for with
+    /// it, so that it is still as much water. Returns how many were added, of the particles
+    /// the water is made of once they have been.
     pub fn inject(
         &mut self,
         centre: Vec3d,
         count: u32,
         mut has_room: impl FnMut(Vec3d) -> bool,
     ) -> u32 {
+        let mut count = count;
+        if self.count as usize + count as usize > MAX_PARTICLES && self.thin.is_none() {
+            self.coarsen();
+            count = count.div_ceil(2);
+        }
         let pitch = self.resolution.lattice().0 as f64;
         let base = centre.map(|x| (x / pitch).floor());
         let room = gpu::SITES - self.sites.len();
@@ -389,8 +396,8 @@ impl Fluid {
         if offered >= count as usize {
             while added < count && self.reserve() {
                 added += 1;
+                self.joining += 1;
             }
-            self.joining += added;
             let length = self.resolution.length();
             for site in sites.iter().take(offered) {
                 let p = site.map(|x| (x / length) as f32);
@@ -617,10 +624,25 @@ impl Fluid {
     /// Every particle stands for twice the water from now on: the GPU keeps every other one of
     /// those it has, and whatever is waiting to join them joins the rest.
     fn coarsen(&mut self) {
-        let waiting = self.pending.len() as u32 + self.joining;
-        let on_gpu = self.count - waiting;
+        let on_gpu = self.count - self.pending.len() as u32 - self.joining;
         self.thin = Some((on_gpu, self.resolution));
-        self.count = on_gpu.div_ceil(2) + waiting;
+        // the water waiting to join is thinned as the water on the GPU is: every other
+        // particle of it, and every other site of the lattice, which are the sites of a
+        // lattice with twice the room to each
+        let mut kept = false;
+        self.pending.retain(|_| {
+            kept = !kept;
+            kept
+        });
+        self.sites.retain(|site| {
+            let steps: f32 = site[..3]
+                .iter()
+                .map(|x| (x / canonical::LATTICE - 0.5).round())
+                .sum();
+            steps.rem_euclid(2.0) == 0.0
+        });
+        self.joining = self.joining.div_ceil(2).min(self.sites.len() as u32);
+        self.count = on_gpu.div_ceil(2) + self.pending.len() as u32 + self.joining;
         let before = self.resolution.length();
         self.set_resolution(self.resolution.coarser());
         let scale = (before / self.resolution.length()) as f32;

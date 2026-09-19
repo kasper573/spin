@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use game::core::fluid::{
-    Fluid, MAX_BLOCKS, MAX_INDICES, MAX_VERTICES, Particle, Resolution, grid_reach,
+    Fluid, MAX_BLOCKS, MAX_INDICES, MAX_PARTICLES, MAX_VERTICES, Particle, Resolution, grid_reach,
 };
 use game::core::math::norm;
 use game::core::units::Metres;
@@ -533,4 +533,44 @@ fn spray_all_over_a_big_ring_is_meshed() {
         "{demand:?}"
     );
     assert!(demand.blocks <= MAX_BLOCKS as u32, "{demand:?}");
+}
+
+/// Water that overfills the budget while some of it is still waiting to join is made coarser
+/// as a whole, the waiting water with the rest: there is as much of it after as before, and
+/// never more particles than the water keeps.
+#[test]
+fn water_coarsened_while_it_waits_to_join_is_as_much_water() {
+    let mut fluid = Fluid::default();
+    let at_rest = |k: usize| Particle {
+        position: [k as f64 * 1e-3, 0.0, 0.0],
+        velocity: [0.0; 3],
+        foam: 0.0,
+    };
+    for k in 0..MAX_PARTICLES {
+        assert!(fluid.add(at_rest(k)));
+    }
+    let full = fluid.litres().0;
+    let fine = fluid.resolution();
+    assert!(fluid.add(at_rest(MAX_PARTICLES)));
+    assert!(fluid.resolution().spacing.0 > fine.spacing.0);
+    assert!(fluid.len() <= MAX_PARTICLES);
+    let one = fluid.resolution().litres_per_particle().0;
+    assert!(
+        (fluid.litres().0 - full - one).abs() <= one,
+        "{full} l of waiting water and {one} l more came to {} l",
+        fluid.litres().0
+    );
+
+    let mut placed = Fluid::default();
+    let asked = MAX_PARTICLES as u32 + 1000;
+    let asked_litres = asked as f32 * placed.resolution().litres_per_particle().0;
+    let added = placed.inject([0.0; 3], asked, |_| true);
+    assert!(placed.len() <= MAX_PARTICLES);
+    assert_eq!(added as usize, placed.len());
+    let one = placed.resolution().litres_per_particle().0;
+    assert!(
+        (placed.litres().0 - asked_litres).abs() <= one,
+        "{asked_litres} l asked for came to {} l",
+        placed.litres().0
+    );
 }
