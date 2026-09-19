@@ -702,7 +702,12 @@ fn flashing(sight: &mut Sight, eye: [f64; 3], at: [f64; 3]) -> f64 {
     // where it does with the water gone
     const BLOCK: usize = 16;
     let across = (WIDTH as usize).div_ceil(BLOCK);
-    let block_of = |pixel: usize| (pixel / WIDTH as usize / BLOCK, pixel % WIDTH as usize / BLOCK);
+    let block_of = |pixel: usize| {
+        (
+            pixel / WIDTH as usize / BLOCK,
+            pixel % WIDTH as usize / BLOCK,
+        )
+    };
     frames
         .windows(3)
         .map(|run| {
@@ -713,7 +718,8 @@ fn flashing(sight: &mut Sight, eye: [f64; 3], at: [f64; 3]) -> f64 {
             let by_a_star = |pixel: usize| {
                 let (row, column) = block_of(pixel);
                 (row.saturating_sub(1)..=row + 1).any(|r| {
-                    (column.saturating_sub(1)..=column + 1).any(|c| starry.contains(&(r * across + c)))
+                    (column.saturating_sub(1)..=column + 1)
+                        .any(|c| starry.contains(&(r * across + c)))
                 })
             };
             let flashed = water

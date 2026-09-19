@@ -377,14 +377,13 @@ fn nothing_thrown_at_the_hull_gets_out_of_it() {
                 }
             }
             if portals {
-                let mut sim = app.world_mut().resource_mut::<Simulation>();
-                let (p, q, v) = (sim.avatar().p, sim.avatar().q, sim.avatar().v);
-                sim.avatar_mut().v = [0.0; 3];
-                drop(sim);
-                testing::run(
-                    &mut app,
-                    Seconds(2.0 * game::systems::drum::OPENING.0 as f32),
-                );
+                let (p, q, v) = {
+                    let mut sim = app.world_mut().resource_mut::<Simulation>();
+                    let held = (sim.avatar().p, sim.avatar().q, sim.avatar().v);
+                    sim.avatar_mut().v = [0.0; 3];
+                    held
+                };
+                testing::run(&mut app, Seconds(2.0 * game::systems::drum::OPENING.0));
                 let mut sim = app.world_mut().resource_mut::<Simulation>();
                 sim.avatar_mut().place(p, q);
                 sim.avatar_mut().v = v;

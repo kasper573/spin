@@ -128,7 +128,14 @@ fn spawn(
     mut materials: ResMut<Assets<WaterColumnMaterial>>,
 ) {
     let faces = meshes.add(numbered_mesh(MAX_INDICES));
-    let pictures = [(); VANTAGES].map(|()| { let mut im = Image::new_target_texture(1, 1, TextureFormat::Rgba16Float, None); im.texture_descriptor.usage |= bevy::render::render_resource::TextureUsages::COPY_SRC; images.add(im) });
+    let pictures = [(); VANTAGES].map(|()| {
+        images.add(Image::new_target_texture(
+            1,
+            1,
+            TextureFormat::Rgba16Float,
+            None,
+        ))
+    });
     for (seen, picture) in (0..VANTAGES).map(SeenFrom).zip(&pictures) {
         let material = materials.add(WaterColumnMaterial {
             seen_past: Vec4::ZERO,
@@ -205,7 +212,13 @@ fn follow(
         (Without<PlayerCamera>, Without<WaterColumnEye>),
     >,
     mut counting: Query<
-        (&WaterColumnEye, &SeenFrom, &mut Camera, &mut Transform, &mut Projection),
+        (
+            &WaterColumnEye,
+            &SeenFrom,
+            &mut Camera,
+            &mut Transform,
+            &mut Projection,
+        ),
         Without<PlayerCamera>,
     >,
     mut materials: ResMut<Assets<WaterColumnMaterial>>,

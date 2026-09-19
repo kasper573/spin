@@ -102,6 +102,18 @@ fn water_placed_in_the_air_of_a_still_ring_stays_where_it_is_put() {
     );
 }
 
+/// However much water is asked for in one go, all of it is put down: in the open, and down on
+/// the floor where half the room round the point is under the ground.
+#[test]
+fn a_great_deal_of_water_asked_for_at_once_is_all_put_down() {
+    for across in [5.0, DEFAULT_RING.floor_radius().0 as f64 - 0.5] {
+        let mut app = testing::headless();
+        still(&mut app);
+        testing::run(&mut app, Seconds(0.5));
+        assert_eq!(inject(&mut app, [across, 0.0, 0.0], 20_000), 20_000);
+    }
+}
+
 /// Water put down onto water takes the free room around it rather than bursting out of it. It
 /// does make room for itself: a cubic metre and more joining a small body of water every tenth
 /// of a second swells it at some seven tenths of a metre a second while it does, and with
@@ -189,10 +201,17 @@ fn fastest_while_pouring(app: &mut App, at: [f64; 3], per_frame: u32, seconds: f
 fn water_poured_hard_into_a_corner_is_not_thrown() {
     let mut app = testing::headless();
     let ring = DEFAULT_RING;
-    let at = [ring.radius.0 as f64 - 2.0, ring.half_width.0 as f64 - 1.0, 0.0];
+    let at = [
+        ring.radius.0 as f64 - 2.0,
+        ring.half_width.0 as f64 - 1.0,
+        0.0,
+    ];
     let fastest = fastest_while_pouring(&mut app, at, 100, 4.0);
     println!("the fastest of the water ran at {fastest:.1} m/s");
-    assert!(fastest < 25.0, "water put down at rest was thrown at {fastest:.0} m/s");
+    assert!(
+        fastest < 25.0,
+        "water put down at rest was thrown at {fastest:.0} m/s"
+    );
 }
 
 /// Expected: water put down by the glass end at the ring's axis, where it weighs nothing,
@@ -205,7 +224,10 @@ fn water_poured_at_the_axis_is_not_thrown() {
     let at = [0.0, DEFAULT_RING.half_width.0 as f64 - 1.0, 0.0];
     let fastest = fastest_while_pouring(&mut app, at, 30, 2.0);
     println!("the fastest of the water ran at {fastest:.1} m/s");
-    assert!(fastest < 8.0, "water put down at rest was thrown at {fastest:.0} m/s");
+    assert!(
+        fastest < 8.0,
+        "water put down at rest was thrown at {fastest:.0} m/s"
+    );
 }
 
 #[test]

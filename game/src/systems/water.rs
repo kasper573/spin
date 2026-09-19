@@ -68,12 +68,12 @@ impl Plugin for WaterPlugin {
             MaterialPlugin::<SprayMaterial>::default(),
             WaterColumnPlugin,
         ))
-            .add_systems(Startup, spawn.after(MakeWaterColumns))
-            .add_systems(
-                Update,
-                (tick.after(SettleVantages), submerge).in_set(SimSet::Observe),
-            )
-            .add_systems(PostUpdate, mirror.after(FigureGathered));
+        .add_systems(Startup, spawn.after(MakeWaterColumns))
+        .add_systems(
+            Update,
+            (tick.after(SettleVantages), submerge).in_set(SimSet::Observe),
+        )
+        .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
 }
 
@@ -241,14 +241,19 @@ pub struct WaterMesh;
 /// number a shader is told a vertex has is no use for that: meshes are packed many to a
 /// buffer, and the count runs on from one to the next.
 pub fn numbered_mesh(vertices: usize) -> Mesh {
-    assert!(vertices < 1 << f32::MANTISSA_DIGITS, "a float counts no higher exactly");
+    assert!(
+        vertices < 1 << f32::MANTISSA_DIGITS,
+        "a float counts no higher exactly"
+    );
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(
         Mesh::ATTRIBUTE_POSITION,
-        (0..vertices).map(|n| [n as f32, 0.0, 0.0]).collect::<Vec<_>>(),
+        (0..vertices)
+            .map(|n| [n as f32, 0.0, 0.0])
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -352,10 +357,7 @@ fn tick(
     pictures: Res<Pictures>,
     air: Res<Air>,
     (water, spray): (Res<Water>, Res<Spray>),
-    (mut materials, mut sprays): (
-        ResMut<Assets<WaterMaterial>>,
-        ResMut<Assets<SprayMaterial>>,
-    ),
+    (mut materials, mut sprays): (ResMut<Assets<WaterMaterial>>, ResMut<Assets<SprayMaterial>>),
     mut meshes: Query<(&SeenFrom, &mut Transform), With<WaterMesh>>,
 ) {
     let resolution = fluid.resolution();
@@ -396,12 +398,7 @@ fn tick(
             if vantage.enclosed { 1.0 } else { 0.0 },
             0.0,
         );
-        uniform.units = Vec4::new(
-            metres_per_unit as f32,
-            surface_cell(resolution).0,
-            0.0,
-            0.0,
-        );
+        uniform.units = Vec4::new(metres_per_unit as f32, surface_cell(resolution).0, 0.0, 0.0);
         uniform.clock = Vec4::new(
             sim.time.0,
             (metres_per_unit / resolution.time()) as f32,

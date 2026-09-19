@@ -36,8 +36,8 @@ pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
 pub use gpu::{FluidBuffers, FluidStep};
 pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_ORIGIN, STEP_RATE, canonical};
 pub use surface::{
-    MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, MAX_VERTICES, SurfaceBuffers, SurfaceParams,
-    GRID_REACH, grid_reach, surface_cell,
+    GRID_REACH, MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, MAX_VERTICES, SurfaceBuffers,
+    SurfaceParams, grid_reach, surface_cell,
 };
 
 /// Set by the render world once every kernel has compiled and the vessel is bound; until then
@@ -97,31 +97,41 @@ const JITTER: f64 = 0.01;
 /// water finds free room round it.
 const SITES_PER_PARTICLE: usize = 64;
 const LEAST_SITES: usize = 512;
+/// How many sites are looked through at first for each one sought: a placement by a wall finds
+/// half of them outside the vessel.
+const ROOM_SOUGHT: usize = 2;
 
-/// The offsets of the lattice sites in a ball about a site, nearest first: what every
-/// placement of water is offered, so that water placed onto water finds free room around it.
-fn lattice_ball() -> &'static [[i32; 3]] {
-    static BALL: std::sync::OnceLock<Vec<[i32; 3]>> = std::sync::OnceLock::new();
-    BALL.get_or_init(|| {
-        let reach = (3.0 * 2.0 * gpu::SITES as f64 / (4.0 * std::f64::consts::PI))
-            .cbrt()
-            .ceil() as i32
-            + 1;
-        let mut ball = Vec::new();
-        for i in -reach..=reach {
-            for j in -reach..=reach {
-                for k in -reach..=reach {
-                    ball.push([i, j, k]);
-                }
+/// The offsets of at least `holding` lattice sites in a ball about a site, nearest first: what
+/// a placement of water is offered, so that water placed onto water finds free room around it.
+/// The ball every ordinary placement asks for is made once.
+fn lattice_ball(holding: usize) -> std::borrow::Cow<'static, [[i32; 3]]> {
+    static USUAL: std::sync::OnceLock<Vec<[i32; 3]>> = std::sync::OnceLock::new();
+    const USUAL_HOLDS: usize = ROOM_SOUGHT * gpu::SITES;
+    if holding <= USUAL_HOLDS {
+        USUAL.get_or_init(|| ball_of(USUAL_HOLDS)).as_slice().into()
+    } else {
+        ball_of(holding).into()
+    }
+}
+
+fn ball_of(holding: usize) -> Vec<[i32; 3]> {
+    let reach = (3.0 * holding as f64 / (4.0 * std::f64::consts::PI))
+        .cbrt()
+        .ceil() as i32
+        + 1;
+    let mut ball = Vec::new();
+    for i in -reach..=reach {
+        for j in -reach..=reach {
+            for k in -reach..=reach {
+                ball.push([i, j, k]);
             }
         }
-        let d2 = |o: &[i32; 3]| o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
-        ball.sort_by_key(d2);
-        // a placement by a wall finds half its sites outside the vessel
-        ball.truncate(2 * gpu::SITES);
-        ball
-    })
+    }
+    ball.sort_by_key(|o| o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+    ball.truncate(holding);
+    ball
 }
+
 /// Resolutions remembered by the frame they took effect, for reading back what an older frame
 /// left on the GPU.
 const GENERATIONS_KEPT: usize = 64;
@@ -347,18 +357,31 @@ impl Fluid {
         let offered = (count as usize * SITES_PER_PARTICLE)
             .max(LEAST_SITES)
             .min(room);
+        let sought = offered.max(count as usize);
+        let mut holding = ROOM_SOUGHT * sought;
+        let mut sites: Vec<Vec3d> = Vec::new();
         let mut farthest = 0.0f64;
-        let mut sites = Vec::with_capacity(offered.max(count as usize));
-        for offset in lattice_ball() {
-            if sites.len() >= offered.max(count as usize) {
+        // a ball twice the size that holds no more room has come to the end of the vessel's
+        loop {
+            let found_before = sites.len();
+            sites.clear();
+            for offset in lattice_ball(holding).iter() {
+                if sites.len() >= sought {
+                    break;
+                }
+                let mut nudge = |x: f64| x + 0.5 + (self.rng.next_f32() as f64 - 0.5) * JITTER;
+                let site = [0, 1, 2].map(|c| nudge(base[c] + offset[c] as f64) * pitch);
+                if has_room(site) {
+                    farthest = farthest.max(norm(&offset.map(|x| x as f64)));
+                    sites.push(site);
+                }
+            }
+            if sites.len() >= sought
+                || (holding > ROOM_SOUGHT * sought && sites.len() == found_before)
+            {
                 break;
             }
-            let mut nudge = |x: f64| x + 0.5 + (self.rng.next_f32() as f64 - 0.5) * JITTER;
-            let site = [0, 1, 2].map(|c| nudge(base[c] + offset[c] as f64) * pitch);
-            if has_room(site) {
-                farthest = farthest.max(norm(&offset.map(|x| x as f64)));
-                sites.push(site);
-            }
+            holding *= 2;
         }
         self.reached(Metres((norm(&centre) + (farthest + 1.0) * pitch) as f32));
         let count = count.min(sites.len() as u32);

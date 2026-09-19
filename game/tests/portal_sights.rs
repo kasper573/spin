@@ -703,7 +703,7 @@ fn sunlight_goes_through_an_open_pair() {
     put(&mut sight.app, MouthColour::Orange, orange, [0.0, 1.0, 0.0]);
     let cap = DrumSurface::Cap(CapSide::Low);
     put_on(&mut sight.app, MouthColour::Blue, cap, in_the_sun, top);
-    testing::run(&mut sight.app, Seconds(OPENING.0 as f32 + 0.5));
+    testing::run(&mut sight.app, Seconds(OPENING.0 + 0.5));
     face_the_sun(&mut sight.app, 0.0, true);
     testing::frame(&mut sight.app, Seconds(0.0));
 
@@ -714,7 +714,7 @@ fn sunlight_goes_through_an_open_pair() {
         let to_sun = to_sun(&sight.app);
         let blue = in_the_sun.at(drum);
         let from = [0, 1, 2].map(|k| blue[k] + to_sun[k] * 2.0);
-        let met = aim::cast(from.into(), (-bevy::math::DVec3::from(to_sun)).into(), drum)
+        let met = aim::cast(from.into(), -bevy::math::DVec3::from(to_sun), drum)
             .expect("the light lands somewhere");
         assert_eq!(
             met.mouth,
@@ -873,7 +873,7 @@ fn a_mouths_fire_shines_out_of_the_other_mouth() {
     // nothing is drawn while the pair opens, so the eye stays as it had adapted, and the two
     // frames are exposed alike
     put(&mut sight.app, MouthColour::Blue, blue, [0.0, 1.0, 0.0]);
-    testing::run(&mut sight.app, Seconds(2.0 * OPENING.0 as f32));
+    testing::run(&mut sight.app, Seconds(2.0 * OPENING.0));
     assert_eq!(sight.drum().mouths.fill(), 0.0, "the pair has opened");
     look(&mut sight.app, eye, lit);
     face_the_sun(&mut sight.app, sight.lit, false);
@@ -930,7 +930,11 @@ fn water_falls_out_of_a_portal_as_a_smooth_stream() {
             .world_mut()
             .resource_scope(|world, mut fluid: Mut<Fluid>| {
                 let mut sim = world.resource_mut::<Simulation>();
-                let over = Spot { height: 1.5, ..blue }.at(&sim.drum);
+                let over = Spot {
+                    height: 1.5,
+                    ..blue
+                }
+                .at(&sim.drum);
                 sim.inject(&mut fluid, over, 150);
             });
         look(&mut sight.app, eye, at);
@@ -985,7 +989,12 @@ fn a_pool_is_seen_from_its_floor_through_a_portal() {
     }
     testing::run(&mut sight.app, Seconds(10.0));
     let orange = over(0.0, -half_width, 3.0);
-    put(&mut sight.app, MouthColour::Blue, over(0.0, 0.0, 0.0), [0.0, 1.0, 0.0]);
+    put(
+        &mut sight.app,
+        MouthColour::Blue,
+        over(0.0, 0.0, 0.0),
+        [0.0, 1.0, 0.0],
+    );
     put_on(
         &mut sight.app,
         MouthColour::Orange,

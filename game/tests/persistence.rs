@@ -100,7 +100,7 @@ fn portals_come_back_from_a_save_where_they_were() {
     let (sim, fluid) = (world.resource::<Simulation>(), world.resource::<Fluid>());
     assert_eq!(sim.drum.mouths.fill(), 0.0, "the pair has opened");
     let json = serde_json::to_string(&snapshot(&Settings::default(), sim, fluid)).unwrap();
-    let saved = sim.drum.mouths.clone();
+    let saved = sim.drum.mouths;
 
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
     let mut sim2 = Simulation::default();

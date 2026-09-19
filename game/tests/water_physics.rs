@@ -66,7 +66,9 @@ fn score(name: &str, measured: f64, expected: f64, scale: f64) -> f64 {
     let written = serde_json::to_string(&reading).expect("a reading is plain numbers");
     fs::write(readings().join(format!("{name}.json")), written).expect("write the reading");
     println!("{name}: {measured:.4}, in real water {expected:.4}, off by {error:.4}");
-    let best = baseline().get(name).map_or(f64::INFINITY, |kept| kept.error);
+    let best = baseline()
+        .get(name)
+        .map_or(f64::INFINITY, |kept| kept.error);
     assert!(
         error <= best * (1.0 + REPEATS_WITHIN.0) + REPEATS_WITHIN.1,
         "{name} is off by {error:.4}, and has been off by as little as {best:.4}"
@@ -84,12 +86,19 @@ fn the_scoreboard() {
     let mut board = BTreeMap::new();
     for entry in fs::read_dir(readings()).expect("the measurements have been run") {
         let path = entry.expect("a reading").path();
-        let name = path.file_stem().expect("a name").to_string_lossy().into_owned();
+        let name = path
+            .file_stem()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
         let written = fs::read_to_string(&path).expect("read the reading");
         let reading: Reading = serde_json::from_str(&written).expect("a reading");
         board.insert(name, reading);
     }
-    println!("{:<44}{:>12}{:>12}{:>10}{:>10}", "reading", "measured", "real", "off by", "best");
+    println!(
+        "{:<44}{:>12}{:>12}{:>10}{:>10}",
+        "reading", "measured", "real", "off by", "best"
+    );
     for (name, reading) in &board {
         let best = kept.get(name).map_or(f64::NAN, |kept| kept.error);
         println!(
@@ -164,10 +173,10 @@ fn stand_a_band_moving(
                         let glass = sim.drum.wall_point(turn, axial - sim.drum.site.y);
                         let (_, outward) = sim.drum.depth_and_outward(glass);
                         let at = [0, 1, 2].map(|c| glass[c] - outward[c] * height);
-                        let velocity = sim
-                            .drum
-                            .water_frame()
-                            .vector_to_water([0.0, moving(axial), 0.0]);
+                        let velocity =
+                            sim.drum
+                                .water_frame()
+                                .vector_to_water([0.0, moving(axial), 0.0]);
                         added += fluid.add(Particle {
                             position: sim.drum.to_water(at),
                             velocity,
@@ -181,13 +190,11 @@ fn stand_a_band_moving(
 }
 
 /// A particle about the ring's axis: how far from it, how far along it, and how fast it moves
-/// in the ring's frame.
+/// in the water's frame.
 struct Parcel {
     from_axis: f64,
     along: f64,
     speed: f64,
-    /// How fast it moves away from the axis, along it, and round it.
-    velocity: [f64; 3],
 }
 
 fn parcels(app: &mut App) -> Vec<Parcel> {
@@ -198,18 +205,10 @@ fn parcels(app: &mut App) -> Vec<Parcel> {
         .into_iter()
         .map(|p| {
             let [x, y, z] = sim.drum.from_water(p.position);
-            let v = sim.drum.water_frame().vector_from_water(p.velocity);
-            let from_axis = (x + radius).hypot(z);
-            let out = [(x + radius) / from_axis, z / from_axis];
             Parcel {
-                from_axis,
+                from_axis: (x + radius).hypot(z),
                 along: y + sim.drum.site.y,
                 speed: norm(&p.velocity),
-                velocity: [
-                    v[0] * out[0] + v[2] * out[1],
-                    v[1],
-                    v[2] * out[0] - v[0] * out[1],
-                ],
             }
         })
         .collect()
@@ -275,7 +274,12 @@ fn a_collapsing_column_runs_out_as_fast_as_water_does() {
     let measured = speed / (weight * thick).sqrt();
     score("dam break: tongue speed", measured, 1.9, 1.9);
     let fallen = weight * tall / 2.0;
-    score("dam break: energy gained", (most - began).max(0.0), 0.0, fallen);
+    score(
+        "dam break: energy gained",
+        (most - began).max(0.0),
+        0.0,
+        fallen,
+    );
 }
 
 /// Expected: water two metres deep standing still all round a narrow ring stays two metres
@@ -302,7 +306,12 @@ fn deep_water_stands_as_deep_as_it_fills() {
     let water = parcels(&mut app);
     // water is put in as closely packed as water at rest is, and no weight of water that a
     // ring holds presses it closer: what is put in stands as high on the whole as it was put
-    score("standing water: squashed by its own weight", stood - mean_height(&water), 0.0, depth / 2.0);
+    score(
+        "standing water: squashed by its own weight",
+        stood - mean_height(&water),
+        0.0,
+        depth / 2.0,
+    );
     let mut heights: Vec<f64> = water.iter().map(|p| radius - p.from_axis).collect();
     heights.sort_by(|a, b| a.partial_cmp(b).expect("a height"));
     // particles stand half a spacing inside the surface they make up
@@ -311,7 +320,12 @@ fn deep_water_stands_as_deep_as_it_fills() {
     let spin = standing_spin(ring).0 as f64;
     score("standing water: depth", top, depth, depth);
     // against how fast the same water would be moving had it fallen its own depth
-    score("standing water: speed at rest", speed, 0.0, (2.0 * spin * spin * radius * depth).sqrt());
+    score(
+        "standing water: speed at rest",
+        speed,
+        0.0,
+        (2.0 * spin * spin * radius * depth).sqrt(),
+    );
 }
 
 /// Expected: a bucketful of water let go in the air falls as anything does, exactly as far as
@@ -352,7 +366,12 @@ fn a_bucketful_of_water_falls_through_the_air_as_through_a_vacuum() {
     score("free fall: distance in a vacuum", in_vacuum, out, out);
     // a bucketful is far too heavy for the air to hold back over a second's fall: by less
     // than a hundredth of the way
-    score("free fall: what the air holds back", (in_vacuum - in_air) / in_vacuum, 0.0, 1.0);
+    score(
+        "free fall: what the air holds back",
+        (in_vacuum - in_air) / in_vacuum,
+        0.0,
+        1.0,
+    );
 }
 
 /// Expected: a body of water let go in the air falls exactly as a single bucketful beside it
@@ -397,7 +416,12 @@ fn a_body_of_water_falls_as_one_bucketful_does() {
     // what is let go at rest flies straight among the stars, and is further from the axis by a
     // share of how far from it it began
     let (one, many) = (ended.0 / began.0 - 1.0, ended.1 / began.1 - 1.0);
-    score("free fall: a body of water against one bucketful", many, one, one);
+    score(
+        "free fall: a body of water against one bucketful",
+        many,
+        one,
+        one,
+    );
 }
 
 /// Expected: a bucketful of water lying against the glass end of the ring, a third of the way
@@ -439,7 +463,10 @@ fn water_on_the_glass_end_runs_out_to_the_rim() {
             reach,
             reach,
         );
-        assert!(water[0].from_axis >= last, "the water came back toward the axis");
+        assert!(
+            water[0].from_axis >= last,
+            "the water came back toward the axis"
+        );
         last = water[0].from_axis;
     }
 }
@@ -474,12 +501,18 @@ fn spray_shed_falling(air: bool, seconds: f32) -> usize {
 #[test]
 #[ignore = "wants a GPU"]
 fn the_air_tears_spray_off_falling_water() {
-    let (in_air, in_vacuum) = (spray_shed_falling(true, 3.0), spray_shed_falling(false, 3.0));
+    let (in_air, in_vacuum) = (
+        spray_shed_falling(true, 3.0),
+        spray_shed_falling(false, 3.0),
+    );
     println!("{in_air} motes in flight in air, {in_vacuum} in a vacuum");
     assert!(in_air > 0, "water falling through the air shed no spray");
     assert_eq!(in_vacuum, 0, "water falling through no air shed spray");
     let landed = spray_shed_falling(true, 12.0);
-    assert_eq!(landed, 0, "{landed} motes of spray still fly after the water has landed");
+    assert_eq!(
+        landed, 0,
+        "{landed} motes of spray still fly after the water has landed"
+    );
 }
 
 /// Expected: water at rest throws up no spray.
@@ -510,7 +543,9 @@ fn water_sways_between_the_ends_as_a_standing_wave() {
     let half = ring.half_width.0 as f64;
     let (long, depth) = (2.0 * half, 1.28);
     let k = std::f64::consts::PI / long;
-    stand_a_band_moving(&mut app, (-half, half), depth, |along| 0.3 * (k * (along + half)).sin());
+    stand_a_band_moving(&mut app, (-half, half), depth, |along| {
+        0.3 * (k * (along + half)).sin()
+    });
     let spin = standing_spin(ring).0 as f64;
     let weight = spin * spin * (RING.radius.0 as f64 - depth / 2.0);
     let period = std::f64::consts::TAU / (weight * k * (k * depth).tanh()).sqrt();
@@ -520,7 +555,10 @@ fn water_sways_between_the_ends_as_a_standing_wave() {
         testing::run(&mut app, Seconds(0.05));
         let water = parcels(&mut app);
         let at = app.world().resource::<Simulation>().time.0 as f64 - began;
-        swayed.push((at, water.iter().map(|p| p.along).sum::<f64>() / water.len() as f64));
+        swayed.push((
+            at,
+            water.iter().map(|p| p.along).sum::<f64>() / water.len() as f64,
+        ));
     }
     // the water's middle is furthest one way, then the other, half a sway apart: the turns of
     // its path, each the furthest it gets before it comes back
@@ -529,8 +567,17 @@ fn water_sways_between_the_ends_as_a_standing_wave() {
         .filter(|w| (w[1].1 - w[0].1) * (w[2].1 - w[1].1) < 0.0)
         .map(|w| w[1])
         .collect();
-    assert!(turns.len() >= 3, "the water turned only {} times", turns.len());
-    score("swaying water: time of a sway", turns[2].0 - turns[0].0, period, period);
+    assert!(
+        turns.len() >= 3,
+        "the water turned only {} times",
+        turns.len()
+    );
+    score(
+        "swaying water: time of a sway",
+        turns[2].0 - turns[0].0,
+        period,
+        period,
+    );
     let kept = (turns[2].1 / turns[0].1).abs();
     score("swaying water: height kept over a sway", kept, 0.997, 1.0);
 }

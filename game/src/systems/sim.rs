@@ -20,7 +20,7 @@ use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
-use crate::core::math::{Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
+use crate::core::math::{Quatd, Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
@@ -30,7 +30,7 @@ use crate::core::vessel::Vessel;
 use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, Shift};
 
 /// The most the bodies are stepped by at once.
-pub const SUBSTEP_RATE: Hertz = Hertz(60.0);
+pub const SUBSTEP_RATE: Hertz = Hertz(120.0);
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
 /// The hull is this wet when the eye has gone under the water, and this dry again when the eye
@@ -254,6 +254,7 @@ impl Simulation {
             );
             self.drum.advance(dt as f64);
             let water = if k == 0 { coupling.as_deref() } else { None };
+            let before = self.bodies[0].p;
             rigid::step(
                 dt as f64,
                 &self.drum,
@@ -262,6 +263,11 @@ impl Simulation {
                 water,
                 &self.body_params,
             );
+            if let Some(passage) = self.drum.passage(before, self.bodies[0].p) {
+                self.bodies[0].carried_through(&passage);
+                self.gyros.held = quat_mul(&passage.turn, &self.gyros.held);
+                self.gyros.footing = self.gyros.footing.map(|n| passage.turned(n));
+            }
             self.time.0 += dt;
             self.water_due += dt as f64;
             if self.water_due >= water_step * (1.0 - 1e-6) {
@@ -344,6 +350,28 @@ impl Simulation {
         shift
     }
 
+    /// Where the avatar's eye is and how it is turned. The eye goes through a portal on its
+    /// own, ahead of the body it is set in or after it, so it is never anywhere but where it
+    /// looks from.
+    pub fn eye(&self) -> (Vec3d, Quatd) {
+        let hull = self.avatar();
+        let eye = avatar::eye(hull);
+        match self.drum.passage(hull.p, eye) {
+            Some(passage) => (passage.point, quat_mul(&passage.turn, &hull.q)),
+            None => (eye, hull.q),
+        }
+    }
+
+    /// Where the viewer is, which everything is drawn about: the avatar's centre, or its eye
+    /// once that has gone through a portal ahead of the rest of it.
+    pub fn viewer(&self) -> Vec3d {
+        let hull = self.avatar();
+        match self.drum.passage(hull.p, avatar::eye(hull)) {
+            Some(passage) => passage.point,
+            None => hull.p,
+        }
+    }
+
     pub fn shapes(&self) -> &[BodyShape] {
         &self.shapes
     }
@@ -389,9 +417,7 @@ impl Simulation {
         }
         let drum = &self.drum;
         let margin = fluid.resolution().margin().0 as f64;
-        fluid.inject(drum.to_water(centre), count, |p| {
-            drum.place_inside(p, margin)
-        })
+        fluid.inject(drum.to_water(centre), count, |p| drum.has_room(p, margin))
     }
 }
 

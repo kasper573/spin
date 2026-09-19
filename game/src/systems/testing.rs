@@ -696,12 +696,7 @@ pub struct Mote {
 
 /// The motes of spray in flight.
 pub fn spray(app: &mut App) -> Vec<Mote> {
-    let motes = app
-        .world()
-        .resource::<FluidBuffers>()
-        .surface
-        .motes
-        .clone();
+    let motes = app.world().resource::<FluidBuffers>().surface.motes.clone();
     let floats: Vec<f32> = read_back(app, Readback::buffer(motes))
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
