@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::avatar::Gyros;
 use crate::core::codec;
-use crate::core::fluid::{BED_FRICTION, Fluid, FluidBuffers, Particle, Resolution};
-use crate::core::shallows::{Shallows, ShallowsBuffers};
+use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::drum::{Grid, Ground, Landscape, Mouths, Patch, Ring, Round, Site};
@@ -18,8 +17,8 @@ use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
 /// The key the snapshot is kept under, and what the key of every patch starts with.
-const SNAPSHOT: &str = "v9";
-const PATCHES: &str = "v9/patch/";
+const SNAPSHOT: &str = "v8";
+const PATCHES: &str = "v8/patch/";
 const AUTOSAVE_INTERVAL: Seconds = Seconds(2.0);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -28,20 +27,15 @@ pub struct Snapshot {
     pub avatar: AvatarPose,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
-    /// The points of the wall the avatar and the water are measured from, and the one the
-    /// chart of the water lying on the ground is laid about.
+    /// The points of the wall the avatar and the water are measured from.
     pub site: Site,
     pub water_site: Site,
-    pub lying_site: Site,
     pub time: Seconds,
     /// How much water each particle stands for.
     pub water: Resolution,
     /// Seven floats per particle, in the water's frame: position, velocity, foam.
     #[serde(with = "codec::f32s")]
     pub fluid: Vec<f32>,
-    /// The water lying on the ground, four floats per cell of the chart the ring gives it.
-    #[serde(default, with = "codec::f32s")]
-    pub lying: Vec<f32>,
     /// The ground, whose patches storage keeps apart from the rest, each on its own.
     pub landscape: Ground,
     #[serde(default)]
@@ -61,7 +55,7 @@ pub struct AvatarPose {
 #[derive(Resource, Default)]
 pub struct Saves {
     pub completed: u32,
-    pending: Option<(u32, u32)>,
+    pending: Option<u32>,
     restored: bool,
 }
 
@@ -94,14 +88,10 @@ impl Plugin for PersistencePlugin {
     }
 }
 
-pub fn snapshot(
-    settings: &Settings,
-    sim: &Simulation,
-    (fluid, shallows): (&Fluid, &Shallows),
-) -> Snapshot {
+pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
     Snapshot {
         landscape: sim.drum.landscape.ground(),
-        ..kept(settings, sim, (fluid, shallows))
+        ..kept(settings, sim, fluid)
     }
 }
 
@@ -109,7 +99,7 @@ pub fn apply(
     snapshot: &Snapshot,
     settings: &mut Settings,
     sim: &mut Simulation,
-    (fluid, shallows): (&mut Fluid, &mut Shallows),
+    fluid: &mut Fluid,
 ) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
@@ -121,7 +111,6 @@ pub fn apply(
     let ring = sim.drum.ring;
     sim.drum.site = site_on(snapshot.site, ring);
     sim.drum.water = site_on(snapshot.water_site, ring);
-    sim.drum.lying = site_on(snapshot.lying_site, ring);
     sim.time = Seconds(finite(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
     sim.drum.load_mouths(&snapshot.portals);
@@ -136,9 +125,6 @@ pub fn apply(
             });
         }
     }
-    shallows.clear();
-    shallows.chart(sim.drum.ground_chart().0, BED_FRICTION);
-    shallows.restore(snapshot.lying.clone());
     pose_avatar(&snapshot.avatar, sim);
     sim.avatar_mut().solid = settings.collisions;
 }
@@ -165,13 +151,8 @@ pub fn save_soon(world: &mut World) {
         let mut commands = world.commands();
         fluid.request_snapshot(&mut commands, &buffers)
     });
-    let lying = world.resource::<ShallowsBuffers>().clone();
-    let copy = world.resource_scope(|world, mut shallows: Mut<Shallows>| {
-        let mut commands = world.commands();
-        shallows.request_copy(&mut commands, &lying)
-    });
     world.flush();
-    world.resource_mut::<Saves>().pending = Some((ticket, copy));
+    world.resource_mut::<Saves>().pending = Some(ticket);
 }
 
 #[derive(Resource)]
@@ -205,7 +186,7 @@ fn pose_avatar(pose: &AvatarPose, sim: &mut Simulation) {
 }
 
 /// Everything but the sculpted patches, which storage keeps one by one.
-fn kept(settings: &Settings, sim: &Simulation, (fluid, shallows): (&Fluid, &Shallows)) -> Snapshot {
+fn kept(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
     let avatar = sim.avatar();
     Snapshot {
         settings: settings.clone(),
@@ -219,7 +200,6 @@ fn kept(settings: &Settings, sim: &Simulation, (fluid, shallows): (&Fluid, &Shal
         angle: sim.drum.angle,
         site: sim.drum.site,
         water_site: sim.drum.water,
-        lying_site: sim.drum.lying,
         time: sim.time,
         water: fluid.resolution(),
         fluid: fluid
@@ -230,7 +210,6 @@ fn kept(settings: &Settings, sim: &Simulation, (fluid, shallows): (&Fluid, &Shal
                 [x, y, z, vx, vy, vz, p.foam]
             })
             .collect(),
-        lying: shallows.copy().to_vec(),
         landscape: Ground {
             base: sim.drum.landscape.base(),
             patches: Vec::new(),
@@ -320,15 +299,8 @@ fn restore(world: &mut World) {
     snapshot.landscape.patches = patches;
     world.resource_scope(|world, mut settings: Mut<Settings>| {
         world.resource_scope(|world, mut sim: Mut<Simulation>| {
-            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
-                world.resource_scope(|_, mut shallows: Mut<Shallows>| {
-                    apply(
-                        &snapshot,
-                        &mut settings,
-                        &mut sim,
-                        (&mut fluid, &mut shallows),
-                    )
-                })
+            world.resource_scope(|_, mut fluid: Mut<Fluid>| {
+                apply(&snapshot, &mut settings, &mut sim, &mut fluid)
             })
         })
     });
@@ -366,19 +338,17 @@ fn autosave(world: &mut World) {
 }
 
 fn flush(world: &mut World) {
-    let Some((ticket, copy)) = world.resource::<Saves>().pending else {
+    let Some(ticket) = world.resource::<Saves>().pending else {
         return;
     };
-    if !world.resource::<Fluid>().snapshot_ready(ticket)
-        || !world.resource::<Shallows>().copied(copy)
-    {
+    if !world.resource::<Fluid>().snapshot_ready(ticket) {
         return;
     }
     world.resource_mut::<Saves>().pending = None;
     let kept = kept(
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
-        (world.resource::<Fluid>(), world.resource::<Shallows>()),
+        world.resource::<Fluid>(),
     );
     let Ok(text) = serde_json::to_string(&kept) else {
         return;

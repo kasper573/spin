@@ -8,12 +8,11 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::core::fluid::Fluid;
-use crate::core::shallows::Shallows;
-use crate::core::units::{Litres, Seconds};
+use crate::core::units::Seconds;
 use crate::systems::aim::Aim;
 use crate::systems::controls::ClearAction;
 use crate::systems::settings::{Action, Dial, Settings, Toggle};
-use crate::systems::sim::{SimSet, Simulation, water_litres};
+use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::tools::Toolbelt;
 
 /// How far up the view the tools' squares reach from its bottom edge, as a share of its
@@ -200,7 +199,7 @@ fn highlight(belt: Res<Toolbelt>, mut squares: Query<(&ToolSquare, &mut BorderCo
 fn hud_text(
     settings: &Settings,
     sim: &Simulation,
-    water: Litres,
+    fluid: &Fluid,
     engaged: bool,
     held: Option<Dial>,
     rate: FrameRate,
@@ -258,7 +257,7 @@ fn hud_text(
     };
     out.push_str(&format!(
         "\n{footing}\nwater {:.1} m3 | spin {:.3} rad/s | {:.0} fps, worst {:.0} ms | sim {:.0}%",
-        water.0 / 1000.0,
+        fluid.litres().0 / 1000.0,
         sim.drum.spin.0,
         rate.fps,
         rate.worst.0 * 1000.0,
@@ -274,7 +273,7 @@ fn refresh(
     mut rate: ResMut<FrameRate>,
     settings: Res<Settings>,
     sim: Res<Simulation>,
-    (fluid, shallows): (Res<Fluid>, Res<Shallows>),
+    fluid: Res<Fluid>,
     aim: Res<Aim>,
     keys: Res<ButtonInput<KeyCode>>,
     mut texts: Query<&mut Text, With<HudText>>,
@@ -293,7 +292,7 @@ fn refresh(
     let text = hud_text(
         &settings,
         &sim,
-        water_litres(&fluid, &shallows),
+        &fluid,
         aim.engaged,
         Dial::held(&keys),
         *rate,

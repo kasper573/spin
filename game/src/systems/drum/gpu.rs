@@ -34,7 +34,6 @@ use crate::core::units::{Metres, RadiansPerSecond, RadiansPerSecondSquared};
 use crate::core::vessel::{Vessel, VesselBinding, VesselLayout};
 
 const SHADER: &str = "embedded://game/systems/drum/shaders/drum.wgsl";
-const GROUND: &str = "embedded://game/systems/drum/shaders/ground.wgsl";
 const SURVEY_SHADER: &str = "embedded://game/systems/drum/shaders/columns.wgsl";
 /// The survey's fixed point: units of the water's length and speed per whole number.
 pub const COLUMN_FIXED: f64 = 256.0;
@@ -65,7 +64,6 @@ pub struct DrumUniform {
     radius: f32,
     half_width: f32,
     per_metre: f32,
-    per_second: f32,
     along: f32,
     base: f32,
     cells_round: f32,
@@ -128,7 +126,6 @@ impl DrumUniform {
             radius: (drum.ring.radius.0 as f64 / length) as f32,
             half_width: (drum.ring.half_width.0 as f64 / length) as f32,
             per_metre: (1.0 / length) as f32,
-            per_second: (1.0 / time) as f32,
             along: (drum.water.y / length) as f32,
             base: (drum.landscape.base() as f64 / length) as f32,
             cells_round: (length / grid.arc) as f32,
@@ -218,7 +215,6 @@ pub fn install(app: &mut App) {
         buffers.add(buffer)
     };
     let shader = app.world().resource::<AssetServer>().load::<Shader>(SHADER);
-    let ground = app.world().resource::<AssetServer>().load::<Shader>(GROUND);
     app.insert_resource(DrumFrame {
         states: Vec::new(),
         ground: GroundWrites::default(),
@@ -226,7 +222,7 @@ pub fn install(app: &mut App) {
         columns,
         survey: Columns::default(),
     })
-    .insert_resource(VesselShader([shader, ground]))
+    .insert_resource(VesselShader(shader))
     .add_plugins(ExtractResourcePlugin::<DrumFrame>::default())
     .add_systems(Startup, spawn_reach_watcher)
     .add_systems(Update, watch_reach);
@@ -545,7 +541,7 @@ fn texture(
 }
 
 #[derive(Resource)]
-struct VesselShader(#[allow(dead_code)] [Handle<Shader>; 2]);
+struct VesselShader(#[allow(dead_code)] Handle<Shader>);
 
 #[derive(Resource, Default)]
 struct DrumUniforms(DynamicUniformBuffer<DrumUniform>);

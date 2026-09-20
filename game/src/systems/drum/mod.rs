@@ -25,7 +25,6 @@ pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 use serde::{Deserialize, Serialize};
 
 use crate::core::math::{Quatd, Vec3d, quat_about_y, quat_mul, rotate_y};
-use crate::core::shallows::{MAX_SHALLOWS_CELLS, ShallowsChart};
 use crate::core::units::{Metres, Radians, RadiansPerSecond, RadiansPerSecondSquared};
 use crate::core::vessel::{Passage, Penetration, Penetrations, Vessel, WaterFrame};
 
@@ -39,9 +38,6 @@ pub const GROUND_DEPTH: Metres = Metres(0.5);
 
 /// The glass shell's thickness, felt only from outside.
 pub const GLASS_THICKNESS: f64 = 0.1;
-/// The most rows along the axis the lying water's chart keeps, which leaves it the more cells
-/// round the ring the narrower the ring is.
-const MOST_CHART_ROWS: i64 = 256;
 /// Maximum spin-up acceleration of the drum (rad/s²).
 const SPIN_ACCEL: f64 = 0.6;
 
@@ -210,8 +206,6 @@ pub struct Drum {
     /// The point of the wall the bodies' frame sits at, and the one the water's frame sits at.
     pub site: Site,
     pub water: Site,
-    /// The point of the wall the chart of the water lying on the ground is laid about.
-    pub lying: Site,
     pub landscape: Landscape,
     pub mouths: Mouths,
 }
@@ -233,7 +227,6 @@ impl Drum {
             angle: Radians(0.0),
             site: Site::at(0.0, 0.0, ring),
             water: Site::at(0.0, 0.0, ring),
-            lying: Site::at(0.0, 0.0, ring),
             landscape: Landscape::flat(ring, GROUND_DEPTH),
             mouths: Mouths::default(),
         }
@@ -255,7 +248,6 @@ impl Drum {
             across: self.water.round.across,
         };
         self.water = Site::on(water, self.water.y.clamp(-half_width, half_width), ring);
-        self.lying = self.water;
         self.landscape.resize(ring, from.round, self.site.round);
         self.carry_mouths(from.round, old);
         [before - ring.radius.0 as f64, from.y - self.site.y, 0.0]
@@ -354,44 +346,6 @@ impl Drum {
         let at = self.place(p);
         self.landscape.sculpt(at, radius, amount);
         self.refit_mouths();
-    }
-
-    /// The chart the water lying on the ground is kept on, in cells as fine as the landscape's:
-    /// the whole of the glass where the water keeps that many, and otherwise as much of it as
-    /// the water keeps, about where the lying water's site is. And where the chart's low
-    /// corner is from the water's site, which the ground's shader module counts from.
-    pub fn ground_chart(&self) -> (ShallowsChart, [f64; 2]) {
-        let grid = self.landscape.grid();
-        let along = 2.0 * self.ring.half_width.0 as f64;
-        let rows = (along / landscape::CELL).ceil().max(1.0) as i64;
-        let row = along / rows as f64;
-        let kept_rows = rows.min(MOST_CHART_ROWS);
-        let kept_round = grid.round.min(MAX_SHALLOWS_CELLS as i64 / kept_rows);
-        let whole_round = kept_round == grid.round;
-        let first = if whole_round {
-            0
-        } else {
-            self.lying.round.cell as i128 - kept_round as i128 / 2
-        };
-        let first_row = (((self.lying.y + along / 2.0) / row).floor() as i64 - kept_rows / 2)
-            .clamp(0, rows - kept_rows);
-        let chart = ShallowsChart {
-            size: [kept_round as u32, kept_rows as u32],
-            wraps: [whole_round, false],
-            cell: [Metres(grid.arc as f32), Metres(row as f32)],
-        };
-        let apart = grid.short_way(first - self.water.round.cell as i128);
-        let low = [
-            (apart as f64 - self.water.round.across) * grid.arc,
-            first_row as f64 * row - along / 2.0 - self.water.y,
-        ];
-        (chart, low)
-    }
-
-    /// Lay the lying water's chart about the water's site, which is only done while no water
-    /// lies on the ground to be left behind by it.
-    pub fn settle_lying_water(&mut self) {
-        self.lying = self.water;
     }
 
     /// Put the water's site on the wall under a point of the frame, which is only done while

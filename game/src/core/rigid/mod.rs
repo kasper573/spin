@@ -65,10 +65,6 @@ pub fn step(
     add_scaled(&mut turn, &spin_up, -0.5 * dt * dt);
     let carried = quat_from_rotation_vector(&turn.map(|t| -t));
     for (i, b) in bodies.iter_mut().enumerate() {
-        if !b.solid {
-            // water does not touch what is not solid, which no report of it will say
-            b.wet = 0.0;
-        }
         if let Some(impulse) = water.and_then(|w| w.get(i)) {
             // water may push a body with a few times the vessel's artificial gravity, no more
             let shape = &shapes[b.shape];

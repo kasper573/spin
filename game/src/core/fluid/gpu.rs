@@ -59,7 +59,6 @@ pub struct FluidBuffers {
     /// in sorted order.
     pub affine: Handle<ShaderBuffer>,
     pub affine_sorted: Handle<ShaderBuffer>,
-    pub living: Handle<ShaderBuffer>,
     /// The grid: the keys of its cells, hashed; the slots in use; how many those are; the
     /// cells; what each has across its faces; and the workgroups that visit them.
     pub grid_keys: Handle<ShaderBuffer>,
@@ -100,7 +99,6 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
         sites: make(vec4s(SITES)),
         affine: make(vec4s(6 * MAX_PARTICLES)),
         affine_sorted: make(vec4s(6 * MAX_PARTICLES)),
-        living: make(4 * 4),
         grid_keys: make(GRID_SLOTS * 4),
         grid_list: make(2 * GRID_SLOTS * 4),
         grid_counters: make(4 * 4),
@@ -120,36 +118,11 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
 #[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct FluidStep;
 
-/// The frame's uniforms and bind groups made, which anything binding [`FluidHulls`] the same
-/// frame is prepared after.
-#[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct FluidPrepare;
-
-/// The bodies' hulls as the frame's steps have them, for water that is not this water to say
-/// what it does to them where this water says it: the uniform the bodies are in and where in it
-/// each step's are, how many samples the hulls have, the first of the frame's accumulators, and
-/// what the water's drag and density are in the units the accumulators are in. No samples when
-/// the frame reports no coupling.
-#[derive(Resource)]
-pub struct FluidHulls {
-    pub bodies: Buffer,
-    pub offsets: Vec<u32>,
-    pub samples: u32,
-    pub accumulators: u32,
-    pub body_drag: f32,
-    pub rest_density: f32,
-}
-
 pub fn install(render_app: &mut SubApp) {
     render_app
         .init_resource::<Uniforms>()
         .add_systems(RenderStartup, init_pipelines)
-        .add_systems(
-            Render,
-            prepare
-                .in_set(RenderSystems::PrepareBindGroups)
-                .in_set(FluidPrepare),
-        )
+        .add_systems(Render, prepare.in_set(RenderSystems::PrepareBindGroups))
         .add_systems(
             RenderGraph,
             dispatch.in_set(FluidStep).before(camera_driver),
@@ -164,8 +137,6 @@ enum Kernel {
     AddOffsets,
     Scatter,
     ScatterAffine,
-    Bury,
-    Tally,
     Thin,
     Predict,
     Inject,
@@ -242,7 +213,7 @@ const POLISH_PASSES: usize = 1;
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
 const SPRAY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 47] = [
+const SPECS: [Spec; 45] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -302,30 +273,6 @@ const SPECS: [Spec; 47] = [
         grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
-    },
-    Spec {
-        kernel: Kernel::Bury,
-        shader: PARTICLES,
-        entry: "bury",
-        particles: &[0, 3, 4, 9],
-        vessel: true,
-        bodies: &[],
-        surface: &[],
-        grid: &[],
-        read_only: PARTICLE_READS,
-        workgroup: WORKGROUP,
-    },
-    Spec {
-        kernel: Kernel::Tally,
-        shader: PARTICLES,
-        entry: "tally",
-        particles: &[0, 9, 17],
-        vessel: true,
-        bodies: &[],
-        surface: &[],
-        grid: &[],
-        read_only: PARTICLE_READS,
-        workgroup: 1,
     },
     Spec {
         kernel: Kernel::ScatterAffine,
@@ -993,7 +940,6 @@ fn prepare(
             &buffers.sites,
             &buffers.affine,
             &buffers.affine_sorted,
-            &buffers.living,
         ]),
         all(&[
             &buffers.samples,
@@ -1028,7 +974,6 @@ fn prepare(
         bytemuck::cast_slice(&[frame.ticket]),
     );
 
-    queue.write_buffer(&particles[16], 12, bytemuck::bytes_of(&frame.ticket));
     uniforms.params.clear();
     uniforms.bodies.clear();
     let thin_offset = frame.thin.as_ref().map(|thin| uniforms.params.push(thin));
@@ -1059,17 +1004,6 @@ fn prepare(
     ) else {
         return;
     };
-    if let Some(buffer) = uniforms.bodies.buffer() {
-        let coupled = frame.substeps.first().filter(|_| frame.coupling);
-        commands.insert_resource(FluidHulls {
-            bodies: buffer.clone(),
-            offsets: bodies_offsets.clone(),
-            samples: coupled.map_or(0, |s| s.params.sample_count),
-            accumulators: coupled.map_or(0, |s| s.params.accumulators),
-            body_drag: coupled.map_or(0.0, |s| s.params.body_drag),
-            rest_density: coupled.map_or(0.0, |s| s.params.rest_density),
-        });
-    }
     let made_of: Vec<BufferId> = [
         uniforms.params.buffer(),
         uniforms.bodies.buffer(),
@@ -1291,8 +1225,6 @@ fn dispatch(
                 (Kernel::AddOffsets, cells),
                 (Kernel::Scatter, threads),
                 (Kernel::ScatterAffine, threads),
-                (Kernel::Bury, threads),
-                (Kernel::Tally, Threads::Count(1)),
             ],
         );
     };
@@ -1339,12 +1271,6 @@ fn dispatch(
         let count = Threads::Count(substep.params.count);
         let samples = Threads::Count(substep.params.sample_count);
         let coupled = substep.params.sample_count > 0;
-        if substep.params.count == 0 {
-            if coupled {
-                d.run(encoder, "fluid place", at, &[(Kernel::Place, samples)]);
-            }
-            continue;
-        }
         let cells = Threads::Indirect(&raw.grid_dispatch, 0);
         let shores = Threads::Indirect(&raw.grid_dispatch, 16);
         sort(encoder, at, substep.params.count);

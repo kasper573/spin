@@ -9,7 +9,6 @@ use std::time::Instant;
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
-use game::core::shallows::Shallows;
 use game::core::units::Seconds;
 use game::systems::drum::DEFAULT_RING;
 use game::systems::player::{PilotInput, Player};
@@ -178,9 +177,7 @@ fn keep(
 }
 
 fn water_m3(app: &App) -> f64 {
-    let in_flight = app.world().resource::<Fluid>().litres().0 as f64;
-    let lying = app.world().resource::<Shallows>().litres().0 as f64;
-    (in_flight + lying) / 1000.0
+    app.world().resource::<Fluid>().litres().0 as f64 / 1000.0
 }
 
 impl Measured {

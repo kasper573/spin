@@ -100,13 +100,6 @@ struct SampleState {
 
 // Accumulators are fixed-point integers with this many units per unit.
 const FIXED: f32 = 65536.0;
-// A body's accumulators, of a frame's: where each sum starts, and how many a body has.
-const ACC_BUOYANCY: u32 = 0u;
-const ACC_BUOYANCY_TORQUE: u32 = 3u;
-const ACC_FLOW: u32 = 6u;
-const ACC_COUPLING: u32 = 9u;
-const ACC_WET: u32 = 10u;
-const ACC_STRIDE: u32 = 16u;
 
 @group(0) @binding(0) var<uniform> params: Params;
 

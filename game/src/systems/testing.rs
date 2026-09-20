@@ -22,7 +22,6 @@ use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
-use crate::core::shallows::Shallows;
 use crate::core::units::{Metres, Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::aim::Aim;
@@ -33,7 +32,7 @@ use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
 use crate::systems::settings::{Dial, Settings};
-use crate::systems::sim::{SUBSTEP_RATE, SimSet, Simulation, water_litres};
+use crate::systems::sim::{SUBSTEP_RATE, SimSet, Simulation};
 use crate::systems::tools::Toolbelt;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -296,7 +295,6 @@ fn execute(world: &mut World, command: ScriptCommand) {
         ScriptCommand::Reset => {
             world.resource_mut::<Simulation>().reset();
             world.resource_mut::<Fluid>().clear();
-            world.resource_mut::<Shallows>().clear();
         }
         ScriptCommand::Save => persistence::save_soon(world),
     }
@@ -312,7 +310,7 @@ fn steer(thrust: Res<ScriptedThrust>, player: Res<Player>, mut sim: ResMut<Simul
 #[allow(clippy::too_many_arguments)]
 fn publish(
     sim: Res<Simulation>,
-    (fluid, shallows): (Res<Fluid>, Res<Shallows>),
+    fluid: Res<Fluid>,
     belt: Res<Toolbelt>,
     saves: Res<Saves>,
     fps: Res<FrameRate>,
@@ -323,7 +321,7 @@ fn publish(
     let status = ScriptStatus {
         frame: frame.0,
         particles: fluid.len(),
-        litres: water_litres(&fluid, &shallows).0,
+        litres: fluid.litres().0,
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,

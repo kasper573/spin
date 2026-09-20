@@ -11,12 +11,11 @@ struct DrumUniform {
     // the drum's spin and its rate of change, per second of the water's clock
     spin: f32,
     spin_rate: f32,
-    // the drum's size in the water's units, how many of them a metre is and how many of the
-    // water's seconds a second, and where the water's site is along the axis from the middle
+    // the drum's size in the water's units, how many of them a metre is, and where the water's
+    // site is along the axis from the middle
     radius: f32,
     half_width: f32,
     per_metre: f32,
-    per_second: f32,
     along: f32,
     // the depth the ground was laid with, and how many of its cells a unit of the water spans
     // round the ring and along it
