@@ -112,8 +112,3 @@ fn sunlit_run(at: vec3<f32>, dir: vec3<f32>, distance: f32, to_sun: vec3<f32>, r
     let leaving = clamp((-b + root) / (2.0 * a), 0.0, distance);
     return Sunlit(entering, leaving);
 }
-
-/// How much of the stretch between two distances along a ray the sun reaches.
-fn sunlit_share(lit: Sunlit, begins: f32, ends: f32) -> f32 {
-    return max(min(ends, lit.leaving) - max(begins, lit.entering), 0.0) / max(ends - begins, 1e-12);
-}

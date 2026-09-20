@@ -3,16 +3,17 @@
 // together with how the air thins away from the rim: a ring holds its air by spinning, so the
 // air stands in the potential the spin makes and settles the way a planet's does with height.
 //
-// Nothing here is a fit to how the ring ought to look. A ray is walked across the air in steps,
-// and at every step the density where it stands says how much light that stretch takes out of
-// it, how much it turns into it, and how sharply it bends it. What follows from that at the
+// Nothing here is a fit to how the ring ought to look. The density along a ray says how much
+// light each stretch of it takes out of the ray, how much it turns into it, and how sharply it
+// bends it: what is taken and turned is integrated exactly along the ray, and the bending is
+// walked in steps. What follows from that at the
 // ring's own size is slight; what follows from it in air a hundred times thicker, or round a
 // ring spun a hundred times harder, is a blue sky, a white haze and a sun pulled out of shape
 // and fringed with colour, because those are what the same steps come to when the air is deep
 // enough for them to show.
 #define_import_path air
 
-#import ring::{sunlit_run, sunlit_share}
+#import ring::sunlit_run
 
 struct Air {
     // what a metre of the air at the rim scatters off its molecules, per channel
@@ -90,51 +91,107 @@ struct Crossing {
     turned: vec3<f32>,
 }
 
-/// Walk `distance` metres of air from `at` along `dir`, which runs from the eye toward what it
-/// is looking at. `sun` is a sun's light and `to_sun` the way to it; `ambient` is the light
-/// reaching the air from everywhere at once.
+/// Dawson's integral, `exp(-x^2)` times the integral of `exp(u^2)` from nothing to `x`, by
+/// Rybicki's sum of Gaussians, which is good to the last digit a float keeps.
+fn dawson(x: f32) -> f32 {
+    let size = abs(x);
+    if (size < 0.2) {
+        let xx = x * x;
+        return x * (1.0 - 2.0 / 3.0 * xx * (1.0 - 0.4 * xx * (1.0 - 2.0 / 7.0 * xx)));
+    }
+    let nearest = 2.0 * floor(0.5 * size / DAWSON_SPACING + 0.5);
+    let off = size - nearest * DAWSON_SPACING;
+    var grows = exp(2.0 * off * DAWSON_SPACING);
+    let twice = grows * grows;
+    var above = nearest + 1.0;
+    var below = above - 2.0;
+    var sum = 0.0;
+    for (var i = 0; i < 6; i++) {
+        let odd = f32(2 * i + 1) * DAWSON_SPACING;
+        sum += exp(-odd * odd) * (grows / above + 1.0 / (below * grows));
+        above += 2.0;
+        below -= 2.0;
+        grows *= twice;
+    }
+    return sign(x) * exp(-off * off) * sum / sqrt(PI);
+}
+
+const DAWSON_SPACING: f32 = 0.4;
+
+/// A straight ray through the ring's air: the square of how far it stands from the axis grows
+/// as `2 * climb * s + level * s^2` with the distance `s` run, so the density along it is the
+/// density where it starts times the exponential of `thinning` times that.
+struct AirRay {
+    density: f32,
+    thinning: f32,
+    climb: f32,
+    level: f32,
+}
+
+fn air_ray(air: Air, at: vec3<f32>, dir: vec3<f32>, radius: f32) -> AirRay {
+    let climb = (radius + at.x) * dir.x + at.z * dir.z;
+    return AirRay(air_density(air, at, radius), air.slowing.w, climb, dir.x * dir.x + dir.z * dir.z);
+}
+
+/// How much air the first `run` metres of a ray hold, in metres of the air at the rim: the
+/// integral of the density along it, which is Dawson's. Where the density hardly changes over
+/// the run that form is the small difference of two large terms, and the integral is summed
+/// at Gauss's four points instead, which is as exact there.
+fn air_held(ray: AirRay, run: f32) -> f32 {
+    let changes = ray.thinning * (2.0 * abs(ray.climb) * run + ray.level * run * run);
+    if (changes < 2.0) {
+        let nodes = vec4(-0.8611363116, -0.3399810436, 0.3399810436, 0.8611363116);
+        let weights = vec4(0.3478548451, 0.6521451549, 0.6521451549, 0.3478548451);
+        let s = 0.5 * run * (nodes + 1.0);
+        let dense = exp(ray.thinning * (2.0 * ray.climb * s + ray.level * s * s));
+        return ray.density * 0.5 * run * dot(weights, dense);
+    }
+    let scale = sqrt(ray.thinning * ray.level);
+    let start = scale * ray.climb / ray.level;
+    let there = ray.density * exp(ray.thinning * (2.0 * ray.climb * run + ray.level * run * run));
+    return (there * dawson(start + scale * run) - ray.density * dawson(start)) / scale;
+}
+
+/// `(1 - exp(-x)) / x`, which a float loses to rounding where `x` is small.
+fn share_taken(x: vec3<f32>) -> vec3<f32> {
+    let series = 1.0 - x * (0.5 - x * (1.0 / 6.0 - x / 24.0));
+    return select((1.0 - exp(-x)) / max(x, vec3(1e-30)), series, x < vec3(0.05));
+}
+
+/// What `distance` metres of air from `at` along `dir` do to the light crossing them, `dir`
+/// running from the eye toward what it is looking at. `sun` is a sun's light and `to_sun` the
+/// way to it; `ambient` is the light reaching the air from everywhere at once.
+///
+/// Nothing is walked: what a stretch of air takes out of a ray goes as the air it holds, and
+/// what it turns into the ray, from a source that is as strong all along it, is that source
+/// over what a metre takes times the share of the ray the stretch took. The sun is such a
+/// source over the one stretch of the ray it reaches, and the light from everywhere over all
+/// of it, so both are had from how much air lies before three points of the ray.
 fn air_crossed(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, ring: vec2<f32>, sun: vec3<f32>, to_sun: vec3<f32>, ambient: vec3<f32>) -> Crossing {
-    let radius = ring.x;
     var out: Crossing;
     out.left = vec3(1.0);
     out.turned = vec3(0.0);
     if (distance <= 0.0) {
         return out;
     }
-    // the light met at a step is on its way to the eye, so it is turned through the angle
+    // the light met on the way is on its way to the eye, so it is turned through the angle
     // between the way it was already going and the way the ray runs
     let cosine = dot(dir, to_sun);
     let molecules = air.rayleigh.rgb * rayleigh_phase(cosine);
     let grains = air.mie.rgb * mie_phase(air.mie.w, cosine);
-    // the ring shades its own air, so a ray crosses a stretch the sun reaches and stretches it
-    // does not; where that stretch begins and ends is worked out once for the whole ray
+    // the ring shades its own air, so the sun reaches one stretch of the ray
     let sunlit = sunlit_run(at, dir, distance, to_sun, ring);
-    let longest = distance / f32(FEWEST_STEPS);
-    var run = 0.0;
-    for (var k = 0; k < MOST_STEPS; k++) {
-        if (run >= distance) {
-            break;
-        }
-        var step = min(air_step(air, at + dir * run, dir, radius), longest);
-        if (k == MOST_STEPS - 1) {
-            step = distance - run;
-        }
-        step = min(step, distance - run);
-        let here = at + dir * (run + step * 0.5);
-        let density = air_density(air, here, radius);
-        let extinction = air.taken.rgb * density;
-        let scattering = (air.rayleigh.rgb + air.mie.rgb) * density;
-        // what this stretch turns into the ray, lit by the sun over as much of it as the sun
-        // reaches, and by the light that reaches it from everywhere at once, which it turns
-        // into the ray from every direction alike since a phase function gathers to one over
-        // the whole sphere
-        let lit = sun * sunlit_share(sunlit, run, run + step);
-        let turned = (molecules + grains) * density * lit + scattering * ambient;
-        let across = exp(-extinction * step);
-        out.turned += out.left * turned * (vec3(1.0) - across) / max(extinction, vec3(1e-30));
-        out.left *= across;
-        run += step;
-    }
+    let entering = clamp(sunlit.entering, 0.0, distance);
+    let leaving = clamp(sunlit.leaving, entering, distance);
+    let ray = air_ray(air, at, dir, ring.x);
+    let whole = air_held(ray, distance);
+    let before = air_held(ray, entering);
+    let within = air_held(ray, leaving) - before;
+    out.left = exp(-air.taken.rgb * whole);
+    // a phase function gathers to one over the whole sphere, so the light from everywhere is
+    // turned into the ray as readily as the air scatters at all
+    out.turned = (molecules + grains) * sun * exp(-air.taken.rgb * before) * within * share_taken(air.taken.rgb * within)
+        + (air.rayleigh.rgb + air.mie.rgb) * ambient * whole * share_taken(air.taken.rgb * whole);
     return out;
 }
 
