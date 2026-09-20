@@ -26,21 +26,14 @@ struct Params {
     h: f32,
     h_sq: f32,
     poly: f32,
-    spiky: f32,
     mass: f32,
     rest_density: f32,
-    // the scale of the kernel the density is held with, which `spiky` is the slope's scale of
-    crowding: f32,
-    // how far under its rest density the air's pressure can hold water together
+    // the pull water holds together under, which is the air's pressure on it
     hold: f32,
-    eps_lambda: f32,
-    max_delta: f32,
     max_speed: f32,
     margin: f32,
     // what a wall's drag takes of the speed along it, per unit of that speed
     wall_friction: f32,
-    // how much of a neighbour's velocity is taken on, per unit of how fast it goes by
-    eddy: f32,
     // the air's density against the water's, which is none in a vacuum; the width of the
     // drop the air leaves whole, times the square of its speed through it, and the narrowest
     // the air tears drops to; and what the air tears off a parcel in a step, per unit of speed
@@ -59,6 +52,8 @@ struct Params {
     inv_cell: f32,
     // slots in the cell table, a power of two
     cells: u32,
+    // one less than the slots of the grid's table of cells, a power of two
+    grid_mask: u32,
     // the first accumulator of this frame's slots
     accumulators: u32,
     // lattice sites on offer to the particles joining

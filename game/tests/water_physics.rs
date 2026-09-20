@@ -515,12 +515,18 @@ fn the_air_tears_spray_off_falling_water() {
     );
 }
 
-/// Expected: water at rest throws up no spray.
+/// Expected: water at rest throws up no spray. It stands from one glass end to the other, as
+/// water with room to run out over the floor is not at rest for a long while.
 #[test]
 #[ignore = "wants a GPU"]
 fn still_water_sheds_no_spray() {
-    let mut app = ring_of_water(RING);
-    stand_a_band(&mut app, (-2.0, 2.0), 1.0);
+    let ring = Ring {
+        half_width: Metres(1.6),
+        ..RING
+    };
+    let mut app = ring_of_water(ring);
+    let half = ring.half_width.0 as f64;
+    stand_a_band(&mut app, (-half, half), 1.0);
     testing::run(&mut app, Seconds(10.0));
     let flying = testing::spray(&mut app).len();
     assert_eq!(flying, 0, "{flying} motes of spray over water at rest");

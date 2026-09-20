@@ -1,7 +1,8 @@
 //! The render-world half of the fluid: its buffers, one compute pipeline per kernel with only the
-//! bindings that kernel touches (WebGPU allows eight storage buffers per stage), and the frame's
-//! dispatch order: thin if due, append, then per substep sort, predict, constrain, derive
-//! velocities and couple to the bodies, and finally re-sort and extract the surface.
+//! bindings that kernel touches (WebGPU allows few storage buffers per stage), and the frame's
+//! dispatch order: thin if due, append, then per substep sort, fly, hand the motion to the grid,
+//! let the pressure have its way with it, take it back and couple to the bodies, and finally
+//! re-sort and extract the surface.
 use bevy::core_pipeline::schedule::camera_driver;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
@@ -22,7 +23,9 @@ use super::frame::{
     ACCUMULATORS_PER_FRAME, FluidFrame, GpuBodies, Params, STAMP_SLOT, accumulators_of,
 };
 use super::surface::{self, MAX_MOTES, SurfaceBuffers, SurfaceParams, TABLE_SLOTS};
-use super::{FluidReady, ITERATIONS, MAX_PARTICLES, MAX_SAMPLES, TABLE_CELLS};
+use super::{
+    FluidReady, GRID_SLOTS, MAX_PARTICLES, MAX_SAMPLES, RELAXATIONS, SETTLINGS, TABLE_CELLS,
+};
 use crate::core::vessel::{VesselBinding, VesselLayout};
 
 /// Threads per workgroup of the particle kernels, and of the scan's.
@@ -52,6 +55,18 @@ pub struct FluidBuffers {
     pub run_total: Handle<ShaderBuffer>,
     /// Lattice sites on offer to water being placed.
     pub sites: Handle<ShaderBuffer>,
+    /// How each particle's velocity changes across it, three vec4 to a particle, and the same
+    /// in sorted order.
+    pub affine: Handle<ShaderBuffer>,
+    pub affine_sorted: Handle<ShaderBuffer>,
+    /// The grid: the keys of its cells, hashed; the slots in use; how many those are; the
+    /// cells; what each has across its faces; and the workgroups that visit them.
+    pub grid_keys: Handle<ShaderBuffer>,
+    pub grid_list: Handle<ShaderBuffer>,
+    pub grid_counters: Handle<ShaderBuffer>,
+    pub grid_cells: Handle<ShaderBuffer>,
+    pub grid_links: Handle<ShaderBuffer>,
+    pub grid_dispatch: Handle<ShaderBuffer>,
     pub samples: Handle<ShaderBuffer>,
     pub boundary: Handle<ShaderBuffer>,
     pub sample_state: Handle<ShaderBuffer>,
@@ -82,6 +97,14 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
         key: make(MAX_PARTICLES * 4),
         run_total: make(TABLE_CELLS.div_ceil(SCAN_THREADS) * 4),
         sites: make(vec4s(SITES)),
+        affine: make(vec4s(6 * MAX_PARTICLES)),
+        affine_sorted: make(vec4s(6 * MAX_PARTICLES)),
+        grid_keys: make(GRID_SLOTS * 4),
+        grid_list: make(GRID_SLOTS * 4),
+        grid_counters: make(4 * 4),
+        grid_cells: make(vec4s(10 * GRID_SLOTS)),
+        grid_links: make(GRID_SLOTS * 48),
+        grid_dispatch: make(4 * 4),
         samples: make(vec4s(MAX_SAMPLES)),
         boundary: make(vec4s(2 * MAX_SAMPLES)),
         sample_state: make(vec4s(2 * MAX_SAMPLES)),
@@ -113,15 +136,31 @@ enum Kernel {
     ScanTotals,
     AddOffsets,
     Scatter,
+    ScatterAffine,
     Thin,
     Predict,
     Inject,
     Join,
-    Lambda,
-    Delta,
-    UpdateVelocities,
-    Squeeze,
-    Viscosity,
+    Occupy,
+    Muster,
+    Gather,
+    Walls,
+    Level,
+    Wetted,
+    SmoothOnce,
+    SmoothTwice,
+    SmoothThrice,
+    TellOnOnce,
+    TellOnTwice,
+    Slip,
+    System,
+    SettleRed,
+    SettleBlack,
+    RelaxRed,
+    RelaxBlack,
+    Project,
+    Transfer,
+    Weather,
     Place,
     Buoyancy,
     Drag,
@@ -138,13 +177,15 @@ enum Kernel {
 }
 
 const PARTICLES: &str = "embedded://game/core/fluid/shaders/particles.wgsl";
+const GRID: &str = "embedded://game/core/fluid/shaders/grid.wgsl";
 const SORT: &str = "embedded://game/core/fluid/shaders/sort.wgsl";
 const BODIES: &str = "embedded://game/core/fluid/shaders/bodies.wgsl";
 const SURFACE: &str = "embedded://game/core/fluid/shaders/surface.wgsl";
 const SPRAY: &str = "embedded://game/core/fluid/shaders/spray.wgsl";
 
 /// Which bindings of each group a kernel uses. Binding 0 of groups 0, 2 and 3 is a uniform, the
-/// rest are storage buffers; group 1 is the vessel's.
+/// rest are storage buffers; group 1 is the vessel's. Group 3 is the surface's, or the grid's
+/// for the kernels that work the grid, which never touch the surface.
 struct Spec {
     kernel: Kernel,
     shader: &'static str,
@@ -153,6 +194,7 @@ struct Spec {
     vessel: bool,
     bodies: &'static [u32],
     surface: &'static [u32],
+    grid: &'static [u32],
     /// (group, binding) pairs the kernel only reads, which the layout must say too.
     read_only: &'static [(usize, u32)],
     /// Threads per workgroup, as the kernel declares.
@@ -161,6 +203,7 @@ struct Spec {
 
 const NONE: &[(usize, u32)] = &[];
 const PARTICLE_READS: &[(usize, u32)] = &[(0, 9), (0, 11), (0, 14), (2, 2), (2, 3)];
+const GRID_READS: &[(usize, u32)] = &[(0, 4), (0, 9), (0, 12)];
 const BODY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 6), (0, 9), (0, 12), (2, 1)];
 /// The surface is smoothed this many times back and forth, and once more into the buffer
 /// it is drawn from.
@@ -168,7 +211,7 @@ const POLISH_PASSES: usize = 1;
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
 const SPRAY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 27] = [
+const SPECS: [Spec; 43] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -177,6 +220,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -188,6 +232,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: NONE,
         workgroup: SCAN_THREADS as u32,
     },
@@ -199,6 +244,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: NONE,
         workgroup: SCAN_THREADS as u32,
     },
@@ -210,6 +256,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: NONE,
         workgroup: SCAN_THREADS as u32,
     },
@@ -221,6 +268,19 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
+        read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::ScatterAffine,
+        shader: PARTICLES,
+        entry: "scatter_affine",
+        particles: &[0, 9, 10, 15, 16],
+        vessel: true,
+        bodies: &[],
+        surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -228,10 +288,11 @@ const SPECS: [Spec; 27] = [
         kernel: Kernel::Thin,
         shader: PARTICLES,
         entry: "thin",
-        particles: &[0, 1, 2, 3, 4],
+        particles: &[0, 1, 2, 3, 4, 15, 16],
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -239,10 +300,11 @@ const SPECS: [Spec; 27] = [
         kernel: Kernel::Predict,
         shader: PARTICLES,
         entry: "predict",
-        particles: &[0, 1, 2, 4, 5, 7],
+        particles: &[0, 1, 2, 4, 5, 7, 15],
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -250,10 +312,11 @@ const SPECS: [Spec; 27] = [
         kernel: Kernel::Inject,
         shader: PARTICLES,
         entry: "inject",
-        particles: &[0, 1, 2, 11],
+        particles: &[0, 1, 2, 11, 15],
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -261,65 +324,251 @@ const SPECS: [Spec; 27] = [
         kernel: Kernel::Join,
         shader: PARTICLES,
         entry: "join",
-        particles: &[0, 1, 2, 3, 9, 12, 14],
+        particles: &[0, 1, 2, 3, 9, 12, 14, 15],
         vessel: true,
         bodies: &[],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: JOIN_THREADS,
     },
     Spec {
-        kernel: Kernel::Lambda,
-        shader: PARTICLES,
-        entry: "lambda",
-        particles: &[0, 5, 9, 12],
-        vessel: true,
-        bodies: &[0, 2],
-        surface: &[],
-        read_only: PARTICLE_READS,
-        workgroup: WORKGROUP,
-    },
-    Spec {
-        kernel: Kernel::Delta,
-        shader: PARTICLES,
-        entry: "delta",
-        particles: &[0, 5, 6, 7, 9, 12],
-        vessel: true,
-        bodies: &[0, 2],
-        surface: &[],
-        read_only: PARTICLE_READS,
-        workgroup: WORKGROUP,
-    },
-    Spec {
-        kernel: Kernel::UpdateVelocities,
-        shader: PARTICLES,
-        entry: "update_velocities",
-        particles: &[0, 1, 2, 4, 5, 7],
-        vessel: true,
+        kernel: Kernel::Occupy,
+        shader: GRID,
+        entry: "occupy",
+        particles: &[0, 5],
+        vessel: false,
         bodies: &[],
         surface: &[],
-        read_only: PARTICLE_READS,
+        grid: &[1, 2, 3],
+        read_only: GRID_READS,
         workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::Squeeze,
-        shader: PARTICLES,
-        entry: "squeeze",
-        particles: &[0, 1, 2, 5, 9, 12],
-        vessel: true,
-        bodies: &[0, 2],
+        kernel: Kernel::Muster,
+        shader: GRID,
+        entry: "muster",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
         surface: &[],
-        read_only: PARTICLE_READS,
+        grid: &[3, 6],
+        read_only: GRID_READS,
+        workgroup: 1,
+    },
+    Spec {
+        kernel: Kernel::Gather,
+        shader: GRID,
+        entry: "gather",
+        particles: &[0, 2, 5, 9, 12, 15],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4],
+        read_only: GRID_READS,
         workgroup: WORKGROUP,
     },
     Spec {
-        kernel: Kernel::Viscosity,
+        kernel: Kernel::Walls,
+        shader: GRID,
+        entry: "walls",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Level,
+        shader: GRID,
+        entry: "level",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::TellOnOnce,
+        shader: GRID,
+        entry: "tell_on_once",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::TellOnTwice,
+        shader: GRID,
+        entry: "tell_on_twice",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Slip,
+        shader: GRID,
+        entry: "slip",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::System,
+        shader: GRID,
+        entry: "system",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Wetted,
+        shader: GRID,
+        entry: "wetted",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::SmoothOnce,
+        shader: GRID,
+        entry: "smooth_once",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::SmoothTwice,
+        shader: GRID,
+        entry: "smooth_twice",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::SmoothThrice,
+        shader: GRID,
+        entry: "smooth_thrice",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::SettleRed,
+        shader: GRID,
+        entry: "settle_red",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::SettleBlack,
+        shader: GRID,
+        entry: "settle_black",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::RelaxRed,
+        shader: GRID,
+        entry: "relax_red",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::RelaxBlack,
+        shader: GRID,
+        entry: "relax_black",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Project,
+        shader: GRID,
+        entry: "project",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Transfer,
+        shader: GRID,
+        entry: "transfer",
+        particles: &[0, 1, 2, 4, 5, 6, 7, 15],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 4],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Weather,
         shader: PARTICLES,
-        entry: "viscosity",
-        particles: &[0, 1, 2, 4, 5, 6, 7, 9, 12],
+        entry: "weather",
+        particles: &[0, 1, 2, 4, 5, 6, 7],
         vessel: true,
         bodies: &[0, 2, 3],
         surface: &[],
+        grid: &[],
         read_only: PARTICLE_READS,
         workgroup: WORKGROUP,
     },
@@ -331,6 +580,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[0, 1, 2],
         surface: &[],
+        grid: &[],
         read_only: BODY_READS,
         workgroup: WORKGROUP,
     },
@@ -342,6 +592,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[0, 1, 2, 3, 4],
         surface: &[],
+        grid: &[],
         read_only: BODY_READS,
         workgroup: WORKGROUP,
     },
@@ -353,6 +604,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[0, 1, 2, 4],
         surface: &[],
+        grid: &[],
         read_only: BODY_READS,
         workgroup: WORKGROUP,
     },
@@ -364,6 +616,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[13],
+        grid: &[],
         read_only: SPRAY_READS,
         workgroup: WORKGROUP,
     },
@@ -375,6 +628,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[13],
+        grid: &[],
         read_only: SPRAY_READS,
         workgroup: WORKGROUP,
     },
@@ -386,6 +640,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[0, 3, 4, 11, 12],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -397,6 +652,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[0, 3, 4, 5, 6],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -408,6 +664,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[0, 3, 7],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -419,6 +676,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[0, 1, 3, 6, 8, 9, 11],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -430,6 +688,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[0, 3, 7],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -441,6 +700,7 @@ const SPECS: [Spec; 27] = [
         vessel: false,
         bodies: &[],
         surface: &[0, 1, 2, 3, 4, 5, 6, 8, 9],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -452,6 +712,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[0, 1, 3, 4, 5, 6, 8, 9, 10],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -463,6 +724,7 @@ const SPECS: [Spec; 27] = [
         vessel: true,
         bodies: &[],
         surface: &[0, 1, 3, 4, 5, 6, 8, 9, 10],
+        grid: &[],
         read_only: SURFACE_READS,
         workgroup: WORKGROUP,
     },
@@ -491,7 +753,8 @@ struct Uniforms {
 struct KernelGroups {
     particles: BindGroup,
     bodies: BindGroup,
-    surface: BindGroup,
+    /// The surface's buffers, or the grid's for a kernel that works the grid.
+    last: BindGroup,
 }
 
 /// Bind groups for one frame: per kernel, one with the predicted positions read from buffer A
@@ -521,6 +784,11 @@ struct RawBuffers {
     cell_table: Buffer,
     dispatch: Buffer,
     motes: Buffer,
+    affine: Buffer,
+    affine_sorted: Buffer,
+    grid_keys: Buffer,
+    grid_counters: Buffer,
+    grid_dispatch: Buffer,
 }
 
 fn init_pipelines(
@@ -548,9 +816,13 @@ fn init_pipelines(
                     empty.clone()
                 },
                 layout("fluid bodies", spec.bodies, &reads(2), true),
-                layout("fluid surface", spec.surface, &reads(3), false),
+                if spec.grid.is_empty() {
+                    layout("fluid surface", spec.surface, &reads(3), false)
+                } else {
+                    layout("fluid grid", spec.grid, &reads(3), false)
+                },
             ];
-            let groups = if !spec.surface.is_empty() {
+            let groups = if !spec.surface.is_empty() || !spec.grid.is_empty() {
                 4
             } else if !spec.bodies.is_empty() {
                 3
@@ -622,7 +894,7 @@ fn prepare(
             .map(|h| get(h))
             .collect::<Option<Vec<Buffer>>>()
     };
-    let (Some(particles), Some(bodies), Some(surface)) = (
+    let (Some(particles), Some(bodies), Some(surface), Some(grid)) = (
         all(&[
             &buffers.position,
             &buffers.velocity,
@@ -638,6 +910,8 @@ fn prepare(
             &buffers.key,
             &buffers.run_total,
             &buffers.sites,
+            &buffers.affine,
+            &buffers.affine_sorted,
         ]),
         all(&[
             &buffers.samples,
@@ -646,6 +920,14 @@ fn prepare(
             &buffers.accum,
         ]),
         all(&buffers.surface.handles()),
+        all(&[
+            &buffers.grid_keys,
+            &buffers.grid_list,
+            &buffers.grid_counters,
+            &buffers.grid_cells,
+            &buffers.grid_links,
+            &buffers.grid_dispatch,
+        ]),
     ) else {
         return;
     };
@@ -706,31 +988,38 @@ fn prepare(
             (2, 0) => bodies_binding.clone(),
             (2, b) => bodies[b as usize - 1].as_entire_binding(),
             (3, 0) => surface_binding.clone(),
-            (_, b) => surface[b as usize - 1].as_entire_binding(),
+            (3, b) => surface[b as usize - 1].as_entire_binding(),
+            (_, b) => grid[b as usize - 1].as_entire_binding(),
         }
     };
-    let build = |pipeline: &Pipeline, group: usize, bindings: &[u32], variant: usize| {
-        let entries: Vec<BindGroupEntry> = bindings
-            .iter()
-            .map(|&binding| BindGroupEntry {
-                binding,
-                resource: resource(group, binding, variant),
-            })
-            .collect();
-        device.create_bind_group(
-            None,
-            &pipeline_cache.get_bind_group_layout(&pipeline.layouts[group]),
-            &entries,
-        )
-    };
+    // `buffers` names whose buffers the bindings are: a group's own, or the grid's as 4
+    let build =
+        |pipeline: &Pipeline, group: usize, buffers: usize, bindings: &[u32], variant: usize| {
+            let entries: Vec<BindGroupEntry> = bindings
+                .iter()
+                .map(|&binding| BindGroupEntry {
+                    binding,
+                    resource: resource(buffers, binding, variant),
+                })
+                .collect();
+            device.create_bind_group(
+                None,
+                &pipeline_cache.get_bind_group_layout(&pipeline.layouts[group]),
+                &entries,
+            )
+        };
     let kernels = SPECS
         .iter()
         .zip(&pipelines.items)
         .map(|(spec, pipeline)| {
             [0, 1].map(|variant| KernelGroups {
-                particles: build(pipeline, 0, spec.particles, variant),
-                bodies: build(pipeline, 2, spec.bodies, variant),
-                surface: build(pipeline, 3, spec.surface, variant),
+                particles: build(pipeline, 0, 0, spec.particles, variant),
+                bodies: build(pipeline, 2, 2, spec.bodies, variant),
+                last: if spec.grid.is_empty() {
+                    build(pipeline, 3, 3, spec.surface, variant)
+                } else {
+                    build(pipeline, 3, 4, spec.grid, variant)
+                },
             })
         })
         .collect();
@@ -761,6 +1050,11 @@ fn prepare(
         cell_table: surface[7].clone(),
         dispatch: surface[6].clone(),
         motes: surface[12].clone(),
+        affine: particles[14].clone(),
+        affine_sorted: particles[15].clone(),
+        grid_keys: grid[0].clone(),
+        grid_counters: grid[2].clone(),
+        grid_dispatch: grid[5].clone(),
     });
 }
 
@@ -825,7 +1119,7 @@ impl Dispatch<'_> {
             }
         }
         if pipeline.groups > 3 {
-            pass.set_bind_group(3, &groups.surface, &[]);
+            pass.set_bind_group(3, &groups.last, &[]);
         }
         match threads {
             Threads::Count(n) => pass.dispatch_workgroups(n.div_ceil(spec.workgroup).max(1), 1, 1),
@@ -870,11 +1164,13 @@ fn dispatch(
         d.run(encoder, Kernel::ScanTotals, 0, po, 0, vo, Threads::Count(1));
         d.run(encoder, Kernel::AddOffsets, 0, po, 0, vo, cells);
         d.run(encoder, Kernel::Scatter, 0, po, 0, vo, threads);
+        d.run(encoder, Kernel::ScatterAffine, 0, po, 0, vo, threads);
     };
     let sort = |encoder: &mut CommandEncoder, po: u32, vo: u32, count: u32| {
         bin(encoder, po, vo, count);
         encoder.copy_buffer_to_buffer(&raw.position_sorted, 0, &raw.position, 0, bytes(count));
         encoder.copy_buffer_to_buffer(&raw.velocity_next, 0, &raw.velocity, 0, bytes(count));
+        encoder.copy_buffer_to_buffer(&raw.affine_sorted, 0, &raw.affine, 0, 6 * bytes(count));
     };
     if let (Some(thin), Some(to)) = (&frame.thin, groups.thin_offset) {
         bin(encoder, to, vessel_now, thin.count);
@@ -917,28 +1213,38 @@ fn dispatch(
         if coupled {
             d.run(encoder, Kernel::Place, 0, po, bo, vo, samples);
         }
-        let mut variant = 0;
-        for _ in 0..ITERATIONS {
-            d.run(encoder, Kernel::Lambda, variant, po, bo, vo, count);
-            d.run(encoder, Kernel::Delta, variant, po, bo, vo, count);
-            variant ^= 1;
+        encoder.clear_buffer(&raw.grid_keys, 0, None);
+        encoder.clear_buffer(&raw.grid_counters, 0, None);
+        d.run(encoder, Kernel::Occupy, 0, po, bo, vo, count);
+        d.run(encoder, Kernel::Muster, 0, po, bo, vo, Threads::Count(1));
+        let cells = Threads::Indirect(&raw.grid_dispatch, 0);
+        d.run(encoder, Kernel::Gather, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::Walls, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::Level, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::Wetted, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::SmoothOnce, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::SmoothTwice, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::SmoothThrice, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::System, 0, po, bo, vo, cells);
+        for _ in 0..SETTLINGS {
+            d.run(encoder, Kernel::SettleRed, 0, po, bo, vo, cells);
+            d.run(encoder, Kernel::SettleBlack, 0, po, bo, vo, cells);
         }
-        d.run(
-            encoder,
-            Kernel::UpdateVelocities,
-            variant,
-            po,
-            bo,
-            vo,
-            count,
-        );
+        for _ in 0..RELAXATIONS {
+            d.run(encoder, Kernel::RelaxRed, 0, po, bo, vo, cells);
+            d.run(encoder, Kernel::RelaxBlack, 0, po, bo, vo, cells);
+        }
+        d.run(encoder, Kernel::Project, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::TellOnOnce, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::TellOnTwice, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::Slip, 0, po, bo, vo, cells);
+        d.run(encoder, Kernel::Transfer, 0, po, bo, vo, count);
         if coupled {
             d.run(encoder, Kernel::Buoyancy, 0, po, bo, vo, samples);
         }
-        d.run(encoder, Kernel::Squeeze, variant, po, bo, vo, count);
-        d.run(encoder, Kernel::Viscosity, variant, po, bo, vo, count);
+        d.run(encoder, Kernel::Weather, 0, po, bo, vo, count);
         if coupled {
-            d.run(encoder, Kernel::Drag, variant, po, bo, vo, samples);
+            d.run(encoder, Kernel::Drag, 0, po, bo, vo, samples);
         }
         d.run(encoder, Kernel::Shed, 0, po, bo, vo, count);
         let motes = Threads::Count(MAX_MOTES as u32);

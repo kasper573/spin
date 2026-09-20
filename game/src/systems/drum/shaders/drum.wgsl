@@ -178,7 +178,9 @@ fn ground_under(p: vec3<f32>) -> vec3<f32> {
     return vec3(height, round, along);
 }
 
-/// Signed penetration of a point into the terrain (positive = inside) and the inward normal.
+/// Signed penetration of a point into the terrain (positive = inside) and the inward normal,
+/// with the terrain's surface brought inward by `margin` square to itself: how far the ground
+/// stands over the point says how far into it the point is only by how steep the ground is.
 fn landscape_penetration(p: vec3<f32>, margin: f32) -> Penetration {
     let a = drum.radius + p.x;
     let r2 = a * a + p.z * p.z;
@@ -187,13 +189,13 @@ fn landscape_penetration(p: vec3<f32>, margin: f32) -> Penetration {
     }
     let w = wall(p);
     let g = ground_under(p);
-    let f = g.x + margin - w.height;
+    let f = g.x - w.height;
     // the ground's rise round the ring is per unit of arc at the glass, and the point's angle
     // round the axis changes by its move across the radial line over its distance from the axis
     let k = g.y * drum.radius / r2;
     let grad = vec3(w.outward.x - k * p.z, g.z, w.outward.z + k * a);
     let len = max(length(grad), 1e-12);
-    return Penetration(f / len, -grad / len);
+    return Penetration(f / len + margin, -grad / len);
 }
 
 const VESSEL_OPENINGS: u32 = 2u;

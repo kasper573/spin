@@ -436,7 +436,9 @@ impl Drum {
     }
 
     /// Signed penetration of a point of the frame into the terrain (positive = inside) and the
-    /// inward normal, with the terrain's surface shifted inward by `margin`.
+    /// inward normal, with the terrain's surface brought inward by `margin` square to itself:
+    /// how far the ground stands over the point says how far into it the point is only by how
+    /// steep the ground is.
     fn terrain_penetration(&self, p: Vec3d, margin: f64) -> (f64, Vec3d) {
         let radius = self.ring.radius.0 as f64;
         let (height, outward) = self.depth_and_outward(p);
@@ -447,14 +449,14 @@ impl Drum {
         }
         let (h, round, dy) = self.landscape.sample(self.place(p));
         let dphi = round * radius;
-        let f = -height + h + margin;
+        let f = -height + h;
         let g = [
             outward[0] - dphi * p[2] / r2,
             dy,
             outward[2] + dphi * a / r2,
         ];
         let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt().max(1e-12);
-        (f / len, [-g[0] / len, -g[1] / len, -g[2] / len])
+        (f / len + margin, [-g[0] / len, -g[1] / len, -g[2] / len])
     }
 
     /// Whether a sphere belongs to the inside of the drum rather than the outside of it. A

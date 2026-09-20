@@ -1,16 +1,17 @@
-//! Position-based fluid (Macklin & Müller 2013) solved on the GPU with Akinci-style coupling to
-//! rigid bodies, confined by a vessel the shaders describe. The CPU only keeps the particle count,
-//! feeds in new particles and body poses each frame, and reads back what the water did to the
-//! bodies.
+//! Water as particles that a grid keeps from being squeezed (an affine particle-in-cell
+//! solver: see `grid.wgsl`), solved on the GPU with Akinci-style coupling to rigid bodies,
+//! confined by a vessel the shaders describe. The CPU only keeps the particle count, feeds in
+//! new particles and body poses each frame, and reads back what the water did to the bodies.
 //!
 //! The water lives in its vessel's own frame, where water at rest stays put however fast the
 //! vessel turns, and the GPU only ever simulates the canonical water of [`Resolution`]: the
 //! CPU scales metres and seconds to its units on the way in and back on the way out. The
-//! particles are binned by a hash of their grid cell and the surface is meshed only where the
-//! water is, so neither the vessel's size nor the water's extent costs anything: the work is
-//! the number of particles, which is capped. Water past the cap is made coarser instead, every
-//! particle standing for twice as much of it, so any amount of water fits the same budget, and
-//! a vessel of any size sets a floor on how fine its water is, so any size runs the same.
+//! particles are binned by a hash of their grid cell, the grid exists only where the water is
+//! and the surface is meshed only there, so neither the vessel's size nor the water's extent
+//! costs anything: the work is the number of particles, which is capped. Water past the cap is
+//! made coarser instead, every particle standing for twice as much of it, so any amount of
+//! water fits the same budget, and a vessel of any size sets a floor on how fine its water is,
+//! so any size runs the same.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -62,23 +63,20 @@ pub const TABLE_CELLS: usize = 64 * 32 * 64;
 pub const MAX_BODIES: usize = 16;
 /// Boundary samples over all solid bodies.
 pub const MAX_SAMPLES: usize = 2048;
+/// Slots of the table the grid's cells are kept in: every cell round every particle, which
+/// for water that lies together is a few to a particle.
+pub const GRID_SLOTS: usize = 4 * MAX_PARTICLES;
 /// Substeps a single frame may run; beyond that the simulation falls behind real time.
 pub const MAX_SUBSTEPS_PER_FRAME: usize = 4;
 /// What a rough bed takes of the dynamic pressure of the water running over it: Manning's
 /// roughness of earth and short grass, under a particle's depth of water.
 const BED_FRICTION: f32 = 0.008;
-/// Smagorinsky's constant: the share of a particle's width that the eddies too small for the
-/// particles to show mix momentum across.
-const SMAGORINSKY: f32 = 0.17;
 /// Water's surface tension, in newtons a metre, and the Weber number past which the air tears
 /// a drop apart: what it leaves whole is as wide as has that number at the speed it meets.
 const SURFACE_TENSION: f64 = 0.072;
 /// The air's pressure over its density, at the temperature of a room, in metres squared per
 /// second squared: what tells how hard air of a given density presses.
 const AIR_STIFFNESS: f64 = 84_400.0;
-/// How fast a squeeze runs through the solver's water, in spacings a step: what tells how far
-/// the water gives under a pressure.
-const SOUND: f64 = 1.3;
 const SHATTERING_WEBER: f64 = 12.0;
 /// How long the air takes to tear a drop apart, counted in the time the drop takes to cross
 /// its own width through the air, scaled by the root of how much denser than the air it is.
@@ -86,8 +84,13 @@ const BREAKUP_TIME: f32 = 5.0;
 /// The narrowest drops the air tears water to.
 const FINEST_DROP: Metres = Metres(0.001);
 
-const EPS_LAMBDA: f32 = 0.1;
-const ITERATIONS: usize = 2;
+/// Sweeps of the pressure over each colour of its checkerboard in a step. The pressure starts
+/// from what the water carried out of the last step, so the sweeps only have to follow what
+/// changed since, which reaches a cell further with each.
+const RELAXATIONS: usize = 24;
+/// Sweeps of the push that shifts water back to its own density. What they leave undone in a
+/// step is still there to be done in the next, so they need not reach far in any one.
+const SETTLINGS: usize = 8;
 const WET_REF: f32 = 300.0;
 /// The random nudge new water gets, in the canonical water's units.
 /// How far off its lattice site, in spacings, water is put down, so that no two rows of it are
@@ -135,10 +138,11 @@ fn ball_of(holding: usize) -> Vec<[i32; 3]> {
 /// Resolutions remembered by the frame they took effect, for reading back what an older frame
 /// left on the GPU.
 const GENERATIONS_KEPT: usize = 64;
-const SHADERS: [&str; 7] = [
+const SHADERS: [&str; 8] = [
     "embedded://game/core/fluid/shaders/common.wgsl",
     "embedded://game/core/fluid/shaders/views.wgsl",
     "embedded://game/core/fluid/shaders/particles.wgsl",
+    "embedded://game/core/fluid/shaders/grid.wgsl",
     "embedded://game/core/fluid/shaders/sort.wgsl",
     "embedded://game/core/fluid/shaders/bodies.wgsl",
     "embedded://game/core/fluid/shaders/surface.wgsl",
@@ -744,6 +748,7 @@ impl Plugin for FluidPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/common.wgsl");
         embedded_asset!(app, "shaders/particles.wgsl");
+        embedded_asset!(app, "shaders/grid.wgsl");
         embedded_asset!(app, "shaders/sort.wgsl");
         embedded_asset!(app, "shaders/bodies.wgsl");
         embedded_asset!(app, "shaders/surface.wgsl");
@@ -776,7 +781,7 @@ impl Plugin for FluidPlugin {
 }
 
 #[derive(Resource)]
-struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 7]);
+struct FluidShaders(#[allow(dead_code)] [Handle<Shader>; 8]);
 
 /// Hand the render world the surface parameters once they change.
 fn sync_surface(fluid: Res<Fluid>, mut surface: ResMut<SurfaceParams>) {

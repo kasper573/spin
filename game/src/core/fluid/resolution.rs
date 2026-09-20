@@ -16,14 +16,10 @@ pub const SPACINGS_FROM_ORIGIN: f32 = 1500.0;
 /// How often the canonical water steps, in its own seconds.
 pub const STEP_RATE: Hertz = Hertz(120.0);
 
-/// The canonical water's constants, in its own units: particles a unit apart, a kernel two
-/// units wide, and the rest density's worth of mass each.
+/// The canonical water's constants, in its own units: particles a unit apart, a grid cell and
+/// a kernel two units wide, and the rest density's worth of mass each.
 pub mod canonical {
-    use std::f32::consts::SQRT_2;
-
     use super::REST_DENSITY;
-
-    const SQRT_3: f32 = 1.732_050_8;
 
     pub const SPACING: f32 = 1.0;
     pub const H: f32 = 2.0;
@@ -38,30 +34,9 @@ pub mod canonical {
             + 6.0 * (H_SQ - 1.0) * (H_SQ - 1.0) * (H_SQ - 1.0)
             + 12.0 * (H_SQ - 2.0) * (H_SQ - 2.0) * (H_SQ - 2.0)
             + 8.0 * (H_SQ - 3.0) * (H_SQ - 3.0) * (H_SQ - 3.0));
-    /// How much of the room it took on its lattice water takes once it has settled: particles
-    /// left to themselves pack a little closer than a lattice stands them, and it is the
-    /// settled water that is as dense as water is.
-    pub const PACKED: f32 = 0.972;
-    /// How far apart water is put down on its lattice, so that it stands there exactly as
-    /// dense as settled water is, and settles from it without a push.
-    pub const LATTICE: f32 = 1.012 * SPACING;
-    /// The scale of the kernel the solver holds the water's density with, the cube of how far
-    /// within reach a neighbour is, whose slope is what the solver pushes along: a push along
-    /// any other kernel's slope would not be down the slope of the density it is there to put
-    /// right, and would work the water up where it should leave it be. Scaled as the poly6
-    /// kernel is, on water standing on its lattice.
-    pub const CROWDING: f32 = 1.0
-        / PACKED
-        / (H * H * H
-            + 6.0 * (H - 1.0) * (H - 1.0) * (H - 1.0)
-            + 12.0 * (H - SQRT_2) * (H - SQRT_2) * (H - SQRT_2)
-            + 8.0 * (H - SQRT_3) * (H - SQRT_3) * (H - SQRT_3));
-    pub const SPIKY: f32 = -3.0 * CROWDING;
-    /// The hardest the water is ever knocked, in its own units: about fifty times what it
-    /// weighs on the ground. The solver's pushes over a step move a particle no further than
-    /// that would, so that water put where water already is, which no motion brought there,
-    /// is eased apart rather than thrown apart faster the shorter the step.
-    pub const HARDEST_KNOCK: f32 = 1500.0;
+    /// How far apart water is put down on its lattice: at its rest spacing, a particle to
+    /// each spacing cubed of water, which fills the grid's cells exactly.
+    pub const LATTICE: f32 = SPACING;
     /// How far particles keep from the walls.
     pub const MARGIN: f32 = 0.5 * SPACING;
     /// How wide a particle's water is as a drop on its own: a ball of a particle's volume.
