@@ -246,6 +246,9 @@ fn occupy(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.count) {
         return;
     }
+    if (pred_in[i].w < 0.0) {
+        return;
+    }
     let first = vec3<i32>(floor(pred_in[i].xyz * params.inv_cell - vec3(0.5)));
     for (var n = 0u; n < 8u; n++) {
         claim(first + vec3<i32>(vec3(n & 1u, (n >> 1u) & 1u, n >> 2u)));
@@ -1737,6 +1740,9 @@ fn stopped(v_in: vec3<f32>, first: vec4<f32>, second: vec4<f32>, share: f32) -> 
 fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.count) {
+        return;
+    }
+    if (pred_in[i].w < 0.0) {
         return;
     }
     let q = pred_in[i].xyz;

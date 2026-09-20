@@ -55,7 +55,7 @@ fn survey_columns(
     if (local == 0u) {
         atomicMax(&columns[0], atomicLoad(&farthest));
     }
-    if (i >= survey.count) {
+    if (i >= survey.count || position[i].w < 0.0) {
         return;
     }
     let p = position[i].xyz;

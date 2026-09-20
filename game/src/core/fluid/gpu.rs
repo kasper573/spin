@@ -137,6 +137,7 @@ enum Kernel {
     AddOffsets,
     Scatter,
     ScatterAffine,
+    Bury,
     Thin,
     Predict,
     Inject,
@@ -213,7 +214,7 @@ const POLISH_PASSES: usize = 1;
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
 const SPRAY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 45] = [
+const SPECS: [Spec; 46] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -267,6 +268,18 @@ const SPECS: [Spec; 45] = [
         shader: PARTICLES,
         entry: "scatter",
         particles: &[0, 1, 2, 3, 4, 9, 10, 12],
+        vessel: true,
+        bodies: &[],
+        surface: &[],
+        grid: &[],
+        read_only: PARTICLE_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::Bury,
+        shader: PARTICLES,
+        entry: "bury",
+        particles: &[0, 3, 4, 9],
         vessel: true,
         bodies: &[],
         surface: &[],
@@ -1225,6 +1238,7 @@ fn dispatch(
                 (Kernel::AddOffsets, cells),
                 (Kernel::Scatter, threads),
                 (Kernel::ScatterAffine, threads),
+                (Kernel::Bury, threads),
             ],
         );
     };

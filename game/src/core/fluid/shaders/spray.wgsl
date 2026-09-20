@@ -56,6 +56,9 @@ fn shed(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.count) {
         return;
     }
+    if (position[i].w < 0.0) {
+        return;
+    }
     let v = velocity_next[i].xyz;
     let speed = length(v);
     let torn = max(spray_of(velocity_next[i].w) - spray_of(velocity[i].w), 0.0);

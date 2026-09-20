@@ -104,10 +104,23 @@ fn predict_particle(i: u32) -> Predicted {
     return out;
 }
 
+/// A particle taken out of the water has a foam no water has, and the slot of one is this: the
+/// sort leaves it out, so the water that is left lies first and what was taken out lies last,
+/// until the count is brought down to the water there is.
+const TAKEN_OUT: u32 = 0xffffffffu;
+
+fn is_taken_out(particle: vec4<f32>) -> bool {
+    return particle.w < 0.0;
+}
+
 @compute @workgroup_size(64)
 fn count(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.count) {
+        return;
+    }
+    if (is_taken_out(position[i])) {
+        slot[i] = vec4(TAKEN_OUT, 0u, 0u, 0u);
         return;
     }
     let cell = coords_of(predict_particle(i).q);
@@ -122,10 +135,24 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let s = slot[i];
+    if (s.x == TAKEN_OUT) {
+        return;
+    }
     let dest = cell_start[s.x] + s.y;
     position_sorted[dest] = position[i];
     velocity_next[dest] = velocity[i];
     key[dest] = s.z;
+}
+
+/// Behind the water the sort put first lies what it left out: mark it so.
+@compute @workgroup_size(64)
+fn bury(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= params.count || i < cell_start[params.cells]) {
+        return;
+    }
+    position_sorted[i] = vec4(0.0, 0.0, 0.0, -1.0);
+    velocity_next[i] = vec4(0.0);
 }
 
 @compute @workgroup_size(64)
@@ -135,6 +162,9 @@ fn scatter_affine(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let s = slot[i];
+    if (s.x == TAKEN_OUT) {
+        return;
+    }
     let dest = cell_start[s.x] + s.y;
     for (var row = 0u; row < 6u; row++) {
         affine_sorted[6u * dest + row] = affine[6u * i + row];
@@ -168,6 +198,10 @@ fn thin(@builtin(global_invocation_id) id: vec3<u32>) {
 fn predict(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.count) {
+        return;
+    }
+    if (is_taken_out(position[i])) {
+        pred_in[i] = position[i];
         return;
     }
     let pr = predict_particle(i);
@@ -319,6 +353,9 @@ fn body_near(b: u32, q: vec3<f32>) -> bool {
 fn weather(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.count) {
+        return;
+    }
+    if (is_taken_out(position[i])) {
         return;
     }
     let xi = position[i].xyz;

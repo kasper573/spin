@@ -234,6 +234,9 @@ fn mark(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let s = position[i];
+    if (s.w < 0.0) {
+        return;
+    }
     if (is_lone(i)) {
         lone[i] = 1u;
         let slot = atomicAdd(&counters[COUNTER_DROPLETS], 1u);
