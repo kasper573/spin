@@ -372,7 +372,9 @@ impl Fluid {
         let mut holding = ROOM_SOUGHT * sought;
         let mut sites: Vec<Vec3d> = Vec::new();
         let mut farthest = 0.0f64;
-        // a ball twice the size that holds no more room has come to the end of the vessel's
+        // a ball twice the size that holds no more room has come to the end of the vessel's,
+        // which only shows if a site has room or not whichever ball it is met in: so it is
+        // the site that is asked about, and not where the water put down on it is nudged to
         loop {
             let found_before = sites.len();
             sites.clear();
@@ -380,11 +382,11 @@ impl Fluid {
                 if sites.len() >= sought {
                     break;
                 }
-                let mut nudge = |x: f64| x + 0.5 + (self.rng.next_f32() as f64 - 0.5) * JITTER;
-                let site = [0, 1, 2].map(|c| nudge(base[c] + offset[c] as f64) * pitch);
-                if has_room(site) {
+                let site = [0, 1, 2].map(|c| base[c] + offset[c] as f64 + 0.5);
+                if has_room(site.map(|x| x * pitch)) {
+                    let mut nudge = |x: f64| x + (self.rng.next_f32() as f64 - 0.5) * JITTER;
                     farthest = farthest.max(norm(&offset.map(|x| x as f64)));
-                    sites.push(site);
+                    sites.push(site.map(|x| nudge(x) * pitch));
                 }
             }
             if sites.len() >= sought

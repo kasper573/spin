@@ -12,7 +12,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
-    Buffer, BufferUsages, CachedComputePipelineId, CommandEncoder, ComputePassDescriptor,
+    Buffer, BufferId, BufferUsages, CachedComputePipelineId, CommandEncoder, ComputePassDescriptor,
     ComputePipelineDescriptor, DynamicUniformBuffer, PipelineCache, ShaderStages, UniformBuffer,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
@@ -783,12 +783,13 @@ struct KernelGroups {
     last: BindGroup,
 }
 
-/// Bind groups for one frame: per kernel, one with the predicted positions read from buffer A
-/// and written to B, and one the other way round.
+/// Bind groups per kernel, and where in them a frame's parameters lie. The groups are kept
+/// from frame to frame, and made anew only when a buffer they are `made_of` is replaced.
 #[derive(Resource)]
 struct BindGroups {
-    kernels: Vec<[KernelGroups; 2]>,
+    kernels: Vec<KernelGroups>,
     empty: BindGroup,
+    made_of: Vec<BufferId>,
     thin_offset: Option<u32>,
     inject_offset: u32,
     join_offset: u32,
@@ -912,6 +913,7 @@ fn prepare(
     frame: Res<FluidFrame>,
     surface_params: Res<SurfaceParams>,
     mut uniforms: ResMut<Uniforms>,
+    made: Option<ResMut<BindGroups>>,
 ) {
     let get = |handle: &Handle<ShaderBuffer>| gpu_buffers.get(handle).map(|b| b.buffer.clone());
     let all = |handles: &[&Handle<ShaderBuffer>]| {
@@ -1002,14 +1004,31 @@ fn prepare(
     ) else {
         return;
     };
+    let made_of: Vec<BufferId> = [
+        uniforms.params.buffer(),
+        uniforms.bodies.buffer(),
+        uniforms.surface.buffer(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(particles.iter().chain(&bodies).chain(&surface).chain(&grid))
+    .map(Buffer::id)
+    .collect();
+    if let Some(mut made) = made
+        && made.made_of == made_of
+    {
+        made.thin_offset = thin_offset;
+        made.inject_offset = inject_offset;
+        made.join_offset = join_offset;
+        made.surface_offset = surface_offset;
+        made.params_offsets = params_offsets;
+        made.bodies_offsets = bodies_offsets;
+        return;
+    }
 
-    let resource = |group: usize, binding: u32, variant: usize| -> BindingResource<'_> {
-        let pred =
-            |a: usize, b: usize| particles[if variant == 0 { a } else { b }].as_entire_binding();
+    let resource = |group: usize, binding: u32| -> BindingResource<'_> {
         match (group, binding) {
             (0, 0) => params_binding.clone(),
-            (0, 5) => pred(4, 5),
-            (0, 6) => pred(5, 4),
             (0, b) => particles[b as usize - 1].as_entire_binding(),
             (2, 0) => bodies_binding.clone(),
             (2, b) => bodies[b as usize - 1].as_entire_binding(),
@@ -1019,34 +1038,31 @@ fn prepare(
         }
     };
     // `buffers` names whose buffers the bindings are: a group's own, or the grid's as 4
-    let build =
-        |pipeline: &Pipeline, group: usize, buffers: usize, bindings: &[u32], variant: usize| {
-            let entries: Vec<BindGroupEntry> = bindings
-                .iter()
-                .map(|&binding| BindGroupEntry {
-                    binding,
-                    resource: resource(buffers, binding, variant),
-                })
-                .collect();
-            device.create_bind_group(
-                None,
-                &pipeline_cache.get_bind_group_layout(&pipeline.layouts[group]),
-                &entries,
-            )
-        };
+    let build = |pipeline: &Pipeline, group: usize, buffers: usize, bindings: &[u32]| {
+        let entries: Vec<BindGroupEntry> = bindings
+            .iter()
+            .map(|&binding| BindGroupEntry {
+                binding,
+                resource: resource(buffers, binding),
+            })
+            .collect();
+        device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.layouts[group]),
+            &entries,
+        )
+    };
     let kernels = SPECS
         .iter()
         .zip(&pipelines.items)
-        .map(|(spec, pipeline)| {
-            [0, 1].map(|variant| KernelGroups {
-                particles: build(pipeline, 0, 0, spec.particles, variant),
-                bodies: build(pipeline, 2, 2, spec.bodies, variant),
-                last: if spec.grid.is_empty() {
-                    build(pipeline, 3, 3, spec.surface, variant)
-                } else {
-                    build(pipeline, 3, 4, spec.grid, variant)
-                },
-            })
+        .map(|(spec, pipeline)| KernelGroups {
+            particles: build(pipeline, 0, 0, spec.particles),
+            bodies: build(pipeline, 2, 2, spec.bodies),
+            last: if spec.grid.is_empty() {
+                build(pipeline, 3, 3, spec.surface)
+            } else {
+                build(pipeline, 3, 4, spec.grid)
+            },
         })
         .collect();
     let empty = device.create_bind_group(
@@ -1057,6 +1073,7 @@ fn prepare(
     commands.insert_resource(BindGroups {
         kernels,
         empty,
+        made_of,
         thin_offset,
         inject_offset,
         join_offset,
@@ -1092,6 +1109,14 @@ enum Threads<'a> {
     Indirect(&'a Buffer, u64),
 }
 
+/// Where in the uniform buffers the parameters the kernels of a pass read lie.
+#[derive(Clone, Copy)]
+struct Offsets {
+    params: u32,
+    bodies: u32,
+    vessel: u32,
+}
+
 struct Dispatch<'a> {
     cache: &'a PipelineCache,
     pipelines: &'a Pipelines,
@@ -1107,49 +1132,53 @@ impl Dispatch<'_> {
             .all(|p| self.cache.get_compute_pipeline(p.id).is_some())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Run kernels one after another in a single pass: a pass of its own for each would have
+    /// the driver keep a command buffer for each, a frame after frame of them.
     fn run(
         &self,
         encoder: &mut CommandEncoder,
-        kernel: Kernel,
-        variant: usize,
-        params_offset: u32,
-        bodies_offset: u32,
-        vessel_offset: u32,
-        threads: Threads,
+        label: &'static str,
+        offsets: Offsets,
+        kernels: &[(Kernel, Threads)],
     ) {
-        let index = SPECS.iter().position(|s| s.kernel == kernel).unwrap_or(0);
-        let (spec, pipeline) = (&SPECS[index], &self.pipelines.items[index]);
-        let Some(compute) = self.cache.get_compute_pipeline(pipeline.id) else {
-            return;
-        };
-        let groups = &self.groups.kernels[index][variant];
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some(spec.entry),
+            label: Some(label),
             ..default()
         });
-        pass.set_pipeline(compute);
-        pass.set_bind_group(0, &groups.particles, &[params_offset]);
-        if pipeline.groups > 1 {
-            if spec.vessel {
-                pass.set_bind_group(1, &self.vessel.bind_group, &[vessel_offset]);
-            } else {
-                pass.set_bind_group(1, &self.groups.empty, &[]);
+        for &(kernel, threads) in kernels {
+            let index = SPECS.iter().position(|s| s.kernel == kernel).unwrap_or(0);
+            let (spec, pipeline) = (&SPECS[index], &self.pipelines.items[index]);
+            let Some(compute) = self.cache.get_compute_pipeline(pipeline.id) else {
+                continue;
+            };
+            let groups = &self.groups.kernels[index];
+            pass.set_pipeline(compute);
+            pass.set_bind_group(0, &groups.particles, &[offsets.params]);
+            if pipeline.groups > 1 {
+                if spec.vessel {
+                    pass.set_bind_group(1, &self.vessel.bind_group, &[offsets.vessel]);
+                } else {
+                    pass.set_bind_group(1, &self.groups.empty, &[]);
+                }
             }
-        }
-        if pipeline.groups > 2 {
-            if spec.bodies.is_empty() {
-                pass.set_bind_group(2, &self.groups.empty, &[]);
-            } else {
-                pass.set_bind_group(2, &groups.bodies, &[bodies_offset]);
+            if pipeline.groups > 2 {
+                if spec.bodies.is_empty() {
+                    pass.set_bind_group(2, &self.groups.empty, &[]);
+                } else {
+                    pass.set_bind_group(2, &groups.bodies, &[offsets.bodies]);
+                }
             }
-        }
-        if pipeline.groups > 3 {
-            pass.set_bind_group(3, &groups.last, &[]);
-        }
-        match threads {
-            Threads::Count(n) => pass.dispatch_workgroups(n.div_ceil(spec.workgroup).max(1), 1, 1),
-            Threads::Indirect(buffer, offset) => pass.dispatch_workgroups_indirect(buffer, offset),
+            if pipeline.groups > 3 {
+                pass.set_bind_group(3, &groups.last, &[]);
+            }
+            match threads {
+                Threads::Count(n) => {
+                    pass.dispatch_workgroups(n.div_ceil(spec.workgroup).max(1), 1, 1)
+                }
+                Threads::Indirect(buffer, offset) => {
+                    pass.dispatch_workgroups_indirect(buffer, offset)
+                }
+            }
         }
     }
 }
@@ -1181,47 +1210,52 @@ fn dispatch(
     let vessel_now = *vessel.offsets.last().unwrap_or(&0);
     let encoder = render_context.command_encoder();
     let bytes = |n: u32| n as u64 * 16;
-    let bin = |encoder: &mut CommandEncoder, po: u32, vo: u32, count: u32| {
+    let bin = |encoder: &mut CommandEncoder, at: Offsets, count: u32| {
         encoder.clear_buffer(&raw.cell_count, 0, None);
         let threads = Threads::Count(count);
-        d.run(encoder, Kernel::Count, 0, po, 0, vo, threads);
         let cells = Threads::Count(TABLE_CELLS as u32);
-        d.run(encoder, Kernel::ScanRuns, 0, po, 0, vo, cells);
-        d.run(encoder, Kernel::ScanTotals, 0, po, 0, vo, Threads::Count(1));
-        d.run(encoder, Kernel::AddOffsets, 0, po, 0, vo, cells);
-        d.run(encoder, Kernel::Scatter, 0, po, 0, vo, threads);
-        d.run(encoder, Kernel::ScatterAffine, 0, po, 0, vo, threads);
+        d.run(
+            encoder,
+            "fluid bin",
+            at,
+            &[
+                (Kernel::Count, threads),
+                (Kernel::ScanRuns, cells),
+                (Kernel::ScanTotals, Threads::Count(1)),
+                (Kernel::AddOffsets, cells),
+                (Kernel::Scatter, threads),
+                (Kernel::ScatterAffine, threads),
+            ],
+        );
     };
-    let sort = |encoder: &mut CommandEncoder, po: u32, vo: u32, count: u32| {
-        bin(encoder, po, vo, count);
+    let sort = |encoder: &mut CommandEncoder, at: Offsets, count: u32| {
+        bin(encoder, at, count);
         encoder.copy_buffer_to_buffer(&raw.position_sorted, 0, &raw.position, 0, bytes(count));
         encoder.copy_buffer_to_buffer(&raw.velocity_next, 0, &raw.velocity, 0, bytes(count));
         encoder.copy_buffer_to_buffer(&raw.affine_sorted, 0, &raw.affine, 0, 6 * bytes(count));
     };
+    let now = |params: u32| Offsets {
+        params,
+        bodies: 0,
+        vessel: vessel_now,
+    };
     if let (Some(thin), Some(to)) = (&frame.thin, groups.thin_offset) {
-        bin(encoder, to, vessel_now, thin.count);
+        bin(encoder, now(to), thin.count);
         let remaining = Threads::Count(thin.pending);
-        d.run(encoder, Kernel::Thin, 0, to, 0, vessel_now, remaining);
+        d.run(encoder, "fluid thin", now(to), &[(Kernel::Thin, remaining)]);
         // the spray is measured in the water's units, which thinning the water changes
         encoder.clear_buffer(&raw.motes, 0, None);
     }
     if frame.inject.pending > 0 {
         let joining = Threads::Count(frame.inject.pending);
-        d.run(
-            encoder,
-            Kernel::Inject,
-            0,
-            groups.inject_offset,
-            0,
-            vessel_now,
-            joining,
-        );
+        let at = now(groups.inject_offset);
+        d.run(encoder, "fluid inject", at, &[(Kernel::Inject, joining)]);
     }
     if frame.join.pending > 0 {
-        let jo = groups.join_offset;
-        bin(encoder, jo, vessel_now, frame.join.count);
+        let at = now(groups.join_offset);
+        bin(encoder, at, frame.join.count);
         let weighers = Threads::Count(JOIN_THREADS);
-        d.run(encoder, Kernel::Join, 0, jo, 0, vessel_now, weighers);
+        d.run(encoder, "fluid join", at, &[(Kernel::Join, weighers)]);
     }
     if frame.coupling {
         let first = accumulators_of(frame.ticket) as u64 * 4;
@@ -1229,63 +1263,62 @@ fn dispatch(
         encoder.clear_buffer(&raw.accum, first, Some(bytes));
     }
     for (k, substep) in frame.substeps.iter().enumerate() {
-        let (po, bo) = (groups.params_offsets[k], groups.bodies_offsets[k]);
-        let vo = vessel.offsets.get(k).copied().unwrap_or(vessel_now);
+        let at = Offsets {
+            params: groups.params_offsets[k],
+            bodies: groups.bodies_offsets[k],
+            vessel: vessel.offsets.get(k).copied().unwrap_or(vessel_now),
+        };
         let count = Threads::Count(substep.params.count);
         let samples = Threads::Count(substep.params.sample_count);
         let coupled = substep.params.sample_count > 0;
-        sort(encoder, po, vo, substep.params.count);
-        d.run(encoder, Kernel::Predict, 0, po, bo, vo, count);
-        if coupled {
-            d.run(encoder, Kernel::Place, 0, po, bo, vo, samples);
-        }
+        let cells = Threads::Indirect(&raw.grid_dispatch, 0);
+        let shores = Threads::Indirect(&raw.grid_dispatch, 16);
+        sort(encoder, at, substep.params.count);
         encoder.clear_buffer(&raw.grid_keys, 0, None);
         encoder.clear_buffer(&raw.grid_counters, 0, None);
-        d.run(encoder, Kernel::Occupy, 0, po, bo, vo, count);
-        d.run(encoder, Kernel::Muster, 0, po, bo, vo, Threads::Count(1));
-        let cells = Threads::Indirect(&raw.grid_dispatch, 0);
-        d.run(encoder, Kernel::Gather, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::Walls, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::Level, 0, po, bo, vo, cells);
-        d.run(
-            encoder,
-            Kernel::MusterShores,
-            0,
-            po,
-            bo,
-            vo,
-            Threads::Count(1),
-        );
-        let shores = Threads::Indirect(&raw.grid_dispatch, 16);
-        d.run(encoder, Kernel::LevelShores, 0, po, bo, vo, shores);
-        d.run(encoder, Kernel::Wetted, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::SmoothOnce, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::SmoothTwice, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::SmoothThrice, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::System, 0, po, bo, vo, cells);
+        let mut step = vec![(Kernel::Predict, count)];
+        if coupled {
+            step.push((Kernel::Place, samples));
+        }
+        step.extend([
+            (Kernel::Occupy, count),
+            (Kernel::Muster, Threads::Count(1)),
+            (Kernel::Gather, cells),
+            (Kernel::Walls, cells),
+            (Kernel::Level, cells),
+            (Kernel::MusterShores, Threads::Count(1)),
+            (Kernel::LevelShores, shores),
+            (Kernel::Wetted, cells),
+            (Kernel::SmoothOnce, cells),
+            (Kernel::SmoothTwice, cells),
+            (Kernel::SmoothThrice, cells),
+            (Kernel::System, cells),
+        ]);
         for _ in 0..SETTLINGS {
-            d.run(encoder, Kernel::SettleRed, 0, po, bo, vo, cells);
-            d.run(encoder, Kernel::SettleBlack, 0, po, bo, vo, cells);
+            step.extend([(Kernel::SettleRed, cells), (Kernel::SettleBlack, cells)]);
         }
         for _ in 0..RELAXATIONS {
-            d.run(encoder, Kernel::RelaxRed, 0, po, bo, vo, cells);
-            d.run(encoder, Kernel::RelaxBlack, 0, po, bo, vo, cells);
+            step.extend([(Kernel::RelaxRed, cells), (Kernel::RelaxBlack, cells)]);
         }
-        d.run(encoder, Kernel::Project, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::TellOnOnce, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::TellOnTwice, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::Slip, 0, po, bo, vo, cells);
-        d.run(encoder, Kernel::Transfer, 0, po, bo, vo, count);
+        step.extend([
+            (Kernel::Project, cells),
+            (Kernel::TellOnOnce, cells),
+            (Kernel::TellOnTwice, cells),
+            (Kernel::Slip, cells),
+            (Kernel::Transfer, count),
+        ]);
         if coupled {
-            d.run(encoder, Kernel::Buoyancy, 0, po, bo, vo, samples);
+            step.push((Kernel::Buoyancy, samples));
         }
-        d.run(encoder, Kernel::Weather, 0, po, bo, vo, count);
+        step.push((Kernel::Weather, count));
         if coupled {
-            d.run(encoder, Kernel::Drag, 0, po, bo, vo, samples);
+            step.push((Kernel::Drag, samples));
         }
-        d.run(encoder, Kernel::Shed, 0, po, bo, vo, count);
-        let motes = Threads::Count(MAX_MOTES as u32);
-        d.run(encoder, Kernel::Fly, 0, po, bo, vo, motes);
+        step.extend([
+            (Kernel::Shed, count),
+            (Kernel::Fly, Threads::Count(MAX_MOTES as u32)),
+        ]);
+        d.run(encoder, "fluid step", at, &step);
         encoder.copy_buffer_to_buffer(
             &raw.velocity_next,
             0,
@@ -1295,26 +1328,27 @@ fn dispatch(
         );
     }
     if frame.changed {
-        let so = groups.surface_offset;
+        let at = now(groups.surface_offset);
         let count = Threads::Count(frame.surface.count);
         let blocks = Threads::Indirect(&raw.dispatch, 0);
         let cells = Threads::Indirect(&raw.dispatch, 16);
-        sort(encoder, so, vessel_now, frame.surface.count);
+        let one = Threads::Count(1);
+        sort(encoder, at, frame.surface.count);
         encoder.clear_buffer(&raw.counters, 0, None);
         encoder.clear_buffer(&raw.table, 0, None);
         encoder.clear_buffer(&raw.cell_table, 0, None);
-        d.run(encoder, Kernel::Mark, 0, so, 0, vessel_now, count);
-        let slots = Threads::Count(TABLE_SLOTS as u32);
-        d.run(encoder, Kernel::List, 0, so, 0, vessel_now, slots);
-        let one = Threads::Count(1);
-        d.run(encoder, Kernel::PrepareDispatch, 0, so, 0, vessel_now, one);
-        d.run(encoder, Kernel::Extract, 0, so, 0, vessel_now, blocks);
-        d.run(encoder, Kernel::PrepareQuads, 0, so, 0, vessel_now, one);
-        d.run(encoder, Kernel::Quads, 0, so, 0, vessel_now, cells);
+        let mut surface = vec![
+            (Kernel::Mark, count),
+            (Kernel::List, Threads::Count(TABLE_SLOTS as u32)),
+            (Kernel::PrepareDispatch, one),
+            (Kernel::Extract, blocks),
+            (Kernel::PrepareQuads, one),
+            (Kernel::Quads, cells),
+        ];
         for _ in 0..POLISH_PASSES {
-            d.run(encoder, Kernel::Polish, 0, so, 0, vessel_now, cells);
-            d.run(encoder, Kernel::PolishBack, 0, so, 0, vessel_now, cells);
+            surface.extend([(Kernel::Polish, cells), (Kernel::PolishBack, cells)]);
         }
-        d.run(encoder, Kernel::Polish, 0, so, 0, vessel_now, cells);
+        surface.push((Kernel::Polish, cells));
+        d.run(encoder, "fluid surface", at, &surface);
     }
 }
