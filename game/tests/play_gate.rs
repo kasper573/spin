@@ -25,6 +25,8 @@ const WIDTH: u32 = 3840;
 const HEIGHT: u32 = 2160;
 /// Frames are timed so many at a time, and the last of them is kept and the water measured.
 const KEPT_EVERY: u32 = 10;
+/// The empty ring is timed over this many frames before a scene is played.
+const CALIBRATION_FRAMES: u32 = 30;
 /// How many runs of passes a frame bevy's render diagnostics keep the GPU's time of.
 const TIMED_RUNS_KEPT: u32 = 128;
 /// The slowest the game may run.
@@ -90,6 +92,8 @@ enum Seat {
 }
 
 struct Measured {
+    /// What a frame of the empty default ring cost just before the scene was played.
+    empty_ring_ms: f64,
     frame_ms: Vec<f64>,
     /// How much of a frame's time the CPU took to issue it, the GPU being waited for after.
     issuing_ms: Vec<f64>,
@@ -120,6 +124,7 @@ fn play_in(
     fs::create_dir_all(&out).expect("create the scene's folder");
     let mut app = testing::headless();
     let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
+    let empty_ring_ms = empty_ring_ms(&mut app);
     Dial::Flow.set(
         &mut app.world_mut().resource_mut::<Settings>(),
         litres_per_second,
@@ -146,6 +151,7 @@ fn play_in(
     }
 
     let mut measured = Measured {
+        empty_ring_ms,
         frame_ms: Vec::new(),
         issuing_ms: Vec::new(),
         broken_vertices: 0,
@@ -217,6 +223,20 @@ fn play_in(
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
     eprintln!("{}", measured.report(scene));
     measured
+}
+
+/// What a frame of the empty default ring costs this machine right now. It is the same before
+/// every scene of every run while the machine has nothing else to do, so a run in which it
+/// reads otherwise was not alone on the machine, and nothing it measured is to be kept.
+fn empty_ring_ms(app: &mut App) -> f64 {
+    testing::watch(app, Seconds(0.5));
+    testing::wait_for_gpu(app);
+    let started = Instant::now();
+    for _ in 0..CALIBRATION_FRAMES {
+        testing::frame(app, Seconds(1.0 / FPS as f32));
+    }
+    testing::wait_for_gpu(app);
+    started.elapsed().as_secs_f64() * 1000.0 / CALIBRATION_FRAMES as f64
 }
 
 fn by_the_second(kept: &[f64]) -> String {
@@ -291,7 +311,8 @@ impl Measured {
 
     fn report(&self, scene: &str) -> String {
         format!(
-            "GATE {scene}: frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {} | vertices at most {}, broken {}, stray {}",
+            "GATE {scene}: empty ring {:.1} ms a frame | frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {} | vertices at most {}, broken {}, stray {}",
+            self.empty_ring_ms,
             self.percentile(0.5),
             self.percentile(0.95),
             self.percentile(1.0),

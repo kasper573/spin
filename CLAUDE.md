@@ -74,4 +74,10 @@ every frame drawn — and `just gate` runs it and lays each scene's frames out o
 - Anything a player can do that the gate does not yet play gets a scene before it gets code.
   Tests drive the game through what a player has — keys, buttons, dials — never by putting the
   simulation into a state from outside.
-- Measure on an idle GPU: nothing else building, testing or recording while the gate runs.
+- Measure on an idle machine at full speed only: nothing else building, testing, recording or
+  playing while the gate runs, and the display awake (the GPU driver runs the GPU at a fraction
+  of its speed while the display sleeps). `just gate` refuses to start on a busy machine, keeps
+  the display awake, and fails if the GPU worked below its full performance state. Every scene
+  first times the empty default ring (`empty ring … ms` in `measured.txt`): a run in which that
+  reading is not what the baseline's is measured the machine rather than the game, and nothing
+  of it is kept. Timing runs outside `just gate` are held to the same.
