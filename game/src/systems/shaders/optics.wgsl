@@ -71,7 +71,11 @@ fn scene_depth(uv: vec2<f32>) -> f32 {
 
 /// The scene as drawn so far, behind everything being drawn now.
 fn behind(uv: vec2<f32>) -> vec3<f32> {
-    return textureSampleLevel(view_transmission_texture, view_transmission_sampler, uv, 0.0).rgb;
+    // the scene so far is kept as large as what the view is drawn into, of which the view may
+    // be a window
+    let kept = vec2<f32>(textureDimensions(view_transmission_texture));
+    let at = (view.viewport.xy + uv * view.viewport.zw) / kept;
+    return textureSampleLevel(view_transmission_texture, view_transmission_sampler, at, 0.0).rgb;
 }
 
 /// How far in front of the camera a point of the world is.

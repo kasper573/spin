@@ -8,7 +8,7 @@
 //! A mouth seen through a mouth shows the picture of the frame before, since a picture cannot
 //! be drawn into while it is read, so each camera has two pictures and draws into them in turn.
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
+use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget, SubCameraView, Viewport};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::ShadowFilteringMethod;
@@ -75,6 +75,10 @@ const NEAREST: f64 = 1.0;
 /// eye is this far short of it at least, or what is seen is simply what is before the eye.
 const PAST: f64 = 0.01;
 const SHORT: f32 = 0.02;
+/// How many points of a mouth's rim its window in the view is found from, and how much wider
+/// than the rim they are taken, the rim being round and the points few.
+const WINDOW_POINTS: usize = 24;
+const WINDOW_ROOM: f64 = 1.05;
 /// Over a mouth, the nearest the eye sees anything is this share of its height over the
 /// mouth, down to this.
 const LEANT: f32 = 0.25;
@@ -193,7 +197,7 @@ fn look_through(
     mut vantages: ResMut<Vantages>,
     mut pictures: ResMut<Pictures>,
     mut standoffs: Local<[Option<f64>; 2]>,
-    player: Query<&Projection, With<PlayerCamera>>,
+    player: Query<(&Projection, &Camera), With<PlayerCamera>>,
     mut eyes: Query<
         (
             &PortalEye,
@@ -205,9 +209,10 @@ fn look_through(
         Without<PlayerCamera>,
     >,
 ) {
-    let Some(Projection::Perspective(lens)) = player.iter().next() else {
+    let Some((Projection::Perspective(lens), shown_in)) = player.iter().next() else {
         return;
     };
+    let shown = shown_in.physical_target_size();
     let pictures = &mut *pictures;
     std::mem::swap(&mut pictures.fresh, &mut pictures.stale);
     let drum = &sim.drum;
@@ -254,6 +259,30 @@ fn look_through(
             handle: pictures.fresh[i].clone(),
             scale_factor: 1.0,
         });
+        let window = drum
+            .mouths
+            .get(*colour)
+            .zip(shown)
+            .and_then(|(near, shown)| window_on(drum, near, eye, attitude, lens, shown));
+        let (viewport, sub_view) = match (window, shown) {
+            (Some((offset, size)), Some(full_size)) => (
+                Some(Viewport {
+                    physical_position: offset,
+                    physical_size: size,
+                    ..default()
+                }),
+                Some(SubCameraView {
+                    full_size,
+                    offset: offset.as_vec2(),
+                    size,
+                }),
+            ),
+            _ => (None, None),
+        };
+        if camera.sub_camera_view != sub_view {
+            camera.viewport = viewport;
+            camera.sub_camera_view = sub_view;
+        }
         let pose = vantage.pose(sight.point(eye), sight.attitude(attitude));
         *transform = pose;
         let inward = Vec3::from(vantage.frame.vector(sight.inward).map(|c| c as f32));
@@ -331,6 +360,55 @@ fn seen_through(
     let corner =
         ((lens.fov as f64 / 2.0).tan() * (1.0 + (lens.aspect_ratio as f64).powi(2)).sqrt()).atan();
     across > SMALLEST && off < corner + across
+}
+
+/// The window of the view a mouth shows in, with its flames: what lies beyond the mouth is
+/// seen nowhere else, so nowhere else is it drawn, and a mouth costs what it covers of the view
+/// rather than a view of its own. None where the mouth comes too near the eye to have a window
+/// short of the whole view.
+fn window_on(
+    drum: &Drum,
+    near: &Mouth,
+    eye: Vec3d,
+    attitude: Quatd,
+    lens: &PerspectiveProjection,
+    shown: UVec2,
+) -> Option<(UVec2, UVec2)> {
+    let rim = drum.mouths.radius() * (1.0 + FLAME_BAND) * WINDOW_ROOM;
+    let back = quat_conjugate(&attitude);
+    let tan = (lens.fov as f64 / 2.0).tan();
+    let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for k in 0..WINDOW_POINTS {
+        let turn = k as f64 / WINDOW_POINTS as f64 * std::f64::consts::TAU;
+        let at = MouthCoords {
+            u: rim * turn.cos(),
+            v: rim * turn.sin(),
+            h: 0.0,
+        };
+        let seen = quat_rotate(&back, &between(eye, drum.mouth_point(near, at)));
+        if -seen[2] < 2.0 * lens.near as f64 {
+            return None;
+        }
+        let across = [
+            seen[0] / (-seen[2] * tan * lens.aspect_ratio as f64),
+            -seen[1] / (-seen[2] * tan),
+        ];
+        for axis in 0..2 {
+            low[axis] = low[axis].min(across[axis]);
+            high[axis] = high[axis].max(across[axis]);
+        }
+    }
+    let size = [shown.x as f64, shown.y as f64];
+    let pixel =
+        |across: f64, axis: usize| ((across + 1.0) / 2.0 * size[axis]).clamp(0.0, size[axis]);
+    let from = [0, 1].map(|axis| pixel(low[axis], axis).floor() as u32);
+    let to = [0, 1].map(|axis| pixel(high[axis], axis).ceil() as u32);
+    (to[0] > from[0] && to[1] > from[1]).then(|| {
+        (
+            UVec2::new(from[0], from[1]),
+            UVec2::new(to[0] - from[0], to[1] - from[1]),
+        )
+    })
 }
 
 fn between(from: Vec3d, to: Vec3d) -> Vec3d {

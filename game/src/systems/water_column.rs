@@ -236,9 +236,13 @@ fn follow(
         if camera.is_active != looking.is_some() {
             camera.is_active = looking.is_some();
         }
-        let Some((_, pose, Projection::Perspective(lens))) = looking else {
+        let Some((eye, pose, Projection::Perspective(lens))) = looking else {
             continue;
         };
+        if camera.sub_camera_view != eye.sub_camera_view {
+            camera.viewport = eye.viewport.clone();
+            camera.sub_camera_view = eye.sub_camera_view;
+        }
         *transform = *pose;
         let plain = PerspectiveProjection {
             near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -lens.near),
