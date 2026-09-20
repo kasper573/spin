@@ -629,6 +629,18 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
 #[derive(Resource, Default)]
 struct ReadResult(Option<Vec<u8>>);
 
+/// Wait until the GPU has done all it has been asked, by reading a few bytes back from it,
+/// which it cannot hand over before.
+pub fn wait_for_gpu(app: &mut App) {
+    let counters = app
+        .world()
+        .resource::<FluidBuffers>()
+        .surface
+        .counters
+        .clone();
+    read_u32s(app, counters);
+}
+
 fn read_u32s(app: &mut App, buffer: Handle<ShaderBuffer>) -> Vec<u32> {
     read_back(app, Readback::buffer(buffer))
         .chunks_exact(4)

@@ -5,6 +5,7 @@
 //! re-sort and extract the surface.
 use bevy::core_pipeline::schedule::camera_driver;
 use bevy::prelude::*;
+use bevy::render::diagnostic::{DiagnosticsRecorder, RecordDiagnostics};
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::binding_types::{
@@ -15,7 +16,9 @@ use bevy::render::render_resource::{
     Buffer, BufferId, BufferUsages, CachedComputePipelineId, CommandEncoder, ComputePassDescriptor,
     ComputePipelineDescriptor, DynamicUniformBuffer, PipelineCache, ShaderStages, UniformBuffer,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
+use bevy::render::renderer::{
+    RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue,
+};
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
@@ -125,7 +128,10 @@ pub fn install(render_app: &mut SubApp) {
         .add_systems(Render, prepare.in_set(RenderSystems::PrepareBindGroups))
         .add_systems(
             RenderGraph,
-            dispatch.in_set(FluidStep).before(camera_driver),
+            dispatch
+                .in_set(FluidStep)
+                .in_set(RenderGraphSystems::Render)
+                .before(camera_driver),
         );
 }
 
@@ -1118,6 +1124,7 @@ struct Offsets {
 }
 
 struct Dispatch<'a> {
+    diagnostics: Option<&'a DiagnosticsRecorder>,
     cache: &'a PipelineCache,
     pipelines: &'a Pipelines,
     groups: &'a BindGroups,
@@ -1141,6 +1148,7 @@ impl Dispatch<'_> {
         offsets: Offsets,
         kernels: &[(Kernel, Threads)],
     ) {
+        let span = self.diagnostics.time_span(encoder, label);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some(label),
             ..default()
@@ -1180,6 +1188,8 @@ impl Dispatch<'_> {
                 }
             }
         }
+        drop(pass);
+        span.end(encoder);
     }
 }
 
@@ -1197,7 +1207,9 @@ fn dispatch(
     let (Some(groups), Some(raw), Some(vessel)) = (groups, raw, vessel) else {
         return;
     };
+    let diagnostics = render_context.diagnostic_recorder();
     let d = Dispatch {
+        diagnostics: diagnostics.as_deref(),
         cache: &cache,
         pipelines: &pipelines,
         groups: &groups,

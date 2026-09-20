@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
@@ -18,8 +19,9 @@ use game::systems::testing;
 use game::systems::tools::Toolbelt;
 
 const FPS: u32 = 60;
-const WIDTH: u32 = 1280;
-const HEIGHT: u32 = 720;
+/// The game is held to its frame budget drawn as large as a player may have it.
+const WIDTH: u32 = 3840;
+const HEIGHT: u32 = 2160;
 /// Frames are timed so many at a time, and the last of them is kept and the water measured.
 const KEPT_EVERY: u32 = 10;
 /// The slowest the game may run.
@@ -73,6 +75,9 @@ struct Measured {
     most_vertices: usize,
     poured_m3: f64,
     water_m3: Vec<f64>,
+    /// What the GPU spent on each of its passes, in milliseconds a pass, the most first. A
+    /// pass that runs for every substep of the water runs more than once a frame.
+    gpu_ms: Vec<(String, f64)>,
 }
 
 fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Measured {
@@ -107,6 +112,7 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
         most_vertices: 0,
         poured_m3: 0.0,
         water_m3: Vec::new(),
+        gpu_ms: Vec::new(),
     };
     let mut pouring = false;
     let mut frame = 0u32;
@@ -131,17 +137,24 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
             frame += 1;
             if frame.is_multiple_of(KEPT_EVERY) {
                 // the frames run as the game runs them, one issued after the other, and the
-                // GPU is waited for only here, by reading the picture back, which it cannot
-                // hand over before it has done all it was asked: so what the frames cost the
-                // GPU is in their time
+                // GPU is waited for only here, so that what they cost it is in their time
                 testing::settle(&mut app);
-                let pixels = testing::capture(&mut app, &image);
+                testing::wait_for_gpu(&mut app);
                 let each = started.elapsed().as_secs_f64() * 1000.0 / KEPT_EVERY as f64;
                 measured.frame_ms.push(each);
+                let pixels = testing::capture(&mut app, &image);
                 keep(&mut app, &pixels, &out, frame, &mut measured);
             }
         }
     }
+    measured.gpu_ms = app
+        .world()
+        .resource::<DiagnosticsStore>()
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
+        .filter_map(|d| Some((d.path().as_str().to_owned(), d.average()?)))
+        .collect();
+    measured.gpu_ms.sort_by(|a, b| b.1.total_cmp(&a.1));
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
     eprintln!("{}", measured.report(scene));
     measured
@@ -205,7 +218,12 @@ impl Measured {
             self.most_vertices,
             self.broken_vertices,
             self.stray_vertices,
-        )
+        ) + &self
+            .gpu_ms
+            .iter()
+            .take(12)
+            .map(|(path, ms)| format!("\n    {ms:6.2} ms  {path}"))
+            .collect::<String>()
     }
 
     /// What a player would hold the scene to, beside what the frames show.

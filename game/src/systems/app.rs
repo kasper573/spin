@@ -24,13 +24,8 @@ pub fn build() -> App {
         ..default()
     }));
     simulation(&mut app);
-    app.add_plugins((
-        ControlsPlugin,
-        PersistencePlugin,
-        TestingPlugin,
-        RenderDiagnosticsPlugin,
-    ))
-    .add_systems(PreUpdate, sync_window);
+    app.add_plugins((ControlsPlugin, PersistencePlugin, TestingPlugin))
+        .add_systems(PreUpdate, sync_window);
     app
 }
 
@@ -57,6 +52,7 @@ pub fn build_headless(render: RenderCreation) -> App {
 
 fn simulation(app: &mut App) {
     super::embed_shaders(app);
+    app.add_plugins(RenderDiagnosticsPlugin);
     app.add_plugins((
         ScenePlugin,
         SimulationPlugin,
