@@ -264,6 +264,9 @@ impl Sight {
     }
 
     fn capture(&mut self, name: &str) -> Vec<u8> {
+        // what is drawn by what an earlier pass of the same frame drew shows only in the frame
+        // after the eye is opened again
+        testing::frame(&mut self.app, Seconds(0.0));
         testing::frame(&mut self.app, Seconds(0.0));
         let pixels = testing::capture(&mut self.app, &self.image);
         image::save_buffer(

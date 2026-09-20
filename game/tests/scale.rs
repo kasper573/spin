@@ -3,11 +3,12 @@
 use bevy::prelude::*;
 use game::core::fluid::{Fluid, Resolution, SPACINGS_FROM_ORIGIN};
 use game::core::math::norm;
+use game::core::shallows::Shallows;
 use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
 use game::systems::drum::{GROUND_DEPTH, Ring};
 use game::systems::persistence::{Snapshot, apply, snapshot};
 use game::systems::settings::Settings;
-use game::systems::sim::{Simulation, standing_spin};
+use game::systems::sim::{Simulation, standing_spin, water_litres};
 use game::systems::testing;
 
 fn ring(radius: f64) -> Ring {
@@ -118,7 +119,18 @@ fn water_put_down_on_a_ring_of_any_size_is_the_finest() {
             Resolution::FINEST,
             "water put down on a ring of radius {radius} m"
         );
-        assert_eq!(fluid.len(), 500);
+        testing::run(&mut app, Seconds(2.0));
+        let each = Resolution::FINEST.litres_per_particle().0;
+        let litres = water_litres(
+            app.world().resource::<Fluid>(),
+            app.world().resource::<Shallows>(),
+        );
+        assert!(
+            (litres.0 - 500.0 * each).abs() < each,
+            "on a ring of radius {radius} m {} litres are there, in flight and lying, of the {} put down",
+            litres.0,
+            500.0 * each
+        );
     }
 }
 
@@ -220,14 +232,19 @@ fn a_huge_ring_survives_a_save() {
     let json = serde_json::to_string(&snapshot(
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
-        world.resource::<Fluid>(),
+        (world.resource::<Fluid>(), world.resource::<Shallows>()),
     ))
     .unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
     let mut settings = Settings::default();
     let mut sim = Simulation::default();
     world.resource_scope(|_, mut fluid: Mut<Fluid>| {
-        apply(&restored, &mut settings, &mut sim, &mut fluid);
+        apply(
+            &restored,
+            &mut settings,
+            &mut sim,
+            (&mut fluid, &mut Shallows::default()),
+        );
         assert_eq!(fluid.len(), 50);
         assert_eq!(fluid.resolution(), Resolution::FINEST);
     });

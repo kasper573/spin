@@ -5,23 +5,7 @@
 // size. The vertices are as the water's surface has them, for what draws the one to draw the
 // other: in the frame, the units and the clock the `ground` module carries them into.
 #import ground::{ground_point, ground_carried}
-
-struct Shallows {
-    size: vec2<u32>,
-    wraps: vec2<u32>,
-    cell: vec2<f32>,
-    low: vec2<f32>,
-    dt: f32,
-    bed_friction: f32,
-    pouring: u32,
-    standing: vec4<f32>,
-}
-
-struct Cell {
-    face: f32,
-    climbing: f32,
-    flow: vec2<f32>,
-}
+#import shallows_chart::{shallows, Cell, WALL, cell_count, slot}
 
 struct SurfaceVertex {
     position: vec4<f32>,
@@ -29,30 +13,12 @@ struct SurfaceVertex {
     velocity: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> shallows: Shallows;
 @group(0) @binding(1) var<storage, read> bed: array<f32>;
 @group(0) @binding(2) var<storage, read> cells: array<Cell>;
 @group(0) @binding(3) var<storage, read_write> vertices: array<SurfaceVertex>;
 @group(0) @binding(4) var<storage, read_write> indices: array<u32>;
 // vertex count, index count, then two the water in flight counts its own by
 @group(0) @binding(5) var<storage, read_write> counters: array<u32>;
-
-const WALL: i32 = -1;
-
-fn slot(c: vec2<i32>) -> i32 {
-    let size = vec2<i32>(shallows.size);
-    var at = c;
-    if (shallows.wraps.x == 1u) {
-        at.x = (at.x % size.x + size.x) % size.x;
-    }
-    if (shallows.wraps.y == 1u) {
-        at.y = (at.y % size.y + size.y) % size.y;
-    }
-    if (at.x < 0 || at.x >= size.x || at.y < 0 || at.y >= size.y) {
-        return WALL;
-    }
-    return at.y * size.x + at.x;
-}
 
 fn is_wet(s: i32) -> bool {
     return s != WALL && cells[s].face > bed[s];
@@ -71,7 +37,7 @@ fn skin_corners(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (id.x == 0u) {
         counters[0] = 2u * across.x * across.y;
-        counters[1] = 12u * shallows.size.x * shallows.size.y;
+        counters[1] = 12u * cell_count();
         counters[2] = 0u;
         counters[3] = 0u;
     }
@@ -125,7 +91,7 @@ fn skin_corners(@builtin(global_invocation_id) id: vec3<u32>) {
 /// each faces out of the water.
 @compute @workgroup_size(64)
 fn skin_cells(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= shallows.size.x * shallows.size.y) {
+    if (id.x >= cell_count()) {
         return;
     }
     let c = vec2<u32>(id.x % shallows.size.x, id.x / shallows.size.x);

@@ -3,11 +3,12 @@ use game::core::fluid::{
     Fluid, MAX_BLOCKS, MAX_INDICES, MAX_PARTICLES, MAX_VERTICES, Particle, Resolution, grid_reach,
 };
 use game::core::math::norm;
+use game::core::shallows::Shallows;
 use game::core::units::Metres;
 use game::core::units::{RadiansPerSecond, Seconds};
 use game::systems::drum::DEFAULT_RING;
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::{SUBSTEP_RATE, Simulation};
+use game::systems::sim::{SUBSTEP_RATE, Simulation, water_litres};
 use game::systems::testing;
 
 /// Inject water around a point given about the drum's axis: across it, toward the site and
@@ -253,7 +254,17 @@ fn water_stays_inside_the_drum() {
     }
     testing::run(&mut app, Seconds(4.0));
     let particles = water(&mut app);
-    assert_eq!(particles.len(), 1800);
+    let each = Resolution::FINEST.litres_per_particle().0;
+    let litres = water_litres(
+        app.world().resource::<Fluid>(),
+        app.world().resource::<Shallows>(),
+    );
+    assert!(
+        (litres.0 - 1800.0 * each).abs() < each,
+        "{} litres are in the drum, in flight and lying, of the {} put in it",
+        litres.0,
+        1800.0 * each
+    );
     for p in &particles {
         let [x, y, z] = p.position;
         assert!(x.is_finite() && y.is_finite() && z.is_finite(), "{p:?}");

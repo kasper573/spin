@@ -6,7 +6,7 @@
 // once. The sums are per unit of the body's mass, which keeps them in the fixed-point range
 // whatever it weighs.
 #import vessel::{Through, vessel_gravity, vessel_gone_through, vessel_turned}
-#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell, FIXED}
+#import fluid_common::{params, Bodies, GpuBody, Boundary, SampleState, coords_of, cell_key, cell_slot, neighbour_cell, FIXED, ACC_BUOYANCY, ACC_BUOYANCY_TORQUE, ACC_FLOW, ACC_COUPLING, ACC_WET, ACC_STRIDE}
 
 @group(0) @binding(1) var<storage, read> position: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> velocity: array<vec4<f32>>;
@@ -19,13 +19,6 @@
 @group(2) @binding(2) var<storage, read_write> boundary: array<Boundary>;
 @group(2) @binding(3) var<storage, read_write> sample_state: array<SampleState>;
 @group(2) @binding(4) var<storage, read_write> accum: array<atomic<i32>>;
-
-const ACC_BUOYANCY: u32 = 0u;
-const ACC_BUOYANCY_TORQUE: u32 = 3u;
-const ACC_FLOW: u32 = 6u;
-const ACC_COUPLING: u32 = 9u;
-const ACC_WET: u32 = 10u;
-const ACC_STRIDE: u32 = 16u;
 
 fn body_of_sample(k: u32) -> u32 {
     for (var b = 0u; b < params.body_count; b++) {

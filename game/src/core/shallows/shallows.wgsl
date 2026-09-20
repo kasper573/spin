@@ -19,41 +19,8 @@
 //   ground_held(height)          the water a unit of the chart holds under a height
 //   ground_raised(held)          the height under which a unit of the chart holds that much
 #import ground::{ground_bed, ground_weight, ground_turning, ground_stretch, ground_held, ground_raised}
+#import shallows_chart::{shallows, Cell, Pressing, WALL, cell_count, cell_of, slot, stood}
 
-struct Shallows {
-    size: vec2<u32>,
-    wraps: vec2<u32>,
-    // a cell's sides on the chart, and where on the chart the low corner of the first cell is
-    cell: vec2<f32>,
-    low: vec2<f32>,
-    dt: f32,
-    bed_friction: f32,
-    // how many entries of `poured` are to be poured
-    pouring: u32,
-    // what `stand` stands the water to: a level, and how it tilts along the chart's two axes
-    standing: vec4<f32>,
-}
-
-struct Cell {
-    face: f32,
-    // how fast the water at the face climbs, by the pressure beyond the weight
-    climbing: f32,
-    flow: vec2<f32>,
-}
-
-struct Pressing {
-    at_bed: f32,
-    // the right side and the diagonal of the pressure's system
-    wanted: f32,
-    own: f32,
-    breaking: f32,
-    // the climbing before the pressure has had its way
-    climbed: f32,
-    // what the faces pass out of the cell this step, as a share of what it holds
-    rising: f32,
-}
-
-@group(0) @binding(0) var<uniform> shallows: Shallows;
 @group(0) @binding(1) var<storage, read_write> bed: array<f32>;
 @group(0) @binding(2) var<storage, read_write> cells: array<Cell>;
 // the flows once weight, carrying, turning and drag have had a step at them, and whether each
@@ -65,6 +32,8 @@ struct Pressing {
 @group(0) @binding(5) var<storage, read_write> giving: array<vec2<f32>>;
 // where on the chart, and how many cubic metres
 @group(0) @binding(6) var<storage, read> poured: array<vec4<f32>>;
+// the cubic metres each row of the chart holds
+@group(0) @binding(7) var<storage, read_write> rows: array<f32>;
 
 const DRY: f32 = 1e-5;
 // water shallower than this has no pressure beyond its weight
@@ -72,31 +41,9 @@ const FILM: f32 = 0.05;
 const BREAKS_AT: f32 = 0.6;
 const BREAKS_ON_AT: f32 = 0.3;
 const OVER: f32 = 1.0;
-const WALL: i32 = -1;
-
-fn count() -> u32 {
-    return shallows.size.x * shallows.size.y;
-}
-
-fn cell_of(thread: u32) -> vec2<i32> {
-    return vec2<i32>(i32(thread % shallows.size.x), i32(thread / shallows.size.x));
-}
-
-/// The slot of a cell, or WALL off the chart.
-fn slot(c: vec2<i32>) -> i32 {
-    let size = vec2<i32>(shallows.size);
-    var at = c;
-    if (shallows.wraps.x == 1u) {
-        at.x = (at.x % size.x + size.x) % size.x;
-    }
-    if (shallows.wraps.y == 1u) {
-        at.y = (at.y % size.y + size.y) % size.y;
-    }
-    if (at.x < 0 || at.x >= size.x || at.y < 0 || at.y >= size.y) {
-        return WALL;
-    }
-    return at.y * size.x + at.x;
-}
+// water a cell is owed beyond its face that a face could tell, which is given it though
+// nothing passes its faces
+const OWED_SHOWS: f32 = 1e-4;
 
 fn middle(c: vec2<i32>) -> vec2<f32> {
     return shallows.low + (vec2<f32>(c) + vec2(0.5)) * shallows.cell;
@@ -179,22 +126,29 @@ fn pressure_at(s: i32) -> f32 {
 /// water over ground left alone is left alone, to the last bit.
 @compute @workgroup_size(64)
 fn lay(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let ground = ground_bed(middle(cell_of(id.x)));
+    if (shallows.restoring == 1u) {
+        bed[id.x] = ground;
+        cells[id.x].face = max(cells[id.x].face, ground);
+        return;
+    }
     if (ground == bed[id.x]) {
         return;
     }
-    let held = max(ground_held(cells[id.x].face) - ground_held(bed[id.x]), 0.0);
+    let held = max(ground_held(cells[id.x].face) - ground_held(bed[id.x]), 0.0) + pressing[id.x].owed;
+    let now = stood(held, ground);
     bed[id.x] = ground;
-    cells[id.x].face = ground_raised(held + ground_held(ground));
+    cells[id.x].face = now.face;
+    pressing[id.x].owed = now.owed;
 }
 
 /// Stand the water to a level that may tilt along the chart, at rest.
 @compute @workgroup_size(64)
 fn stand(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let level = shallows.standing.x + dot(shallows.standing.yz, middle(cell_of(id.x)));
@@ -211,9 +165,30 @@ fn pour() {
         if (s == WALL) {
             continue;
         }
-        let held = ground_held(cells[s].face) - ground_held(bed[s]);
+        let held = ground_held(cells[s].face) - ground_held(bed[s]) + pressing[s].owed;
         let more = poured[k].z / (shallows.cell.x * shallows.cell.y);
-        cells[s].face = ground_raised(max(held + more, 0.0) + ground_held(bed[s]));
+        let now = stood(max(held + more, 0.0), bed[s]);
+        cells[s].face = now.face;
+        pressing[s].owed = now.owed;
+    }
+}
+
+/// The water a face stands for over a step, in depth: what of it stays, what comes to it, and
+/// the flow that comes with that.
+struct Carried {
+    kept: f32,
+    came: f32,
+    brought: f32,
+}
+
+/// One side of the water a face stands for lets this much into it a second, which comes with
+/// the flow of the face on that side, or lets it out.
+fn carry(water: ptr<function, Carried>, into: f32, theirs: f32) {
+    if (into > 0.0) {
+        (*water).came += shallows.dt * into;
+        (*water).brought += shallows.dt * into * theirs;
+    } else {
+        (*water).kept += shallows.dt * into;
     }
 }
 
@@ -240,20 +215,23 @@ fn push_face(c: vec2<i32>, axis: u32) -> vec2<f32> {
     let long = shallows.cell[axis] * stretch[axis];
     let wide = shallows.cell[other] * stretch[other];
 
-    // what the flow carries of itself along its own axis: through the middles of the two cells
-    let through_low = 0.5 * (passing(c - along, axis) + passing(c, axis));
-    let through_high = 0.5 * (passing(c, axis) + passing(c + along, axis));
-    let carried_low = select(flow, flow_at(c - along, axis), through_low > 0.0);
-    let carried_high = select(flow_at(c + along, axis), flow, through_high > 0.0);
-    var carrying = ((through_high * carried_high - through_low * carried_low)
-        - flow * (through_high - through_low)) / long;
-    // and across it: through the two corners the face ends in
-    let by_low = 0.5 * (passing(c - along, other) + passing(c, other));
-    let by_high = 0.5 * (passing(c - along + across, other) + passing(c + across, other));
-    let brought_low = select(flow, flow_at(c - across, axis), by_low > 0.0);
-    let brought_high = select(flow_at(c + across, axis), flow, by_high > 0.0);
-    carrying += ((by_high * brought_high - by_low * brought_low) - flow * (by_high - by_low)) / wide;
-    carrying /= between;
+    // what the flow carries of itself: the water the face stands for, half of each of the two
+    // cells, keeps what does not leave it through the middles of the cells and the two corners
+    // the face ends in, and takes up what comes in with the flow it comes with
+    var water = Carried(between, 0.0, 0.0);
+    let through_low = 0.5 * (passing(c - along, axis) + passing(c, axis)) / long;
+    let through_high = 0.5 * (passing(c, axis) + passing(c + along, axis)) / long;
+    let by_low = 0.5 * (passing(c - along, other) + passing(c, other)) / wide;
+    let by_high = 0.5 * (passing(c - along + across, other) + passing(c + across, other)) / wide;
+    carry(&water, through_low, flow_at(c - along, axis));
+    carry(&water, -through_high, flow_at(c + along, axis));
+    carry(&water, by_low, flow_at(c - across, axis));
+    carry(&water, -by_high, flow_at(c + across, axis));
+    let kept = max(water.kept, 0.0);
+    var carried = flow;
+    if (kept + water.came > DRY) {
+        carried = (kept * flow + water.brought) / (kept + water.came);
+    }
 
     // the flow across the face, and the climbing at it, as the cells round it have them
     let sideways = 0.25 * (flow_at(c, other) + flow_at(c + across, other)
@@ -264,7 +242,7 @@ fn push_face(c: vec2<i32>, axis: u32) -> vec2<f32> {
     moving[other] = sideways;
     let turning = ground_turning(at, moving);
     let weight = ground_weight(surface) - turning.z;
-    var next = flow - shallows.dt * (carrying + weight * (cells[high].face - cells[low].face) / long)
+    var next = carried - shallows.dt * weight * (cells[high].face - cells[low].face) / long
         + shallows.dt * turning[axis];
     next /= 1.0 + shallows.dt * shallows.bed_friction * length(vec2(flow, sideways)) / max(deep, 1e-3);
     return vec2(next, 1.0);
@@ -272,7 +250,7 @@ fn push_face(c: vec2<i32>, axis: u32) -> vec2<f32> {
 
 @compute @workgroup_size(64)
 fn push(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let c = cell_of(id.x);
@@ -313,7 +291,7 @@ fn climbing_at_bed(c: vec2<i32>, once_pushed: bool) -> f32 {
 /// its face's climbing takes up.
 @compute @workgroup_size(64)
 fn want(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let s = i32(id.x);
@@ -346,7 +324,7 @@ fn want(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 fn sweep(thread: u32, colour: i32) {
-    if (thread >= count()) {
+    if (thread >= cell_count()) {
         return;
     }
     let s = i32(thread);
@@ -387,7 +365,7 @@ fn sweep_black(@builtin(global_invocation_id) id: vec3<u32>) {
 /// The flows and the face's climbing give way to the pressure.
 @compute @workgroup_size(64)
 fn yield_to(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let s = i32(id.x);
@@ -417,10 +395,25 @@ fn yield_to(@builtin(global_invocation_id) id: vec3<u32>) {
     cells[s].climbing = climbing;
 }
 
+/// The water each row of the chart holds, for whoever reads the rows to sum them where a sum
+/// of so many keeps its figures.
+@compute @workgroup_size(64)
+fn measure(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= shallows.size.y) {
+        return;
+    }
+    var held = 0.0;
+    for (var x = 0u; x < shallows.size.x; x++) {
+        let s = id.x * shallows.size.x + x;
+        held += max(ground_held(cells[s].face) - ground_held(bed[s]), 0.0);
+    }
+    rows[id.x] = held * shallows.cell.x * shallows.cell.y;
+}
+
 /// No cell gives more than it holds: what its faces would take out of it is scaled to that.
 @compute @workgroup_size(64)
 fn share(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let s = i32(id.x);
@@ -456,7 +449,7 @@ fn passed(c: vec2<i32>, axis: u32) -> f32 {
 /// can carry it breaks, until it rises slowly again.
 @compute @workgroup_size(64)
 fn rise(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= count()) {
+    if (id.x >= cell_count()) {
         return;
     }
     let s = i32(id.x);
@@ -467,14 +460,15 @@ fn rise(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let was = cells[s].face;
     var face = was;
-    if (let_in != 0.0) {
-        let held = max(ground_held(was) - ground_held(bed[s]) + shallows.dt * let_in, 0.0);
-        face = ground_raised(held + ground_held(bed[s]));
+    if (let_in != 0.0 || abs(pressing[s].owed) > OWED_SHOWS) {
+        let held = ground_held(was) - ground_held(bed[s]) + pressing[s].owed + shallows.dt * let_in;
+        let now = stood(max(held, 0.0), bed[s]);
+        face = now.face;
+        pressing[s].owed = now.owed;
     }
     cells[s].face = face;
     let rising = (face - was) / shallows.dt;
     let wave = sqrt(ground_weight(face) * max(face - bed[s], DRY));
     let breaks = rising > BREAKS_AT * wave || (pressing[s].breaking != 0.0 && rising > BREAKS_ON_AT * wave);
     pressing[s].breaking = f32(breaks);
-    pressing[s].rising = rising;
 }

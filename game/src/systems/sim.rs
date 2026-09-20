@@ -22,9 +22,9 @@ use crate::core::fluid::{
 };
 use crate::core::math::{Quatd, Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
-use crate::core::shallows::{Shallows, ShallowsFrame, ShallowsReady};
+use crate::core::shallows::{FlyingWater, Shallows, ShallowsFrame, ShallowsReady};
 use crate::core::units::{
-    EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
+    EARTH_GRAVITY, Hertz, Litres, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
     RadiansPerSecond, RadiansPerSecondSquared, Seconds,
 };
 use crate::core::vessel::Vessel;
@@ -316,7 +316,7 @@ impl Simulation {
         let params = self.params.clone();
         let body_params = self.body_params.clone();
         let target = self.drum.target_spin;
-        let (site, water) = (self.drum.site, self.drum.water);
+        let (site, water, lying) = (self.drum.site, self.drum.water, self.drum.lying);
         let power = self.thrusters.power;
         let gyros = self.gyros;
         let avatar = std::mem::take(&mut self.bodies).swap_remove(0);
@@ -326,6 +326,7 @@ impl Simulation {
         self.drum.target_spin = target;
         self.drum.site = site;
         self.drum.water = water;
+        self.drum.lying = lying;
         self.thrusters.power = power;
         self.gyros = gyros;
         self.bodies[0] = avatar;
@@ -422,6 +423,11 @@ impl Simulation {
     }
 }
 
+/// How much water there is in the world: in flight, and lying on the ground.
+pub fn water_litres(fluid: &Fluid, shallows: &Shallows) -> Litres {
+    Litres(fluid.litres().0 + shallows.litres().0)
+}
+
 pub struct SimulationPlugin;
 
 impl Plugin for SimulationPlugin {
@@ -461,9 +467,19 @@ fn step(
         .iter()
         .map(|r| (r.dt, r.bodies.clone()))
         .collect();
-    *frame = fluid.frame(&sim.params, &substeps, &sim.drum.water_frame());
+    let wading = shallows.litres().0 > 0.0;
+    *frame = fluid.frame(&sim.params, &substeps, &sim.drum.water_frame(), wading);
+    if shallows.is_dry() {
+        sim.drum.settle_lying_water();
+    }
     let (chart, low) = sim.drum.ground_chart();
     shallows.chart(chart, BED_FRICTION);
     let steps: Vec<Seconds> = sim.substeps.iter().map(|r| r.dt).collect();
-    *shallows_frame = shallows.frame(&steps, low);
+    let resolution = fluid.resolution();
+    let flying = FlyingWater {
+        count: frame.surface.count,
+        volume: resolution.litres_per_particle(),
+        landing: Metres(0.75 * resolution.lattice().0),
+    };
+    *shallows_frame = shallows.frame(&steps, low, flying);
 }

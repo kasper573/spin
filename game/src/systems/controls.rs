@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::core::fluid::Fluid;
+use crate::core::shallows::Shallows;
 use crate::core::units::PixelsPerSecond;
 use crate::core::web;
 use crate::systems::aim::Aim;
@@ -59,14 +60,23 @@ impl ClearAction {
         }
     }
 
-    pub fn apply(self, settings: &mut Settings, sim: &mut Simulation, fluid: &mut Fluid) {
+    pub fn apply(
+        self,
+        settings: &mut Settings,
+        sim: &mut Simulation,
+        (fluid, shallows): (&mut Fluid, &mut Shallows),
+    ) {
         match self {
             ClearAction::ResetAll => {
                 *settings = Settings::default();
                 *sim = Simulation::default();
                 fluid.clear();
+                shallows.clear();
             }
-            ClearAction::ClearWater => fluid.clear(),
+            ClearAction::ClearWater => {
+                fluid.clear();
+                shallows.clear();
+            }
             ClearAction::ResetLandscape => sim.drum.landscape.flatten(GROUND_DEPTH),
         }
     }
@@ -168,7 +178,7 @@ fn keys(
     mut scroll: ResMut<AccumulatedMouseScroll>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
-    mut fluid: ResMut<Fluid>,
+    (mut fluid, mut shallows): (ResMut<Fluid>, ResMut<Shallows>),
 ) {
     if let Some(dial) = Dial::held(&keys) {
         if scroll.delta.y != 0.0 {
@@ -189,7 +199,7 @@ fn keys(
     if keys.pressed(ClearAction::CHORD) {
         for action in ClearAction::ALL {
             if keys.just_pressed(action.key()) {
-                action.apply(&mut settings, &mut sim, &mut fluid);
+                action.apply(&mut settings, &mut sim, (&mut fluid, &mut shallows));
                 keys.clear_just_pressed(action.key());
             }
         }

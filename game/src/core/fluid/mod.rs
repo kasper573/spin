@@ -34,7 +34,7 @@ mod resolution;
 mod surface;
 
 pub use frame::{Bodies, FluidFrame, GpuBodies, Params, Substep};
-pub use gpu::{FluidBuffers, FluidStep};
+pub use gpu::{FluidBuffers, FluidHulls, FluidPrepare, FluidStep};
 pub use resolution::{REST_DENSITY, Resolution, SPACINGS_FROM_ORIGIN, STEP_RATE, canonical};
 pub use surface::{
     GRID_REACH, MAX_BLOCKS, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, MAX_VERTICES, SurfaceBuffers,
@@ -216,6 +216,11 @@ pub struct Fluid {
     generations: Vec<(u32, Resolution)>,
     /// Whether a readback of the coupling is in flight.
     awaiting: bool,
+    /// Whether a telling-over of the water is in flight, and the last frame issued before the
+    /// count was last changed by anything but water joining it: a telling from no later than
+    /// that says nothing of the count there is now.
+    telling: bool,
+    recounted: u32,
     rng: Rng,
 }
 
@@ -266,6 +271,8 @@ impl Default for Fluid {
             timeline: Vec::new(),
             generations: vec![(0, Resolution::FINEST)],
             awaiting: false,
+            telling: false,
+            recounted: 0,
             rng: Rng::new(0x9E3779B97F4A7C15),
         }
     }
@@ -446,6 +453,7 @@ impl Fluid {
     /// Remove all water and take this resolution for what is added next, as when saved water
     /// is loaded back.
     pub fn restore(&mut self, resolution: Resolution) {
+        self.recounted = self.issued;
         self.count = 0;
         self.thin = None;
         self.pending.clear();
@@ -472,12 +480,15 @@ impl Fluid {
 
     /// What the GPU should run this frame: thin the water if it is due, append what joined,
     /// then step the substeps. Without water there is nothing to step, extract or read back,
-    /// and a frame that couples nothing counts as reported at once.
+    /// and a frame that couples nothing counts as reported at once; where the bodies are
+    /// `wading` in water that is not this water, the hulls are placed all the same, for that
+    /// water to say what it does to them where this water says it.
     pub fn frame(
         &mut self,
         params: &FluidParams,
         substeps: &[(Seconds, Bodies)],
         frame: &WaterFrame,
+        wading: bool,
     ) -> FluidFrame {
         let count_before = self.count - self.pending.len() as u32 - self.joining;
         let joined = count_before + self.pending.len() as u32;
@@ -499,7 +510,8 @@ impl Fluid {
             .collect::<Vec<_>>();
         self.issued = self.issued.wrapping_add(1);
         let ticket = self.issued;
-        let stepping = self.count > 0 && !substeps.is_empty();
+        let flying = self.count > 0;
+        let stepping = (flying || wading) && !substeps.is_empty();
         let seconds: f64 = substeps.iter().map(|(dt, _)| dt.0 as f64).sum();
         let coupling = stepping && substeps.iter().any(|(_, b)| b.sample_count > 0);
         if coupling {
@@ -543,7 +555,7 @@ impl Fluid {
             pending,
             sites,
             samples: self.samples.take(),
-            changed: self.changed || stepping,
+            changed: self.changed || (stepping && flying),
             coupling,
         };
         self.changed = false;
@@ -603,6 +615,19 @@ impl Fluid {
         self.snapshot.arrived >= ticket
     }
 
+    /// Bring the count down to the water there is, by a frame's telling-over of it: how many
+    /// particles it counted and how many of them were water still, the rest having been taken
+    /// out of the water on the GPU and sorted last, where the count is cut off.
+    fn told_over(&mut self, counted: u32, living: u32, ticket: u32) {
+        let stale = (ticket.wrapping_sub(self.recounted) as i32) <= 0;
+        if stale || living >= counted {
+            return;
+        }
+        self.count = self.count.saturating_sub(counted - living);
+        self.recounted = self.issued;
+        self.changed = true;
+    }
+
     /// How many frames the GPU has yet to report the coupling for.
     pub fn outstanding(&self) -> u32 {
         self.timeline.len() as u32
@@ -630,6 +655,7 @@ impl Fluid {
     /// Every particle stands for twice the water from now on: the GPU keeps every other one of
     /// those it has, and whatever is waiting to join them joins the rest.
     fn coarsen(&mut self) {
+        self.recounted = self.issued;
         let on_gpu = self.count - self.pending.len() as u32 - self.joining;
         // only water on the GPU is thinned there, which it can be once a frame
         if on_gpu > 0 {
@@ -774,7 +800,7 @@ impl Plugin for FluidPlugin {
                 ExtractResourcePlugin::<SurfaceParams>::default(),
             ))
             .add_systems(Startup, spawn_watcher)
-            .add_systems(PostUpdate, (watch_impulses, sync_surface))
+            .add_systems(PostUpdate, (watch_impulses, watch_living, sync_surface))
             .add_systems(Last, stop_rereading);
         let render_app = app.sub_app_mut(RenderApp);
         render_app.insert_resource(ready);
@@ -824,8 +850,36 @@ struct Issued;
 #[derive(Component)]
 struct CouplingWatcher;
 
+/// The entity whose readback brings back how much of what is counted is water still.
+#[derive(Component)]
+struct LivingWatcher;
+
 fn spawn_watcher(mut commands: Commands) {
     commands.spawn(CouplingWatcher).observe(receive_coupling);
+    commands.spawn(LivingWatcher).observe(receive_living);
+}
+
+/// Ask how much of what is counted is water still, one readback at a time, while there is any.
+fn watch_living(
+    mut commands: Commands,
+    buffers: Res<FluidBuffers>,
+    mut fluid: ResMut<Fluid>,
+    watcher: Single<Entity, With<LivingWatcher>>,
+) {
+    if !fluid.telling && fluid.count > 0 {
+        commands
+            .entity(*watcher)
+            .insert((Readback::buffer(buffers.living.clone()), ReadOnce));
+        fluid.telling = true;
+    }
+}
+
+fn receive_living(event: On<ReadbackComplete>, mut fluid: ResMut<Fluid>) {
+    fluid.telling = false;
+    let told: Vec<u32> = event.to_shader_type();
+    if let [counted, living, ticket, _] = told[..] {
+        fluid.told_over(counted, living, ticket);
+    }
 }
 
 /// Ask for the coupling while any frame's is still to come back, one readback at a time: the

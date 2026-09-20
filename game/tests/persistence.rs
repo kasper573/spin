@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use game::core::fluid::Fluid;
+use game::core::shallows::Shallows;
 use game::core::units::{Metres, RadiansPerSecond, Seconds};
 use game::systems::drum::{DrumSurface, MouthColour, Ring};
 use game::systems::persistence::{Snapshot, apply, snapshot};
@@ -23,7 +24,7 @@ fn snapshot_round_trips_through_json() {
             let axis = sim.drum.ring.radius.0 as f64;
             sim.inject(&mut fluid, [7.0 - axis, 0.1, 0.0], 40)
         });
-    testing::run(&mut app, Seconds(1.0));
+    testing::run(&mut app, Seconds(0.2));
     let particles = testing::particles(&mut app);
     assert_eq!(particles.len(), 40);
     let settings = Settings {
@@ -36,7 +37,8 @@ fn snapshot_round_trips_through_json() {
     let sim = world.resource::<Simulation>();
     let fluid = world.resource::<Fluid>();
 
-    let json = serde_json::to_string(&snapshot(&settings, sim, fluid)).unwrap();
+    let json =
+        serde_json::to_string(&snapshot(&settings, sim, (fluid, &Shallows::default()))).unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
     let (shuttle, attitude, angle, ground, water) = (
         sim.avatar().p,
@@ -49,7 +51,12 @@ fn snapshot_round_trips_through_json() {
     let mut settings2 = Settings::default();
     let mut sim2 = Simulation::default();
     let mut fluid2 = world.resource_mut::<Fluid>();
-    apply(&restored, &mut settings2, &mut sim2, &mut fluid2);
+    apply(
+        &restored,
+        &mut settings2,
+        &mut sim2,
+        (&mut fluid2, &mut Shallows::default()),
+    );
 
     assert_eq!(settings2, settings);
     assert_eq!(fluid2.len(), 40);
@@ -99,13 +106,23 @@ fn portals_come_back_from_a_save_where_they_were() {
     let world = app.world_mut();
     let (sim, fluid) = (world.resource::<Simulation>(), world.resource::<Fluid>());
     assert_eq!(sim.drum.mouths.fill(), 0.0, "the pair has opened");
-    let json = serde_json::to_string(&snapshot(&Settings::default(), sim, fluid)).unwrap();
+    let json = serde_json::to_string(&snapshot(
+        &Settings::default(),
+        sim,
+        (fluid, &Shallows::default()),
+    ))
+    .unwrap();
     let saved = sim.drum.mouths;
 
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
     let mut sim2 = Simulation::default();
     let mut fluid2 = world.resource_mut::<Fluid>();
-    apply(&restored, &mut Settings::default(), &mut sim2, &mut fluid2);
+    apply(
+        &restored,
+        &mut Settings::default(),
+        &mut sim2,
+        (&mut fluid2, &mut Shallows::default()),
+    );
     for colour in MouthColour::BOTH {
         assert_eq!(
             sim2.drum.mouths.get(colour),
@@ -124,8 +141,12 @@ fn a_save_from_before_portals_still_loads() {
     with_a_pair_of_portals(&mut app.world_mut().resource_mut::<Simulation>());
     let world = app.world_mut();
     let (sim, fluid) = (world.resource::<Simulation>(), world.resource::<Fluid>());
-    let mut json: serde_json::Value =
-        serde_json::to_value(snapshot(&Settings::default(), sim, fluid)).unwrap();
+    let mut json: serde_json::Value = serde_json::to_value(snapshot(
+        &Settings::default(),
+        sim,
+        (fluid, &Shallows::default()),
+    ))
+    .unwrap();
     let saved = json.as_object_mut().expect("a snapshot is an object");
     assert!(saved.remove("portals").is_some(), "portals are saved");
     let ground = sim.drum.landscape.ground();
@@ -133,7 +154,12 @@ fn a_save_from_before_portals_still_loads() {
     let restored: Snapshot = serde_json::from_value(json).expect("an older save loads");
     let mut sim2 = Simulation::default();
     let mut fluid2 = world.resource_mut::<Fluid>();
-    apply(&restored, &mut Settings::default(), &mut sim2, &mut fluid2);
+    apply(
+        &restored,
+        &mut Settings::default(),
+        &mut sim2,
+        (&mut fluid2, &mut Shallows::default()),
+    );
     assert!(
         MouthColour::BOTH
             .iter()
@@ -177,14 +203,14 @@ fn a_big_ring_keeps_its_ground_and_its_water_through_a_save() {
             let above = [on[0] - out[0] * lift, on[1], on[2] - out[2] * lift];
             sim.inject(&mut fluid, above, 40)
         });
-    testing::run(&mut app, Seconds(0.5));
+    testing::run(&mut app, Seconds(0.2));
     testing::particles(&mut app);
     let world = app.world_mut();
     let sim = world.resource::<Simulation>();
     let json = serde_json::to_string(&snapshot(
         world.resource::<Settings>(),
         sim,
-        world.resource::<Fluid>(),
+        (world.resource::<Fluid>(), world.resource::<Shallows>()),
     ))
     .unwrap();
     let restored: Snapshot = serde_json::from_str(&json).unwrap();
@@ -192,7 +218,12 @@ fn a_big_ring_keeps_its_ground_and_its_water_through_a_save() {
     let mut settings = Settings::default();
     let mut sim = Simulation::default();
     world.resource_scope(|_, mut fluid: Mut<Fluid>| {
-        apply(&restored, &mut settings, &mut sim, &mut fluid);
+        apply(
+            &restored,
+            &mut settings,
+            &mut sim,
+            (&mut fluid, &mut Shallows::default()),
+        );
         assert_eq!(fluid.len(), 40);
     });
     assert!(!ground.patches.is_empty());

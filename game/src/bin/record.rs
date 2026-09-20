@@ -19,6 +19,7 @@ use game::core::audio::{self, Fader, Placement, Voice};
 use game::core::avatar::{self, Gyros, TURN_RATE, Thruster};
 use game::core::fluid::Fluid;
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
+use game::core::shallows::Shallows;
 use game::core::units::{
     KilogramsPerCubicMetre, Litres, Metres, Pascals, Radians, RadiansPerSecond, Seconds,
 };
@@ -27,7 +28,7 @@ use game::systems::drum::{CapSide, DrumSurface, MouthColour, Place, Ring, Round}
 use game::systems::player::{PilotInput, Player};
 use game::systems::scene::{SUN_DIRECTION, Sky};
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::{Simulation, standing_spin};
+use game::systems::sim::{Simulation, standing_spin, water_litres};
 use game::systems::testing;
 use game::systems::tools::Toolbelt;
 
@@ -1736,6 +1737,7 @@ fn cue(app: &mut App, cue: Cue) {
             for k in 0..SEA_HEAPS {
                 app.world_mut()
                     .resource_scope(|world, mut fluid: Mut<Fluid>| {
+                        let there = water_litres(&fluid, world.resource::<Shallows>());
                         let mut sim = world.resource_mut::<Simulation>();
                         let turn = k as f64 / SEA_HEAPS as f64 * std::f64::consts::TAU;
                         let y = ((k % 5) as f64 - 2.0) * sim.drum.ring.half_width.0 as f64 * 0.4;
@@ -1746,7 +1748,7 @@ fn cue(app: &mut App, cue: Cue) {
                             on[1] - out[1] * HEAP_CLEARANCE,
                             on[2] - out[2] * HEAP_CLEARANCE,
                         ];
-                        let left = target.0 - fluid.litres().0;
+                        let left = target.0 - there.0;
                         let heap = left / (SEA_HEAPS - k) as f32;
                         let count = heap / fluid.resolution().litres_per_particle().0;
                         sim.inject(&mut fluid, centre, count.max(0.0).round() as u32)

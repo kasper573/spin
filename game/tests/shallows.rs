@@ -1,9 +1,11 @@
-//! The water that lies on the ground, held to what water does: a lake lies still, and a sway
-//! has the time its length and depth give a wave and keeps its height.
+//! The water that lies on the ground, held to what water does: a lake lies still, a sway has
+//! the time its length and depth give a wave and keeps its height, and water poured out of the
+//! air comes to lie on the ground with none of it lost.
 
 use bevy::prelude::*;
+use game::core::fluid::Fluid;
 use game::core::shallows::Shallows;
-use game::core::units::{Metres, Seconds};
+use game::core::units::{Litres, Metres, Seconds};
 use game::systems::drum::Ring;
 use game::systems::settings::Settings;
 use game::systems::sim::{Simulation, standing_spin};
@@ -147,4 +149,132 @@ fn water_sways_between_the_ends_as_a_standing_wave() {
         kept > 0.985 && kept < 1.0 + 1e-3,
         "the sway kept {kept:.4} of its height over a sway: {lows:?}"
     );
+}
+
+/// Water let go in the air falls as water in flight and, come down, lies on the ground as the
+/// ground's water: none of it is left in flight, and all of it lies there.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_poured_out_of_the_air_comes_to_lie_on_the_ground() {
+    let ring = Ring {
+        radius: Metres(30.0),
+        half_width: Metres(8.0),
+    };
+    let mut app = ring_with_ground(ring);
+    let poured = app
+        .world_mut()
+        .resource_scope(|world, mut fluid: Mut<Fluid>| {
+            let mut sim = world.resource_mut::<Simulation>();
+            let above = sim.drum.wall_point(0.0, 0.0);
+            let above = [above[0] - GROUND as f64 - 3.0, above[1], above[2]];
+            let particles = sim.inject(&mut fluid, above, 2000);
+            particles as f64 * fluid.resolution().litres_per_particle().0 as f64 / 1000.0
+        });
+    assert!(poured > 1.0, "{poured} cubic metres were poured");
+    testing::run(&mut app, Seconds(8.0));
+
+    let flying = testing::particles(&mut app).len();
+    assert_eq!(
+        flying, 0,
+        "particles are in flight still, where all the water was to have come down"
+    );
+    let lying = cubic_metres_lying(&mut app, ring);
+    let particle = poured / 2000.0;
+    assert!(
+        (lying - poured).abs() < particle,
+        "{lying:.4} cubic metres lie on the ground of the {poured:.4} poured"
+    );
+}
+
+/// A heap poured where the chart of the ground closes on itself spreads both ways round the
+/// ring, and all the while is as much water as was poured.
+#[test]
+#[ignore = "wants a GPU"]
+fn a_heap_spreading_round_the_ring_is_neither_made_nor_lost() {
+    let ring = Ring {
+        radius: Metres(30.0),
+        half_width: Metres(8.0),
+    };
+    let mut app = ring_with_ground(ring);
+    let seam = app.world().resource::<Simulation>().drum.ground_chart().1[0];
+    let mut poured = 0.0;
+    for burst in 0..10 {
+        let mut shallows = app.world_mut().resource_mut::<Shallows>();
+        for k in 0..200 {
+            let n = (burst * 200 + k) as f64;
+            let spread = |turn: f64| ((n * turn) % 1.0 - 0.5) * 4.0;
+            shallows.pour([seam + spread(0.618034), spread(0.754878)], Litres(30.0));
+            poured += 0.03;
+        }
+        testing::run(&mut app, Seconds(0.1));
+    }
+    for _ in 0..4 {
+        testing::run(&mut app, Seconds(1.0));
+        let lying = cubic_metres_lying(&mut app, ring);
+        assert!(
+            (lying / poured - 1.0).abs() < 1e-5,
+            "{lying:.4} cubic metres lie on the ground of the {poured:.4} poured"
+        );
+    }
+    let water = testing::ground_water(&mut app);
+    let wet = water.iter().filter(|(cell, bed)| cell.face > *bed).count();
+    assert!(wet > 4000, "the heap spread over {wet} cells only");
+}
+
+/// Water poured on the top of a hill runs down it all round, and all the while is as much
+/// water as was poured.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_running_down_a_hill_is_neither_made_nor_lost() {
+    let ring = Ring {
+        radius: Metres(10.5),
+        half_width: Metres(6.0),
+    };
+    let mut app = ring_with_ground(ring);
+    let at = {
+        let mut sim = app.world_mut().resource_mut::<Simulation>();
+        let top = sim.drum.wall_point(0.1, 1.0);
+        sim.drum.sculpt(top, 5.0, 2.0);
+        let top = sim.drum.to_water(top);
+        let radius = ring.radius.0 as f64;
+        [radius * top[2].atan2(radius + top[0]), top[1]]
+    };
+    testing::run(&mut app, Seconds(0.2));
+    for burst in 0..20 {
+        let mut shallows = app.world_mut().resource_mut::<Shallows>();
+        for k in 0..10 {
+            let n = (burst * 10 + k) as f64;
+            let spread = |turn: f64| ((n * turn) % 1.0 - 0.5) * 2.0;
+            shallows.pour(
+                [at[0] + spread(0.618034), at[1] + spread(0.754878)],
+                Litres(50.0),
+            );
+        }
+        testing::run(&mut app, Seconds(0.05));
+    }
+    for _ in 0..6 {
+        testing::run(&mut app, Seconds(1.0));
+        let lying = cubic_metres_lying(&mut app, ring);
+        assert!(
+            (lying / 10.0 - 1.0).abs() < 1e-5,
+            "{lying:.4} cubic metres lie on the ground of the 10 poured"
+        );
+    }
+}
+
+/// The water lying on the ground, by the chart's cells: a cell holds less the higher it is
+/// taken, the ring being shorter round the nearer its axis.
+fn cubic_metres_lying(app: &mut testing::Headless, ring: Ring) -> f64 {
+    let chart = app
+        .world()
+        .resource::<Shallows>()
+        .charted()
+        .expect("a chart");
+    let radius = ring.radius.0 as f64;
+    let held = |height: f64| height - height * height / (2.0 * radius);
+    let area = chart.cell[0].0 as f64 * chart.cell[1].0 as f64;
+    testing::ground_water(app)
+        .iter()
+        .map(|(cell, bed)| (held(cell.face as f64) - held(*bed as f64)).max(0.0) * area)
+        .sum()
 }

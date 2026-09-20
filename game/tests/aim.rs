@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use game::core::avatar::{self, Gyros};
 use game::core::fluid::{Fluid, Resolution};
 use game::core::math::{mat3mul, quat_mul};
+use game::core::shallows::Shallows;
 use game::core::units::{Metres, Seconds};
 use game::systems::aim::{self, Aim, AimPoint};
 use game::systems::drum::Ring;
@@ -12,7 +13,7 @@ use game::systems::player::PlayerCamera;
 use game::systems::scene::Viewpoint;
 use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
-use game::systems::sim::standing_spin;
+use game::systems::sim::{standing_spin, water_litres};
 use game::systems::testing;
 use game::systems::tools::land_tool::brush;
 use game::systems::tools::water_tool::INJECT_DEPTH;
@@ -239,11 +240,16 @@ fn the_crosshair_works_the_ground_alike_on_a_ring_of_any_size() {
         testing::button(&mut app, MouseButton::Left, true);
         testing::run(&mut app, Seconds(0.5));
         testing::button(&mut app, MouseButton::Left, false);
-        let added = app.world().resource::<Fluid>().len() as u32;
+        testing::run(&mut app, Seconds(2.0));
+        let litres = water_litres(
+            app.world().resource::<Fluid>(),
+            app.world().resource::<Shallows>(),
+        );
+        let added = (litres.0 / Resolution::FINEST.litres_per_particle().0).round() as u32;
         testing::run(&mut app, Seconds(frame));
         assert!(
             added.abs_diff(count) <= 1,
-            "on a ring of radius {radius} m half a second of the hose put down {added} particles, not {count}"
+            "on a ring of radius {radius} m half a second of the hose put down {added} particles' worth of water, not {count}"
         );
         assert_eq!(
             app.world().resource::<Fluid>().resolution(),

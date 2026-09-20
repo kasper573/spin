@@ -32,6 +32,9 @@
 // six to a particle: see `grid.wgsl`
 @group(0) @binding(15) var<storage, read_write> affine: array<vec4<f32>>;
 @group(0) @binding(16) var<storage, read_write> affine_sorted: array<vec4<f32>>;
+// how many particles were counted when last the water was told over and how many of them were
+// water still, then the ticket of the frame that told them, which the frame itself stamps
+@group(0) @binding(17) var<storage, read_write> living: array<u32>;
 
 @group(2) @binding(0) var<uniform> bodies: Bodies;
 @group(2) @binding(2) var<storage, read> boundary: array<Boundary>;
@@ -142,6 +145,17 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     position_sorted[dest] = position[i];
     velocity_next[dest] = velocity[i];
     key[dest] = s.z;
+}
+
+/// Tell over the water once it is sorted: what was counted and what of it is water still, the
+/// two of one sort, for the count to be brought down by what lies between them; and the frame
+/// the sort was of, which the last word is kept at, so that a frame that sorts nothing tells
+/// nothing over again as its own.
+@compute @workgroup_size(1)
+fn tally() {
+    living[0] = params.count;
+    living[1] = cell_start[params.cells];
+    living[2] = living[3];
 }
 
 /// Behind the water the sort put first lies what it left out: mark it so.

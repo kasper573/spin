@@ -29,10 +29,11 @@ use bevy::shader::{Shader, ShaderRef};
 use crate::core::avatar;
 use crate::core::fluid::Fluid;
 use crate::core::math::{Quatd, Vec3d};
+use crate::core::shallows::Shallows;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::{Drum, Ring, Site, SiteFrame, bed_albedo, slack};
 use crate::systems::player::PlayerCamera;
-use crate::systems::sim::{SimSet, Simulation};
+use crate::systems::sim::{SimSet, Simulation, water_litres};
 use crate::systems::water;
 
 /// Where the sun is among the stars.
@@ -266,10 +267,11 @@ fn lines_seen_from(seen: SeenFrom) -> GizmoConfig {
 fn bounce(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
+    shallows: Res<Shallows>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut last: Local<Option<(u64, f32)>>,
 ) {
-    let litres = fluid.litres().0;
+    let litres = water_litres(&fluid, &shallows).0;
     let asked = (sim.drum.landscape.version(), litres);
     if *last == Some(asked) {
         return;
