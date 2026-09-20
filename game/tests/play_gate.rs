@@ -25,6 +25,8 @@ const WIDTH: u32 = 3840;
 const HEIGHT: u32 = 2160;
 /// Frames are timed so many at a time, and the last of them is kept and the water measured.
 const KEPT_EVERY: u32 = 10;
+/// How many runs of passes a frame bevy's render diagnostics keep the GPU's time of.
+const TIMED_RUNS_KEPT: u32 = 128;
 /// The slowest the game may run.
 const FRAME_BUDGET_MS: f64 = 1000.0 / 120.0;
 const WATER_TOOL: usize = 0;
@@ -89,13 +91,16 @@ enum Seat {
 
 struct Measured {
     frame_ms: Vec<f64>,
+    /// How much of a frame's time the CPU took to issue it, the GPU being waited for after.
+    issuing_ms: Vec<f64>,
     broken_vertices: usize,
     stray_vertices: usize,
     most_vertices: usize,
     poured_m3: f64,
     water_m3: Vec<f64>,
-    /// What the GPU spent on each of its passes, in milliseconds a frame, the most first.
-    gpu_ms: Vec<(String, f64)>,
+    /// What the GPU spent on each of its passes, in milliseconds a frame and in so many runs
+    /// of the pass a frame, the most first.
+    gpu_ms: Vec<(String, f64, f64)>,
 }
 
 fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Measured {
@@ -142,6 +147,7 @@ fn play_in(
 
     let mut measured = Measured {
         frame_ms: Vec::new(),
+        issuing_ms: Vec::new(),
         broken_vertices: 0,
         stray_vertices: 0,
         most_vertices: 0,
@@ -186,10 +192,12 @@ fn play_in(
             if frame.is_multiple_of(KEPT_EVERY) {
                 // the frames run as the game runs them, one issued after the other, and the
                 // GPU is waited for only here, so that what they cost it is in their time
-                testing::settle(&mut app);
-                testing::wait_for_gpu(&mut app);
+                let issued = started.elapsed().as_secs_f64() * 1000.0 / KEPT_EVERY as f64;
+                testing::wait_for_gpu(&app);
                 let each = started.elapsed().as_secs_f64() * 1000.0 / KEPT_EVERY as f64;
                 measured.frame_ms.push(each);
+                measured.issuing_ms.push(issued);
+                testing::settle(&mut app);
                 let pixels = testing::capture(&mut app, &image);
                 keep(&mut app, &pixels, &out, frame, &mut measured);
             }
@@ -200,7 +208,10 @@ fn play_in(
         .resource::<DiagnosticsStore>()
         .iter()
         .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
-        .filter_map(|d| Some((d.path().as_str().to_owned(), each_frame(d)?)))
+        .filter_map(|d| {
+            let (ms, runs) = each_frame(d)?;
+            Some((d.path().as_str().to_owned(), ms, runs))
+        })
         .collect();
     measured.gpu_ms.sort_by(|a, b| b.1.total_cmp(&a.1));
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
@@ -208,21 +219,33 @@ fn play_in(
     measured
 }
 
+fn by_the_second(kept: &[f64]) -> String {
+    let every = (FPS / KEPT_EVERY) as usize;
+    let each: Vec<String> = kept
+        .iter()
+        .step_by(every)
+        .map(|v| format!("{v:.1}"))
+        .collect();
+    each.join(" ")
+}
+
 /// What a pass cost the GPU a frame, in milliseconds. A pass that runs more than once a frame,
 /// for every substep of the water or for every camera, reports each run on its own, all of a
 /// frame's within a moment of each other: they are summed frame by frame.
-fn each_frame(pass: &Diagnostic) -> Option<f64> {
+fn each_frame(pass: &Diagnostic) -> Option<(f64, f64)> {
     let mut frames = 0u32;
+    let mut runs = 0u32;
     let mut total = 0.0;
     let mut last = None;
     for run in pass.measurements() {
+        runs += 1;
         if last.is_none_or(|last| run.time.duration_since(last).as_secs_f64() > 5e-4) {
             frames += 1;
         }
         last = Some(run.time);
         total += run.value;
     }
-    (frames > 0).then(|| total / frames as f64)
+    (frames > 0).then(|| (total / frames as f64, runs as f64 / frames as f64))
 }
 
 fn keep(app: &mut App, pixels: &[u8], out: &std::path::Path, frame: u32, measured: &mut Measured) {
@@ -267,28 +290,28 @@ impl Measured {
     }
 
     fn report(&self, scene: &str) -> String {
-        let water: Vec<String> = self
-            .water_m3
-            .iter()
-            .step_by(6)
-            .map(|m3| format!("{m3:.1}"))
-            .collect();
         format!(
-            "GATE {scene}: frame ms p50 {:.1} p95 {:.1} worst {:.1} | poured {:.1} m3, water by the second: {} | vertices at most {}, broken {}, stray {}",
+            "GATE {scene}: frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {} | vertices at most {}, broken {}, stray {}",
             self.percentile(0.5),
             self.percentile(0.95),
             self.percentile(1.0),
+            by_the_second(&self.frame_ms),
+            by_the_second(&self.issuing_ms),
             self.poured_m3,
-            water.join(" "),
+            by_the_second(&self.water_m3),
             self.most_vertices,
             self.broken_vertices,
             self.stray_vertices,
         ) + &self
             .gpu_ms
             .iter()
-            .filter(|(_, ms)| *ms >= 0.1)
-            .map(|(path, ms)| format!("\n    {ms:6.2} ms  {path}"))
+            .filter(|(_, ms, _)| *ms >= 0.1)
+            .map(|(path, ms, runs)| format!("\n    {ms:6.2} ms in {runs:4.1} runs  {path}"))
             .collect::<String>()
+            + &format!(
+                "\n    {:.0} timed runs a frame, of the {TIMED_RUNS_KEPT} the GPU's clock keeps: past that, runs go untimed",
+                self.gpu_ms.iter().map(|(_, _, runs)| runs).sum::<f64>()
+            )
     }
 
     /// What a player would hold the scene to, beside what the frames show.
@@ -387,6 +410,19 @@ fn a_stream_poured_into_a_portal_in_the_ground() {
         Stretch::idle(4.0),
     ];
     play("portals", Seat::Body, 50_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_portal_pair_opened_in_a_dry_ring() {
+    let scene = [
+        Stretch::flying(0.35, Thruster::PitchDown).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Left),
+        Stretch::flying(0.7, Thruster::YawLeft).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Right),
+        Stretch::idle(4.0),
+    ];
+    play("dry_portals", Seat::Body, 0.0, &scene).hold();
 }
 
 #[test]

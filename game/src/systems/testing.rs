@@ -13,9 +13,10 @@ use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{
-    CachedPipelineState, Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureUsages,
+    CachedPipelineState, Extent3d, PipelineCache, PollType, TextureDimension, TextureFormat,
+    TextureUsages,
 };
-use bevy::render::renderer::initialize_renderer;
+use bevy::render::renderer::{RenderDevice, initialize_renderer};
 use bevy::render::settings::{Backends, RenderCreation, RenderResources, WgpuSettings};
 use bevy::render::storage::ShaderBuffer;
 use bevy::time::TimeSystems;
@@ -629,16 +630,13 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
 #[derive(Resource, Default)]
 struct ReadResult(Option<Vec<u8>>);
 
-/// Wait until the GPU has done all it has been asked, by reading a few bytes back from it,
-/// which it cannot hand over before.
-pub fn wait_for_gpu(app: &mut App) {
-    let counters = app
-        .world()
-        .resource::<FluidBuffers>()
-        .surface
-        .counters
-        .clone();
-    read_u32s(app, counters);
+/// Wait until the GPU has done all it was sent, without sending it anything more: what the
+/// frames before cost it is then all in the time they took.
+pub fn wait_for_gpu(app: &App) {
+    app.world()
+        .resource::<RenderDevice>()
+        .poll(PollType::wait_indefinitely())
+        .expect("the GPU finishes what it was sent");
 }
 
 fn read_u32s(app: &mut App, buffer: Handle<ShaderBuffer>) -> Vec<u32> {
