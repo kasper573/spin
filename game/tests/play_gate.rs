@@ -20,7 +20,7 @@ use game::systems::tools::Toolbelt;
 const FPS: u32 = 60;
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
-/// A frame is kept every so many, and the water is measured then too, outside the frame's time.
+/// Frames are timed so many at a time, and the last of them is kept and the water measured.
 const KEPT_EVERY: u32 = 10;
 /// The slowest the game may run.
 const FRAME_BUDGET_MS: f64 = 1000.0 / 120.0;
@@ -110,6 +110,7 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
     };
     let mut pouring = false;
     let mut frame = 0u32;
+    let mut started = Instant::now();
     for stretch in stretches {
         if stretch.pouring != pouring {
             testing::button(&mut app, MouseButton::Left, stretch.pouring);
@@ -120,18 +121,22 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
             let player = *app.world().resource::<Player>();
             app.world_mut().resource_mut::<Simulation>().avatar_input =
                 player.input(PilotInput::firing(&held));
-            let started = Instant::now();
-            testing::watch(&mut app, Seconds(1.0 / FPS as f32));
-            measured
-                .frame_ms
-                .push(started.elapsed().as_secs_f64() * 1000.0);
+            if frame.is_multiple_of(KEPT_EVERY) {
+                started = Instant::now();
+            }
+            testing::frame(&mut app, Seconds(1.0 / FPS as f32));
             if pouring {
                 measured.poured_m3 += litres_per_second as f64 / 1000.0 / FPS as f64;
             }
+            frame += 1;
             if frame.is_multiple_of(KEPT_EVERY) {
+                // the frames run as the game runs them, one issued after the other, and the
+                // GPU is waited for only here, so that what they cost it is in their time
+                testing::settle(&mut app);
+                let each = started.elapsed().as_secs_f64() * 1000.0 / KEPT_EVERY as f64;
+                measured.frame_ms.push(each);
                 keep(&mut app, &image, &out, frame, &mut measured);
             }
-            frame += 1;
         }
     }
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");

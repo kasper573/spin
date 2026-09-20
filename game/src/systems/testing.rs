@@ -459,6 +459,14 @@ pub fn watch(app: &mut App, seconds: Seconds) {
     watching(app, false);
 }
 
+/// Draw one frame of this much simulated time without waiting for the water's report on it,
+/// as the game itself runs its frames.
+pub fn frame(app: &mut App, seconds: Seconds) {
+    watching(app, true);
+    step(app, seconds);
+    watching(app, false);
+}
+
 fn advance(app: &mut App, seconds: Seconds) {
     let longest = SUBSTEP_RATE.period().0 * MAX_SUBSTEPS_PER_FRAME as f32;
     let mut left = seconds.0;
