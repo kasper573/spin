@@ -45,12 +45,13 @@
 @group(2) @binding(0) var<uniform> bodies: Bodies;
 
 @group(3) @binding(1) var<storage, read_write> grid_keys: array<atomic<u32>>;
+// the cells there are, and from halfway on those of them with the water's face by a solid
 @group(3) @binding(2) var<storage, read_write> grid_list: array<u32>;
-// how many cells are listed
+// how many cells are listed, and how many of them by a shore
 @group(3) @binding(3) var<storage, read_write> grid_counters: array<atomic<u32>>;
 @group(3) @binding(4) var<storage, read_write> cells: array<Cell>;
 @group(3) @binding(5) var<storage, read_write> links: array<Link>;
-// the workgroups that visit the listed cells
+// the workgroups that visit the listed cells, then those that visit the ones by a shore
 @group(3) @binding(6) var<storage, read_write> grid_dispatch: array<u32>;
 
 struct Cell {
@@ -112,6 +113,14 @@ const FULL_BELOW: f32 = 0.8;
 // times how the reach thins out toward its end
 const GAUSS_POINT: array<f32, 3> = array<f32, 3>(0.11270167, 0.5, 0.88729833);
 const GAUSS_WEIGHT: array<f32, 3> = array<f32, 3>(0.24647176, 0.22222222, 0.03130602);
+// Gauss's two points on the half of a cell's reach from its middle out, and their weights
+// times how the reach thins out toward its end
+const LINE_AT: array<f32, 2> = array<f32, 2>(0.21132487, 0.78867513);
+const LINE_WEIGHT: array<f32, 2> = array<f32, 2>(0.39433757, 0.10566243);
+// the lines through a cell's reach that those points make, four by four
+const LINES: u32 = 16u;
+// how many of Newton's steps put the water's face where a column's water fills it to
+const NEWTON_STEPS: u32 = 8u;
 // the share of what a cell holds over or under its fill that is shifted out of it or into
 // it in a step: all of it at once would shift the water by every bit of chance in how its
 // particles lie
@@ -260,6 +269,14 @@ fn muster() {
     grid_dispatch[2] = 1u;
 }
 
+@compute @workgroup_size(1)
+fn muster_shores() {
+    let count = atomicLoad(&grid_counters[1]);
+    grid_dispatch[4] = (count + WORKGROUP - 1u) / WORKGROUP;
+    grid_dispatch[5] = 1u;
+    grid_dispatch[6] = 1u;
+}
+
 /// The listed cell a thread visits: where it is kept and which it is, or none.
 struct Visit {
     slot: u32,
@@ -268,10 +285,19 @@ struct Visit {
 }
 
 fn visit(thread: u32) -> Visit {
-    if (thread >= atomicLoad(&grid_counters[0])) {
+    return visit_listed(thread, 0u);
+}
+
+/// The cell by a shore that a thread visits.
+fn visit_shore(thread: u32) -> Visit {
+    return visit_listed(thread, 1u);
+}
+
+fn visit_listed(thread: u32, list: u32) -> Visit {
+    if (thread >= atomicLoad(&grid_counters[list])) {
         return Visit(0u, vec3(0), false);
     }
-    let slot = grid_list[thread];
+    let slot = grid_list[list * (arrayLength(&grid_list) / 2u) + thread];
     return Visit(slot, grid_coords(atomicLoad(&grid_keys[slot])), true);
 }
 
@@ -708,6 +734,37 @@ fn water_in(slot: u32) -> f32 {
     return cells[slot].flow.w;
 }
 
+/// The column of five cells about a cell along an axis, from the origin's end on: where each
+/// is kept, how much of each is taken up, and which way along the axis the air lies.
+struct Column {
+    cells: array<u32, 5>,
+    taken: array<f32, 5>,
+    air_is_up: bool,
+}
+
+fn column_about(at: Visit, axis: u32) -> Column {
+    var e = vec3(0);
+    e[axis] = 1;
+    var column: Column;
+    for (var k = 0u; k < 5u; k++) {
+        let c = at.c + (i32(k) - 2) * e;
+        column.cells[k] = select(find(c), at.slot, k == 2u);
+        column.taken[k] = taken_up(column.cells[k], c);
+    }
+    let rise = column.taken[3] - column.taken[1];
+    // deep in the water nothing rises either way but by chance, and the face is taken to lie
+    // as it does over water at rest, across the way things fall
+    let weight = vessel_gravity((vec3<f32>(at.c) + vec3(0.5)) * params.h);
+    column.air_is_up = select(rise <= 0.0, weight[axis] < 0.0, abs(rise) < BY_CHANCE);
+    return column;
+}
+
+/// Whether a cell is the water's: its middle is under the water's face, and what the solids
+/// leave of it is half full.
+fn under_the_face(slot: u32, depth: f32) -> bool {
+    return depth >= 0.0 && cells[slot].flow.w >= HALF_FULL * (1.0 - cells[slot].filled.w);
+}
+
 /// Find the cells round a cell, and how far under the water's face its middle is: along each
 /// axis, the column of five cells about it says how high the water stands in that column, so
 /// long as the column stands on water or on a solid. Where it does not, as in a drop or a
@@ -715,9 +772,8 @@ fn water_in(slot: u32) -> f32 {
 ///
 /// What is taken up of the cells of a column, by water and by solids alike, sums to how high
 /// the water stands only if every solid in it is under the water's face. Ground that rises
-/// out of the water and a wall beside it are not, so along the axis the face lies most
-/// squarely across, where solids are within the cell's reach, the face is put where the
-/// water of the column fills what the solids leave under it.
+/// out of the water and a wall beside it are not: the cells with such a column are listed as
+/// by a shore, for `level_shores` to put right.
 @compute @workgroup_size(64)
 fn level(@builtin(global_invocation_id) id: vec3<u32>) {
     let at = visit(id.x);
@@ -736,52 +792,103 @@ fn level(@builtin(global_invocation_id) id: vec3<u32>) {
     var squarest = 0u;
     var air_is_up = true;
     var told = 0u;
+    var by_a_shore = false;
     let weight = vessel_gravity((vec3<f32>(at.c) + vec3(0.5)) * params.h);
     let falling = weight / max(length(weight), 1e-9);
     for (var axis = 0u; axis < 3u; axis++) {
-        var e = vec3(0);
-        e[axis] = 1;
-        let lo = link.to[2u * axis];
-        let hi = link.to[2u * axis + 1u];
-        let before = taken_up(lo, at.c - e);
-        let after = taken_up(hi, at.c + e);
-        let rise = after - before;
-        let far_lo = find(at.c - 2 * e);
-        let far_hi = find(at.c + 2 * e);
-        let first = taken_up(far_lo, at.c - 2 * e);
-        let last = taken_up(far_hi, at.c + 2 * e);
-        // deep in the water nothing rises either way but by chance, and the face is taken to
-        // lie as it does over water at rest, across the way things fall
-        let air_this_way = select(rise <= 0.0, falling[axis] < 0.0, abs(rise) < BY_CHANCE);
-        let below = select(last, first, air_this_way);
-        if (below >= FULL_BELOW) {
-            depths[axis] = first + before + me.filled.x + after + last - 2.5;
+        let column = column_about(at, axis);
+        let taken = column.taken;
+        if (select(taken[4], taken[0], column.air_is_up) >= FULL_BELOW) {
+            depths[axis] = taken[0] + taken[1] + taken[2] + taken[3] + taken[4] - 2.5;
             told |= TOLD_ALONG << axis;
-            // a column that is full from end to end, or empty, has no face in it to put right
-            if (me.filled.w > 0.0 && abs(depths[axis]) < FACE_IN_THE_COLUMN) {
-                let face = FaceAcross(axis, select(1.0, -1.0, air_this_way), depths[axis], vec2(0.0));
-                depths[axis] = face_holding(at.c, array<u32, 5>(far_lo, lo, at.slot, hi, far_hi), face);
+            if (!by_a_shore && face_by_a_solid(me, depths[axis])) {
+                let face = FaceAcross(axis, select(1.0, -1.0, column.air_is_up), depths[axis], vec2(0.0));
+                by_a_shore = solids_over(at.c, column.cells, face);
             }
         } else {
             depths[axis] = depth_filling(min(me.flow.w / max(1.0 - me.filled.w, LEAST_BESIDE), 1.0));
         }
-        let steepness = abs(rise) + BY_CHANCE * abs(falling[axis]);
+        let steepness = abs(taken[3] - taken[1]) + BY_CHANCE * abs(falling[axis]);
         if (steepness > steepest) {
             steepest = steepness;
             squarest = axis;
-            air_is_up = air_this_way;
+            air_is_up = column.air_is_up;
         }
     }
-    // a cell is the water's when its middle is under the water's face
     var marks = squarest | told;
     if (air_is_up) {
         marks |= AIR_IS_UP;
     }
-    if (depths[squarest] >= 0.0 && me.flow.w >= HALF_FULL * (1.0 - me.filled.w)) {
+    if (under_the_face(at.slot, depths[squarest])) {
         marks |= IS_WATER;
     }
     cells[at.slot].level = vec4(depths, f32(marks));
     cells[at.slot].open.w = 0.0;
+    if (by_a_shore) {
+        grid_list[arrayLength(&grid_list) / 2u + atomicAdd(&grid_counters[1], 1u)] = at.slot;
+    }
+}
+
+/// Whether a column that told a cell's depth has the water's face in it, and not only water
+/// or only air from end to end, where the cell has solids within its reach.
+fn face_by_a_solid(cell: Cell, depth: f32) -> bool {
+    return cell.filled.w > 0.0 && abs(depth) < FACE_IN_THE_COLUMN;
+}
+
+/// Whether any solid in a column of cells stands over the water's face, anywhere the lines
+/// that `share_along` sums run: what the column's cells have taken up then sums to something
+/// other than how high the water stands.
+fn solids_over(c: vec3<i32>, column: array<u32, 5>, across: FaceAcross) -> bool {
+    for (var k = 0u; k < 5u; k++) {
+        let slot = column[k];
+        if (slot == NONE || cells[slot].filled.w == 0.0) {
+            continue;
+        }
+        var e = vec3(0);
+        e[across.axis] = i32(k) - 2;
+        let solids = solids_of(slot, c + e);
+        let under_this = across.under + across.deeper * (f32(k) - 2.0);
+        for (var s = 0u; s < 3u; s++) {
+            if (solids[s].clear >= SOLID_REACH) {
+                continue;
+            }
+            let n = solids[s].normal;
+            let clearing = -across.deeper * n[across.axis];
+            if (clearing < RUNS_ALONG) {
+                return true;
+            }
+            let furthest = LINE_AT[1] * (abs(n[(across.axis + 1u) % 3u]) + abs(n[(across.axis + 2u) % 3u]));
+            if (min((furthest - solids[s].clear) / clearing, 1.0) > under_this) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Put the water's face, for the cells by a shore, where the water of each column that told
+/// of it fills what the solids leave under it.
+@compute @workgroup_size(64)
+fn level_shores(@builtin(global_invocation_id) id: vec3<u32>) {
+    let at = visit_shore(id.x);
+    if (!at.there) {
+        return;
+    }
+    let me = cells[at.slot];
+    var level = me.level;
+    for (var axis = 0u; axis < 3u; axis++) {
+        if (!told_along(level, axis) || !face_by_a_solid(me, level[axis])) {
+            continue;
+        }
+        let column = column_about(at, axis);
+        let face = FaceAcross(axis, select(1.0, -1.0, column.air_is_up), level[axis], vec2(0.0));
+        level[axis] = face_holding(at.c, column.cells, face);
+    }
+    var marks = u32(level.w) & ~IS_WATER;
+    if (under_the_face(at.slot, level[squarest_of(level)])) {
+        marks |= IS_WATER;
+    }
+    cells[at.slot].level = vec4(level.xyz, f32(marks));
 }
 
 /// Which of a cell's faces the water flows through, those with water to either side of them
@@ -1045,69 +1152,120 @@ fn waters_stretch(face: FaceAcross, beside: vec2<f32>, solids: array<Solid, 3>) 
 /// stands over the face, which is what a share of the whole reach taken off for it would get
 /// wrong all along a shore.
 fn waters_share(face: FaceAcross, solids: array<Solid, 3>) -> f32 {
-    // a solid the lines run along cuts them off whole or not at all, which a sum over a few
-    // lines tells badly: it takes its share off the reach at every height instead
+    return share_along(face, solids) * share_beside(face.axis, solids);
+}
+
+/// What the solids that lines along an axis run along leave of a cell's reach. Such a solid
+/// cuts a line off whole or not at all, which a sum over a few lines tells badly: it takes
+/// its share off the reach at every height instead.
+fn share_beside(axis: u32, solids: array<Solid, 3>) -> f32 {
     var beside = 1.0;
     for (var k = 0u; k < 3u; k++) {
-        if (solids[k].clear < SOLID_REACH && abs(solids[k].normal[face.axis]) < RUNS_ALONG) {
+        if (solids[k].clear < SOLID_REACH && abs(solids[k].normal[axis]) < RUNS_ALONG) {
             beside *= under_tilted(solids[k].clear, solids[k].normal);
         }
     }
+    return beside;
+}
+
+/// The share of a cell's reach that is under the water's face and clear of the solids its
+/// lines run into. How much of a line is the water's changes across the reach no faster than
+/// the reach thins out, between the few places where a line comes to an end of the reach or
+/// of the water, so Gauss's two points to each half of the reach sum it as well as more do.
+fn share_along(face: FaceAcross, solids: array<Solid, 3>) -> f32 {
     var total = 0.0;
-    for (var i = 0u; i < 6u; i++) {
-        for (var j = 0u; j < 6u; j++) {
-            let line = waters_stretch(face, vec2(gauss_point(i), gauss_point(j)), solids);
-            total += GAUSS_WEIGHT[i % 3u] * GAUSS_WEIGHT[j % 3u] * max(under(line.top) - under(line.bottom), 0.0);
-        }
+    for (var l = 0u; l < LINES; l++) {
+        let line = waters_stretch(face, line_beside(l), solids);
+        total += line_weight(l) * max(under(line.top) - under(line.bottom), 0.0);
     }
-    return total * beside;
+    return total;
+}
+
+/// Where beside a cell's middle the lines that sum its reach run, and what each counts for.
+fn line_beside(l: u32) -> vec2<f32> {
+    let i = l / 4u;
+    let j = l % 4u;
+    return vec2(select(LINE_AT[i % 2u], -LINE_AT[i % 2u], i >= 2u), select(LINE_AT[j % 2u], -LINE_AT[j % 2u], j >= 2u));
+}
+
+fn line_weight(l: u32) -> f32 {
+    return LINE_WEIGHT[(l / 4u) % 2u] * LINE_WEIGHT[l % 2u];
 }
 
 /// How far under the water's face a cell's middle is for the column of five cells about it to
 /// hold the water it does, the face taken as square to the column: each cell of the column
 /// holds what the solids within its own reach leave of what of it is under the face. More
-/// water puts the face higher and never lower, so the height is closed in on from both sides,
-/// by as much as the cell's own reach would have it rise for the water that is missing.
+/// water puts the face higher and never lower, and by as much more as the reach is wide where
+/// the face cuts it, so Newton's steps close in on the height, kept between the heights that
+/// were found to hold too little and too much.
 fn face_holding(c: vec3<i32>, column: array<u32, 5>, across: FaceAcross) -> f32 {
     var water = 0.0;
+    var left = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+    var beside = array<f32, 5>(1.0, 1.0, 1.0, 1.0, 1.0);
+    // each line's water with the face far over it: the share under where it comes clear of
+    // the solids under the water, and how high the solids over the water let it reach
+    var lines: array<array<Stretch, LINES>, 5>;
+    let brimming = FaceAcross(across.axis, across.deeper, FAR_UNDER, vec2(0.0));
     for (var k = 0u; k < 5u; k++) {
-        water += water_in(column[k]);
+        let slot = column[k];
+        if (slot == NONE) {
+            continue;
+        }
+        water += cells[slot].flow.w;
+        left[k] = 1.0 - cells[slot].filled.w;
+        if (left[k] < 1.0) {
+            var e = vec3(0);
+            e[across.axis] = i32(k) - 2;
+            let solids = solids_of(slot, c + e);
+            beside[k] = share_beside(across.axis, solids);
+            for (var l = 0u; l < LINES; l++) {
+                let line = waters_stretch(brimming, line_beside(l), solids);
+                lines[k][l] = Stretch(under(line.bottom), line.top);
+            }
+        }
     }
-    let rising = 1.0 / max(1.0 - cells[column[2]].filled.w, LEAST_BESIDE);
     var lowest = -FAR_UNDER - 1.0;
     var highest = FAR_UNDER + 1.0;
-    var face = across;
-    face.under = clamp(across.under, lowest, highest);
-    for (var closer = 0u; closer < 5u; closer++) {
+    var under_face = clamp(across.under, lowest, highest);
+    for (var closer = 0u; closer < NEWTON_STEPS; closer++) {
         var held = 0.0;
+        var widening = 0.0;
         for (var k = 0u; k < 5u; k++) {
-            let slot = column[k];
-            if (slot == NONE) {
+            if (column[k] == NONE) {
                 continue;
             }
             // how far toward the air the cell is from the middle one
-            let toward_air = -across.deeper * (f32(k) - 2.0);
-            let under_face = face.under - toward_air;
-            if (under_face >= 1.0) {
-                held += 1.0 - cells[slot].filled.w;
-            } else if (under_face > -1.0) {
-                var e = vec3(0);
-                e[across.axis] = i32(k) - 2;
-                held += waters_share(FaceAcross(across.axis, across.deeper, under_face, vec2(0.0)), solids_of(slot, c + e));
+            let under_this = under_face + across.deeper * (f32(k) - 2.0);
+            if (under_this >= 1.0) {
+                held += left[k];
+            } else if (under_this > -1.0 && left[k] == 1.0) {
+                held += under(under_this);
+                widening += tent(under_this);
+            } else if (under_this > -1.0) {
+                let up_to_face = under(under_this);
+                for (var l = 0u; l < LINES; l++) {
+                    let line = lines[k][l];
+                    let faced = under_this < line.top;
+                    let wet = select(under(line.top), up_to_face, faced) - line.bottom;
+                    if (wet > 0.0) {
+                        held += beside[k] * line_weight(l) * wet;
+                        widening += select(0.0, beside[k] * line_weight(l) * tent(under_this), faced);
+                    }
+                }
             }
         }
         if (held > water) {
-            highest = face.under;
+            highest = under_face;
         } else {
-            lowest = face.under;
+            lowest = under_face;
         }
-        var next = face.under + (water - held) * rising;
+        var next = under_face + (water - held) / max(widening, LEAST_BESIDE);
         if (next <= lowest || next >= highest) {
             next = 0.5 * (lowest + highest);
         }
-        face.under = next;
+        under_face = next;
     }
-    return face.under;
+    return under_face;
 }
 
 /// One sweep of the pressure over the cells of one colour of a checkerboard, each from the

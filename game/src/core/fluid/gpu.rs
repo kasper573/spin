@@ -100,11 +100,11 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> FluidBuffers {
         affine: make(vec4s(6 * MAX_PARTICLES)),
         affine_sorted: make(vec4s(6 * MAX_PARTICLES)),
         grid_keys: make(GRID_SLOTS * 4),
-        grid_list: make(GRID_SLOTS * 4),
+        grid_list: make(2 * GRID_SLOTS * 4),
         grid_counters: make(4 * 4),
         grid_cells: make(vec4s(10 * GRID_SLOTS)),
         grid_links: make(GRID_SLOTS * 48),
-        grid_dispatch: make(4 * 4),
+        grid_dispatch: make(8 * 4),
         samples: make(vec4s(MAX_SAMPLES)),
         boundary: make(vec4s(2 * MAX_SAMPLES)),
         sample_state: make(vec4s(2 * MAX_SAMPLES)),
@@ -146,6 +146,8 @@ enum Kernel {
     Gather,
     Walls,
     Level,
+    MusterShores,
+    LevelShores,
     Wetted,
     SmoothOnce,
     SmoothTwice,
@@ -211,7 +213,7 @@ const POLISH_PASSES: usize = 1;
 const SURFACE_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 9), (0, 12)];
 const SPRAY_READS: &[(usize, u32)] = &[(0, 1), (0, 2), (0, 4), (0, 9), (0, 12)];
 
-const SPECS: [Spec; 43] = [
+const SPECS: [Spec; 45] = [
     Spec {
         kernel: Kernel::Count,
         shader: PARTICLES,
@@ -384,6 +386,30 @@ const SPECS: [Spec; 43] = [
         kernel: Kernel::Level,
         shader: GRID,
         entry: "level",
+        particles: &[0],
+        vessel: true,
+        bodies: &[0],
+        surface: &[],
+        grid: &[1, 2, 3, 4, 5],
+        read_only: GRID_READS,
+        workgroup: WORKGROUP,
+    },
+    Spec {
+        kernel: Kernel::MusterShores,
+        shader: GRID,
+        entry: "muster_shores",
+        particles: &[0],
+        vessel: false,
+        bodies: &[],
+        surface: &[],
+        grid: &[3, 6],
+        read_only: GRID_READS,
+        workgroup: 1,
+    },
+    Spec {
+        kernel: Kernel::LevelShores,
+        shader: GRID,
+        entry: "level_shores",
         particles: &[0],
         vessel: true,
         bodies: &[0],
@@ -1221,6 +1247,17 @@ fn dispatch(
         d.run(encoder, Kernel::Gather, 0, po, bo, vo, cells);
         d.run(encoder, Kernel::Walls, 0, po, bo, vo, cells);
         d.run(encoder, Kernel::Level, 0, po, bo, vo, cells);
+        d.run(
+            encoder,
+            Kernel::MusterShores,
+            0,
+            po,
+            bo,
+            vo,
+            Threads::Count(1),
+        );
+        let shores = Threads::Indirect(&raw.grid_dispatch, 16);
+        d.run(encoder, Kernel::LevelShores, 0, po, bo, vo, shores);
         d.run(encoder, Kernel::Wetted, 0, po, bo, vo, cells);
         d.run(encoder, Kernel::SmoothOnce, 0, po, bo, vo, cells);
         d.run(encoder, Kernel::SmoothTwice, 0, po, bo, vo, cells);
