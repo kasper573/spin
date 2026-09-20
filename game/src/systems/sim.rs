@@ -1,12 +1,12 @@
 //! The running simulation: the drum and the avatar are stepped on the CPU and the
-//! water follows on the GPU. Real time takes one substep per frame, no longer than a sixtieth
-//! of a second, so a fast display gets smooth bodies and a slow frame is split into a few
+//! water follows on the GPU. Real time takes one substep per frame, no longer than a period of
+//! [`SUBSTEP_RATE`], so a fast display gets smooth bodies and a slow frame is split into a few
 //! substeps; beyond that, time stretches rather than the frame. The water steps at its own
-//! fixed pace whatever the display does, so it costs the same at any frame rate: a sixtieth of
-//! a second for the finest water, and longer in proportion for coarser water, whose waves are
-//! slower. Each of its steps is taken at the moment the bodies' substeps pass its due time,
-//! with the drum and the bodies as they are then. Requested time (the tests, the bench,
-//! scripts) always steps at exactly sixty hertz.
+//! fixed pace whatever the display does, so it costs the same at any frame rate: the step of
+//! its [`Resolution`](crate::core::fluid::Resolution), which is longer in proportion for
+//! coarser water, whose waves are slower. Each of its steps is taken at the moment the bodies'
+//! substeps pass its due time, with the drum and the bodies as they are then. Requested time
+//! (the tests, the bench, scripts) always steps at exactly [`SUBSTEP_RATE`].
 //!
 //! The bodies are simulated in the drum's own frame about a site on its wall, so their
 //! coordinates stay small however large the ring; the site follows the avatar as the scene
