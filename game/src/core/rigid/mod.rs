@@ -6,15 +6,15 @@ mod contacts;
 pub use body::{Body, BodyShape, Ground, Hull, HullSphere, WaterCoupling};
 pub use contacts::collide_vessel;
 
-use crate::core::math::{add_scaled, cross, quat_from_rotation_vector, quat_rotate};
-use crate::core::units::{MetresPerSecond, RadiansPerSecond, Seconds};
+use crate::core::math::{add_scaled, cross, norm, quat_from_rotation_vector, quat_rotate};
+use crate::core::units::{KilogramsPerCubicMetre, MetresPerSecond, RadiansPerSecond};
 use crate::core::vessel::Vessel;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodyParams {
-    pub air: bool,
-    /// Time constant for the vessel's air to drag free bodies along with its walls.
-    pub air_tau: Seconds,
+    /// How dense the air the vessel holds is, which drags on the bodies that move through it:
+    /// none in a vacuum.
+    pub air_density: KilogramsPerCubicMetre,
     /// Safety clamps on speed and spin, well above anything the vessel's walls reach.
     pub max_speed: MetresPerSecond,
     pub max_spin: RadiansPerSecond,
@@ -23,8 +23,7 @@ pub struct BodyParams {
 impl Default for BodyParams {
     fn default() -> Self {
         BodyParams {
-            air: true,
-            air_tau: Seconds(12.0),
+            air_density: KilogramsPerCubicMetre(1.2),
             max_speed: MetresPerSecond(40.0),
             max_spin: RadiansPerSecond(25.0),
         }
@@ -40,11 +39,12 @@ impl Default for BodyParams {
 /// error whatever the frame does, and what a body at rest on a wall gains is only the wall's
 /// own acceleration, which the contact takes back. A body's spin, measured in the frame,
 /// turns with the frame and falls as the frame spins up, likewise exactly. The air, at rest in
-/// the frame, pushes on the hull's centre of pressure and stills its spin, so a ballasted hull
-/// that drifts through it turns ballast-first, and where there is no air nothing turns it at
-/// all. The safety clamps on speed and spin are on the body's motion among the stars, never on
-/// its motion in the frame, so nothing the frame does can bring them down on a body that is
-/// only at rest.
+/// the frame, pushes on the hull's centre of pressure by its dynamic pressure on the hull's
+/// face, so a ballasted hull that drifts through it turns ballast-first, and where there is no
+/// air nothing turns it at all. What the air's friction does to a ball's spin takes hours,
+/// and is left out. The safety clamps on speed and spin are on the body's motion among the
+/// stars, never on its motion in the frame, so nothing the frame does can bring them down on
+/// a body that is only at rest.
 pub fn step(
     dt: f64,
     vessel: &impl Vessel,
@@ -53,11 +53,7 @@ pub fn step(
     water: Option<&[WaterCoupling]>,
     params: &BodyParams,
 ) {
-    let air_k = if params.air {
-        dt / params.air_tau.0 as f64
-    } else {
-        0.0
-    };
+    let air = params.air_density.0;
     let spin = vessel.angular_velocity();
     let spin_mag = (spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]).sqrt();
     let spin_up = vessel.angular_acceleration();
@@ -88,12 +84,15 @@ pub fn step(
         add_scaled(&mut b.v, &cross(&spin, &landed), -1.0);
         b.w = quat_rotate(&carried, &b.w);
         add_scaled(&mut b.w, &spin_up, -dt);
-        if air_k > 0.0 && vessel.has_air(b.p) {
-            let at = b.to_world(&shapes[b.shape].hull.centre_of_pressure());
-            let hull = b.point_velocity(&at);
-            let impulse = hull.map(|h| -h * air_k / b.inv_m);
+        if air > 0.0 && vessel.has_air(b.p) {
+            let hull = &shapes[b.shape].hull;
+            let at = b.to_world(&hull.centre_of_pressure());
+            let through_air = b.point_velocity(&at);
+            // the drag's own closed form over the substep, which can never turn the hull round
+            let slowing = 0.5 * air * hull.drag_area() * b.inv_m * norm(&through_air) * dt;
+            let lost = slowing / (1.0 + slowing);
+            let impulse = through_air.map(|h| -h * lost / b.inv_m);
             b.apply_impulse(&impulse, &at);
-            relax(&mut b.w, &[0.0; 3], air_k);
         }
         let rest = vessel.star_velocity(b.p);
         b.clamp(params.max_speed, params.max_spin, &rest, &spin);
@@ -104,12 +103,5 @@ pub fn step(
         if b.solid {
             collide_vessel(b, &shapes[b.shape], vessel, dt);
         }
-    }
-}
-
-/// Move `v` a fraction `k` of the way toward `target`.
-fn relax(v: &mut [f64; 3], target: &[f64; 3], k: f64) {
-    for (x, t) in v.iter_mut().zip(target) {
-        *x += (t - *x) * k;
     }
 }

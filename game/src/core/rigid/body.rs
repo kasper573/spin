@@ -63,6 +63,9 @@ impl WaterCoupling {
 
 const DEFAULT_FRICTION: f64 = 0.45;
 const DEFAULT_RESTITUTION: f64 = 0.2;
+/// A ball's drag coefficient in a flow fast enough to break away behind it, which is any flow
+/// a body of this size meets in air.
+const BALL_DRAG: f64 = 0.5;
 /// The water's drag: a body relaxes toward the flow around it on this time scale divided by the
 /// coupled water's mass over its own, so a hull gripped by its own mass of water is carried
 /// along in a couple of seconds.
@@ -104,6 +107,13 @@ impl Hull {
     /// Where the air pushes on the hull: its bulk's centre.
     pub fn centre_of_pressure(&self) -> Vec3d {
         self.bulk().centre
+    }
+
+    /// The face the bulk turns to the air it moves through, times a ball's drag coefficient:
+    /// what the air's dynamic pressure is multiplied by to give its drag on the hull.
+    pub fn drag_area(&self) -> f64 {
+        let radius = self.bulk().radius;
+        BALL_DRAG * std::f64::consts::PI * radius * radius
     }
 }
 

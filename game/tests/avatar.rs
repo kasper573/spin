@@ -8,9 +8,9 @@ use game::core::math::{
     Quatd, Vec3d, add_scaled, cross, dot, norm, quat_about_y, quat_conjugate, quat_from_basis,
     quat_mul, quat_rotate,
 };
-use game::core::units::{EARTH_GRAVITY, Metres, RadiansPerSecond, Seconds};
+use game::core::units::{EARTH_GRAVITY, KilogramsPerCubicMetre, Metres, RadiansPerSecond, Seconds};
 use game::core::vessel::Vessel;
-use game::systems::drum::{DEFAULT_RING, DrumSurface, GROUND_DEPTH, MouthColour};
+use game::systems::drum::{DEFAULT_RING, DrumSurface, GROUND_DEPTH, MouthColour, Ring};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_gravity, standing_spin};
@@ -760,4 +760,49 @@ fn a_solid_avatar_walking_onto_an_open_portal_falls_through_it() {
         came_out.is_some(),
         "the avatar walked five seconds toward the portal and never came out of the other"
     );
+}
+
+/// How fast a body let go along the axis of a still ring, at this speed through air of this
+/// density, is still going after a while.
+fn coasted(air: KilogramsPerCubicMetre, speed: f64, seconds: f32) -> f64 {
+    let mut sim = Simulation::new(Ring {
+        radius: Metres(50.0),
+        half_width: Metres(2000.0),
+    });
+    sim.drum.spin = RadiansPerSecond(0.0);
+    sim.drum.target_spin = RadiansPerSecond(0.0);
+    sim.body_params.air_density = air;
+    let on_the_axis = about_axis(&sim, [0.0, 0.0, 0.0]);
+    sim.avatar_mut().place(on_the_axis, [0.0, 0.0, 0.0, 1.0]);
+    sim.avatar_mut().v = [0.0, speed, 0.0];
+    let mut fluid = Fluid::default();
+    sim.request(Seconds(seconds));
+    while sim.queued().0 > 0.0 {
+        sim.advance(Seconds(0.0), &mut fluid);
+    }
+    norm(&sim.avatar().v)
+}
+
+/// Expected: a body coasting through still air is slowed by the air's dynamic pressure on the
+/// face it turns to it, half the air's density times its speed squared, times a ball's drag
+/// coefficient of a half: it loses speed as its speed squared, so that after a time t it
+/// has v / (1 + k v t) left, k being that pressure's push on the face per unit of mass and of
+/// speed squared. A man-sized ball is slowed from thirty metres a second to some sixteen in
+/// ten seconds of room air, and in proportion less by thinner air; and what coasts through no
+/// air keeps all of its speed.
+#[test]
+fn the_air_slows_a_coasting_body_by_its_dynamic_pressure() {
+    let (speed, seconds) = (30.0, 10.0);
+    let face = std::f64::consts::PI * avatar::RADIUS * avatar::RADIUS;
+    for density in [1.2, 0.3] {
+        let k = 0.5 * density * 0.5 * face / avatar::MASS;
+        let expected = speed / (1.0 + k * speed * seconds as f64);
+        let left = coasted(KilogramsPerCubicMetre(density), speed, seconds);
+        assert!(
+            (left - expected).abs() < 0.01 * expected,
+            "{left} m/s left in air of {density} kg/m3, and {expected} by its dynamic pressure"
+        );
+    }
+    let left = coasted(KilogramsPerCubicMetre(0.0), speed, seconds);
+    assert!((left - speed).abs() < 1e-9, "{left} m/s left in a vacuum");
 }

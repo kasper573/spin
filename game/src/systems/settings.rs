@@ -362,11 +362,12 @@ fn apply(settings: Res<Settings>, air: Res<Air>, mut sim: ResMut<Simulation>) {
     sim.resize(settings.ring());
     sim.drum.target_spin = settings.spin;
     sim.thrusters.power = settings.thrust;
-    sim.params.air_density = if settings.air {
+    let air_density = if settings.air {
         air.density()
     } else {
         KilogramsPerCubicMetre(0.0)
     };
-    sim.body_params.air = settings.air;
+    sim.params.air_density = air_density;
+    sim.body_params.air_density = air_density;
     sim.avatar_mut().solid = settings.collisions;
 }
