@@ -131,11 +131,14 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
             frame += 1;
             if frame.is_multiple_of(KEPT_EVERY) {
                 // the frames run as the game runs them, one issued after the other, and the
-                // GPU is waited for only here, so that what they cost it is in their time
+                // GPU is waited for only here, by reading the picture back, which it cannot
+                // hand over before it has done all it was asked: so what the frames cost the
+                // GPU is in their time
                 testing::settle(&mut app);
+                let pixels = testing::capture(&mut app, &image);
                 let each = started.elapsed().as_secs_f64() * 1000.0 / KEPT_EVERY as f64;
                 measured.frame_ms.push(each);
-                keep(&mut app, &image, &out, frame, &mut measured);
+                keep(&mut app, &pixels, &out, frame, &mut measured);
             }
         }
     }
@@ -144,17 +147,10 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
     measured
 }
 
-fn keep(
-    app: &mut App,
-    image: &Handle<Image>,
-    out: &std::path::Path,
-    frame: u32,
-    measured: &mut Measured,
-) {
-    let pixels = testing::capture(app, image);
+fn keep(app: &mut App, pixels: &[u8], out: &std::path::Path, frame: u32, measured: &mut Measured) {
     image::save_buffer(
         out.join(format!("frame_{frame:04}.png")),
-        &pixels,
+        pixels,
         WIDTH,
         HEIGHT,
         image::ColorType::Rgba8,
