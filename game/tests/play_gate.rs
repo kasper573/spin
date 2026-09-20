@@ -10,11 +10,12 @@ use bevy::diagnostic::{Diagnostic, DiagnosticsStore};
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
+use game::core::units::Metres;
 use game::core::units::Seconds;
-use game::systems::drum::DEFAULT_RING;
+use game::systems::drum::{DEFAULT_RING, Ring};
 use game::systems::player::{PilotInput, Player};
 use game::systems::settings::{Dial, Settings};
-use game::systems::sim::Simulation;
+use game::systems::sim::{Simulation, standing_spin};
 use game::systems::testing;
 use game::systems::tools::Toolbelt;
 
@@ -28,35 +29,53 @@ const KEPT_EVERY: u32 = 10;
 const FRAME_BUDGET_MS: f64 = 1000.0 / 120.0;
 const WATER_TOOL: usize = 0;
 
-/// What a player does for a stretch of a scene.
+const PORTAL_TOOL: usize = 2;
+
+/// What a player does for a stretch of a scene: which tool is out, which button of it is held,
+/// and which thruster.
 #[derive(Clone, Copy)]
 struct Stretch {
     seconds: f32,
-    pilot: [Option<Thruster>; 2],
-    pouring: bool,
+    pilot: Option<Thruster>,
+    tool: usize,
+    button: Option<MouseButton>,
 }
 
 impl Stretch {
     fn idle(seconds: f32) -> Stretch {
         Stretch {
             seconds,
-            pilot: [None; 2],
-            pouring: false,
+            pilot: None,
+            tool: WATER_TOOL,
+            button: None,
         }
     }
 
     fn pouring(seconds: f32) -> Stretch {
         Stretch {
-            pouring: true,
+            button: Some(MouseButton::Left),
             ..Stretch::idle(seconds)
         }
     }
 
     fn flying(seconds: f32, thruster: Thruster) -> Stretch {
         Stretch {
-            pilot: [Some(thruster), None],
+            pilot: Some(thruster),
             ..Stretch::idle(seconds)
         }
+    }
+
+    /// A press of one of the portal tool's buttons, which lets a portal into what it is aimed at.
+    fn shooting(button: MouseButton) -> Stretch {
+        Stretch {
+            tool: PORTAL_TOOL,
+            button: Some(button),
+            ..Stretch::idle(0.2)
+        }
+    }
+
+    fn with(self, tool: usize) -> Stretch {
+        Stretch { tool, ..self }
     }
 }
 
@@ -80,6 +99,17 @@ struct Measured {
 }
 
 fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Measured {
+    play_in(scene, DEFAULT_RING, seat, litres_per_second, stretches)
+}
+
+/// Play a scene in a ring the player has dialled to this size, and spun and equalized for it.
+fn play_in(
+    scene: &str,
+    ring: Ring,
+    seat: Seat,
+    litres_per_second: f32,
+    stretches: &[Stretch],
+) -> Measured {
     let out = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/playgate")).join(scene);
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).expect("create the scene's folder");
@@ -92,6 +122,13 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
     if seat == Seat::OutsideTheCap {
         app.world_mut().resource_mut::<Settings>().collisions = false;
     }
+    if ring != DEFAULT_RING {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, ring.radius.0 * 2.0);
+        Dial::Width.set(&mut settings, ring.half_width.0 * 2.0);
+        Dial::Spin.set(&mut settings, standing_spin(ring).0);
+        settings.equalize_thrust();
+    }
     testing::watch(&mut app, Seconds(0.5));
     if seat == Seat::OutsideTheCap {
         let (up, along) = (
@@ -102,7 +139,6 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
         let mut sim = app.world_mut().resource_mut::<Simulation>();
         player.teleport(&mut sim, [2.0 - up, along + 12.0, 3.0], [-up, along, 0.0]);
     }
-    testing::tap(&mut app, Toolbelt::key(WATER_TOOL));
 
     let mut measured = Measured {
         frame_ms: Vec::new(),
@@ -113,15 +149,28 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
         water_m3: Vec::new(),
         gpu_ms: Vec::new(),
     };
-    let mut pouring = false;
+    let mut tool = None;
+    let mut button = None;
     let mut frame = 0u32;
     let mut started = Instant::now();
     for stretch in stretches {
-        if stretch.pouring != pouring {
-            testing::button(&mut app, MouseButton::Left, stretch.pouring);
-            pouring = stretch.pouring;
+        if button != stretch.button || tool != Some(stretch.tool) {
+            if let Some(held) = button.take() {
+                testing::button(&mut app, held, false);
+            }
         }
-        let held: Vec<Thruster> = stretch.pilot.iter().flatten().copied().collect();
+        if tool != Some(stretch.tool) {
+            testing::tap(&mut app, Toolbelt::key(stretch.tool));
+            tool = Some(stretch.tool);
+        }
+        if button != stretch.button {
+            if let Some(pressed) = stretch.button {
+                testing::button(&mut app, pressed, true);
+            }
+            button = stretch.button;
+        }
+        let pouring = stretch.tool == WATER_TOOL && stretch.button == Some(MouseButton::Left);
+        let held: Vec<Thruster> = stretch.pilot.iter().copied().collect();
         for _ in 0..(stretch.seconds * FPS as f32).round() as u32 {
             let player = *app.world().resource::<Player>();
             app.world_mut().resource_mut::<Simulation>().avatar_input =
@@ -322,4 +371,36 @@ fn a_pool_poured_at_the_feet_and_waded_through() {
         Stretch::flying(6.0, Thruster::Forward),
     ];
     play("wade", Seat::Body, 50_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_stream_poured_into_a_portal_in_the_ground() {
+    let scene = [
+        Stretch::flying(0.35, Thruster::PitchDown).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Left),
+        Stretch::flying(0.7, Thruster::YawLeft).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Right),
+        Stretch::idle(1.0),
+        Stretch::pouring(8.0),
+        Stretch::flying(0.35, Thruster::YawRight),
+        Stretch::idle(4.0),
+    ];
+    play("portals", Seat::Body, 50_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_flood_poured_in_a_ring_two_kilometres_across() {
+    let ring = Ring {
+        radius: Metres(1000.0),
+        half_width: Metres(100.0),
+    };
+    let scene = [
+        Stretch::idle(1.0),
+        Stretch::pouring(10.0),
+        Stretch::flying(1.0, Thruster::PitchUp),
+        Stretch::idle(4.0),
+    ];
+    play_in("big_ring", ring, Seat::Body, 999_000.0, &scene).hold();
 }
