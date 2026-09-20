@@ -10,7 +10,7 @@
 #import bevy_pbr::prepass_utils::prepass_depth
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import space::stars
-#import air::{Air, air_bent, air_crossed, air_shaft}
+#import air::{Air, air_bent_each, air_crossed, air_shaft}
 #import ring::{ring_run, ring_up, sun_reaches}
 #import portals::{mouths, Mouths, painted, emerged, sunbeam_at, sunbeam_run, Painted, WALL, CAP}
 
@@ -202,9 +202,10 @@ fn space_through_air(air: Air, at: vec3<f32>, dir: vec3<f32>, ring: vec2<f32>, t
     }
     var out = space_seen(dir, to_stars, background, spread);
     if (air.slowing.w != 0.0) {
-        let red = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.x), to_stars, background, spread);
-        let green = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.y), to_stars, background, spread);
-        let blue = space_seen(air_bent(air, at, dir, held, ring.x, air.slowing.z), to_stars, background, spread);
+        let ways = air_bent_each(air, at, dir, held, ring.x);
+        let red = space_seen(ways[0], to_stars, background, spread);
+        let green = space_seen(ways[1], to_stars, background, spread);
+        let blue = space_seen(ways[2], to_stars, background, spread);
         out = vec3(red.r, green.g, blue.b);
     }
     // and the air it crossed on the way out dims it and glows in front of it

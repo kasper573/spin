@@ -6,7 +6,7 @@
 #import bevy_pbr::view_transformations::position_world_to_clip
 #import bevy_pbr::mesh_view_bindings::view
 #import space::space_colour
-#import air::{Air, air_bent}
+#import air::{Air, air_bent_each}
 #import optics::rotate
 #import ring::ring_run
 
@@ -57,8 +57,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4(space_colour(dir, to_sun, sky.background.rgb, spread), 1.0);
     }
     let radius = sky.ring.x;
-    let red = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.x)), to_sun, sky.background.rgb, spread);
-    let green = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.y)), to_sun, sky.background.rgb, spread);
-    let blue = space_colour(rotate(sky.to_stars, air_bent(sky.air, eye, out, held, radius, sky.air.slowing.z)), to_sun, sky.background.rgb, spread);
+    let ways = air_bent_each(sky.air, eye, out, held, radius);
+    let red = space_colour(rotate(sky.to_stars, ways[0]), to_sun, sky.background.rgb, spread);
+    let green = space_colour(rotate(sky.to_stars, ways[1]), to_sun, sky.background.rgb, spread);
+    let blue = space_colour(rotate(sky.to_stars, ways[2]), to_sun, sky.background.rgb, spread);
     return vec4(red.r, green.g, blue.b, 1.0);
 }

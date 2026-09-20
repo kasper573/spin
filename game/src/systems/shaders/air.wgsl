@@ -208,15 +208,77 @@ fn air_shaft(air: Air, at: vec3<f32>, dir: vec3<f32>, begins: f32, ends: f32, ra
     return turning * density * light * (ends - begins) * exp(-air.taken.rgb * before * middle);
 }
 
-/// Where a ray ends up pointing after `distance` metres of air, having been bent by the air's
-/// own gradient: a ray in a medium whose index varies obeys `d(n t)/ds = grad n`, so it turns
-/// toward the denser air, which in a ring is toward the rim. `slowing` is `n - 1` at the rim
-/// for the colour being traced, so tracing three colours through the same air gives three
-/// directions, and a ray that crosses enough of it comes out spread into them.
-fn air_bent(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32, slowing: f32) -> vec3<f32> {
-    if (distance <= 0.0 || air.slowing.w == 0.0) {
-        return dir;
+/// A ray the air turns by less than this, in radians, is taken to run straight while what turns
+/// it is summed along it, which leaves it a small part of a pixel from where walking it would.
+const NEARLY_STRAIGHT: f32 = 0.003;
+
+/// `exp(x) - 1`, which a float loses to rounding where `x` is small.
+fn grown(x: f32) -> f32 {
+    return select(exp(x) - 1.0, x * (1.0 + 0.5 * x * (1.0 + x / 3.0)), abs(x) < 0.05);
+}
+
+/// What turns a ray over a stretch of air, whatever its colour: a colour the air slows by
+/// `slowing` at the rim is turned by `slowing * once - slowing^2 * twice`, added to its direction.
+struct AirTurning {
+    once: vec3<f32>,
+    twice: vec3<f32>,
+}
+
+/// How far the air turns a ray over `distance`, had the ray run straight: the sum along it of
+/// the gradient of the logarithm of the index, across the ray. The index is one and a colour's
+/// slowing times the density, so its logarithm is a series in powers of the density, each a
+/// density of its own with the thinning as many times over, and two terms of it carry air a
+/// hundred times denser than ours. Measured from where the ray passes nearest the axis, what
+/// lies across the ray is that point's offset from the axis, which goes with the air held, and a
+/// part growing evenly along the ray, which goes with how much the density has changed from
+/// end to end.
+fn air_turning(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32) -> AirTurning {
+    let ray = air_ray(air, at, dir, radius);
+    let from_axis = vec3(radius + at.x, 0.0, at.z);
+    let level = vec3(dir.x, 0.0, dir.z);
+    var terms = array<vec3<f32>, 2>(vec3(0.0), vec3(0.0));
+    for (var i = 0; i < 2; i++) {
+        let power = f32(i + 1);
+        let thinning = power * ray.thinning;
+        let start = pow(ray.density, power);
+        let held = air_held(AirRay(start, thinning, ray.climb, ray.level), distance);
+        if (ray.level < 1e-8) {
+            terms[i] = 2.0 * ray.thinning * held * from_axis;
+        } else {
+            let nearest = from_axis - level * (ray.climb / ray.level);
+            let changed = start * grown(thinning * (2.0 * ray.climb * distance + ray.level * distance * distance));
+            terms[i] = 2.0 * ray.thinning * held * nearest + (level - dir * ray.level) * changed / (power * ray.level);
+        }
     }
+    return AirTurning(terms[0], terms[1]);
+}
+
+/// Where a ray of each colour ends up pointing after `distance` metres of air, red, green and
+/// blue in turn: the air slows each by its own amount, so it turns each by its own, and a ray
+/// that crosses enough of it comes out spread into its colours.
+fn air_bent_each(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32) -> array<vec3<f32>, 3> {
+    var ways = array<vec3<f32>, 3>(dir, dir, dir);
+    if (distance <= 0.0 || air.slowing.w == 0.0) {
+        return ways;
+    }
+    let turning = air_turning(air, at, dir, distance, radius);
+    for (var colour = 0; colour < 3; colour++) {
+        let slowing = air.slowing[colour];
+        let turned = slowing * turning.once - slowing * slowing * turning.twice;
+        if (length(turned) < NEARLY_STRAIGHT) {
+            ways[colour] = normalize(dir + turned);
+        } else {
+            ways[colour] = air_walked(air, at, dir, distance, radius, slowing);
+        }
+    }
+    return ways;
+}
+
+/// Where a ray ends up pointing after `distance` metres of air that turns it too far for it to
+/// be taken to run straight: a ray in a medium whose index varies obeys `d(n t)/ds = grad n`,
+/// so it turns toward the denser air, which in a ring is toward the rim, and is walked there in
+/// steps. `slowing` is `n - 1` at the rim for the colour being traced.
+fn air_walked(air: Air, at: vec3<f32>, dir: vec3<f32>, distance: f32, radius: f32, slowing: f32) -> vec3<f32> {
     var p = at;
     var d = dir;
     let longest = distance / f32(FEWEST_STEPS);
