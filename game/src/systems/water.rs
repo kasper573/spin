@@ -26,9 +26,10 @@ use crate::core::fluid::{
     FluidBuffers, GRID_REACH, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, surface_cell,
 };
 use crate::core::math::quat_conjugate;
+use crate::core::shallows::{SKIN_INDICES_PER_CELL, Shallows, ShallowsBuffers};
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
-use crate::systems::drum::bed_albedo;
+use crate::systems::drum::{Ring, bed_albedo};
 use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
 use crate::systems::player::PlayerCamera;
 use crate::systems::portal::{MouthsUniform, Pictures};
@@ -36,7 +37,9 @@ use crate::systems::scene::{
     self, SPACE, SeenFrom, SettleVantages, Sky, VANTAGES, Vantage, Vantages,
 };
 use crate::systems::sim::{SimSet, Simulation};
-use crate::systems::water_column::{MakeWaterColumns, WaterColumnPlugin, WaterColumns};
+use crate::systems::water_column::{
+    LyingSheets, MakeWaterColumns, WaterColumnPlugin, WaterColumns,
+};
 
 const SHADER: &str = "embedded://game/systems/shaders/water.wgsl";
 const SPRAY_SHADER: &str = "embedded://game/systems/shaders/spray.wgsl";
@@ -229,6 +232,11 @@ impl Material for SprayMaterial {
 #[derive(Resource)]
 struct Water([Handle<WaterMaterial>; VANTAGES]);
 
+/// The materials the water lying on the ground is drawn with, a vantage each: the water's own,
+/// over the surface the ground's water has.
+#[derive(Resource)]
+struct LyingWater([Handle<WaterMaterial>; VANTAGES]);
+
 #[derive(Resource)]
 struct Spray([Handle<SprayMaterial>; VANTAGES]);
 
@@ -267,6 +275,20 @@ pub fn water_bounds() -> (Aabb, NoAutoAabb) {
     (Aabb::from_min_max(-reach, reach), NoAutoAabb)
 }
 
+/// A mesh the water lying on the ground is drawn by, which may lie anywhere in the drum: its
+/// bounds are the drum's, in the mesh's own frame, which sits on the wall at the water's site
+/// with the axis a radius off along -x, and is measured in the water's units.
+#[derive(Component)]
+pub struct LyingWaterMesh;
+
+fn drum_bounds(ring: Ring, metres_per_unit: f64) -> Aabb {
+    let (radius, half_width) = (ring.radius.0 as f64, ring.half_width.0 as f64);
+    let reach =
+        Vec3::new(radius as f32, 2.0 * half_width as f32, radius as f32) / metres_per_unit as f32;
+    let middle = Vec3::new(-(radius / metres_per_unit) as f32, 0.0, 0.0);
+    Aabb::from_min_max(middle - reach, middle + reach)
+}
+
 /// Far enough along the sorting distance to put the water before or after anything else in
 /// the scene that lets it through.
 const ORDER: f32 = 1.0e6;
@@ -274,6 +296,7 @@ const ORDER: f32 = 1.0e6;
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
+    (lying, sheets): (Res<ShallowsBuffers>, Res<LyingSheets>),
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WaterMaterial>>,
     mut sprays: ResMut<Assets<SprayMaterial>>,
@@ -321,7 +344,36 @@ fn spawn(
             Transform::default(),
         ));
     }
+    let lain: [Handle<WaterMaterial>; VANTAGES] = std::array::from_fn(|vantage| {
+        materials.add(WaterMaterial {
+            water: water.clone(),
+            order: ORDER,
+            vertices: lying.skin_vertices.clone(),
+            indices: lying.skin_indices.clone(),
+            counters: lying.skin_counters.clone(),
+            droplets: buffers.surface.droplets.clone(),
+            figure: FigureUniform::default(),
+            mouths: MouthsUniform::default(),
+            through_blue: None,
+            through_orange: None,
+            columns: columns.seen_from(vantage),
+        })
+    });
+    for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&lain) {
+        commands.spawn((
+            WaterMesh,
+            LyingWaterMesh,
+            seen,
+            seen.layers(),
+            NotShadowCaster,
+            Mesh3d(sheets.0.clone()),
+            MeshMaterial3d(material.clone()),
+            water_bounds(),
+            Transform::default(),
+        ));
+    }
     commands.insert_resource(Water(seen));
+    commands.insert_resource(LyingWater(lain));
 
     let spray = [(); VANTAGES].map(|()| {
         sprays.add(SprayMaterial {
@@ -356,10 +408,29 @@ fn tick(
     vantages: Res<Vantages>,
     pictures: Res<Pictures>,
     air: Res<Air>,
-    (water, spray): (Res<Water>, Res<Spray>),
+    (water, lying, spray): (Res<Water>, Res<LyingWater>, Res<Spray>),
     (mut materials, mut sprays): (ResMut<Assets<WaterMaterial>>, ResMut<Assets<SprayMaterial>>),
     mut meshes: Query<(&SeenFrom, &mut Transform), With<WaterMesh>>,
+    (shallows, sheets, mut shapes, mut sized): (
+        Res<Shallows>,
+        Res<LyingSheets>,
+        ResMut<Assets<Mesh>>,
+        Local<usize>,
+    ),
+    mut lying_bounds: Query<&mut Aabb, With<LyingWaterMesh>>,
 ) {
+    let bounds = drum_bounds(sim.drum.ring, fluid.resolution().length());
+    for mut aabb in &mut lying_bounds {
+        if *aabb != bounds {
+            *aabb = bounds;
+        }
+    }
+    let corners = shallows
+        .charted()
+        .map_or(3, |chart| chart.cells() * SKIN_INDICES_PER_CELL);
+    if *sized != corners && shapes.insert(sheets.0.id(), numbered_mesh(corners)).is_ok() {
+        *sized = corners;
+    }
     let resolution = fluid.resolution();
     let metres_per_unit = resolution.length();
     let frame = sim.drum.water_frame();
@@ -405,19 +476,34 @@ fn tick(
             droplet_radius(resolution) as f32,
             0.0,
         );
+        let flying = material.clone();
+        drop(material);
+        if let Some(mut lain) = materials.get_mut(&lying.0[k]) {
+            lain.water = flying.water.clone();
+            lain.order = flying.order;
+            lain.mouths = flying.mouths.clone();
+            lain.through_blue = flying.through_blue.clone();
+            lain.through_orange = flying.through_orange.clone();
+        }
         if let Some(mut mist) = sprays.get_mut(&spray.0[k]) {
-            mist.water = material.water.clone();
-            mist.order = material.order;
-            mist.mouths = material.mouths.clone();
-            mist.through_blue = material.through_blue.clone();
-            mist.through_orange = material.through_orange.clone();
+            mist.water = flying.water.clone();
+            mist.order = flying.order;
+            mist.mouths = flying.mouths.clone();
+            mist.through_blue = flying.through_blue.clone();
+            mist.through_orange = flying.through_orange.clone();
         }
     }
 }
 
-fn mirror(figure: Res<Figure>, water: Res<Water>, mut materials: ResMut<Assets<WaterMaterial>>) {
-    if let Some(mut material) = materials.get_mut(&water.0[0]) {
-        material.figure = figure.0.clone();
+fn mirror(
+    figure: Res<Figure>,
+    (water, lying): (Res<Water>, Res<LyingWater>),
+    mut materials: ResMut<Assets<WaterMaterial>>,
+) {
+    for handle in [&water.0[0], &lying.0[0]] {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.figure = figure.0.clone();
+        }
     }
 }
 

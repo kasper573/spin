@@ -30,6 +30,11 @@ pub struct ShallowsBuffers {
     pressing: Handle<ShaderBuffer>,
     giving: Handle<ShaderBuffer>,
     poured: Handle<ShaderBuffer>,
+    /// The water as a surface to draw, as the water in flight has its own: vertices, the
+    /// triangles' corners among them, and how many of each there are.
+    pub skin_vertices: Handle<ShaderBuffer>,
+    pub skin_indices: Handle<ShaderBuffer>,
+    pub skin_counters: Handle<ShaderBuffer>,
 }
 
 /// The ground water's kernels for the frame, which anything reading their results the same
@@ -50,6 +55,9 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> ShallowsBuffers {
         pressing: make(MAX_SHALLOWS_CELLS * 24),
         giving: make(MAX_SHALLOWS_CELLS * 8),
         poured: make(MAX_POURED * 16),
+        skin_vertices: make(2 * MAX_SKIN_CORNERS * 48),
+        skin_indices: make(MAX_SKIN_INDICES * 4),
+        skin_counters: make(4 * 4),
     }
 }
 
@@ -67,7 +75,14 @@ pub fn install(render_app: &mut SubApp) {
         );
 }
 
+/// The most corners a chart's cells have between them, however long and narrow it is, and the
+/// most corners its triangles have.
+const MAX_SKIN_CORNERS: usize = 2 * MAX_SHALLOWS_CELLS + 2;
+pub const SKIN_INDICES_PER_CELL: usize = 12;
+const MAX_SKIN_INDICES: usize = SKIN_INDICES_PER_CELL * MAX_SHALLOWS_CELLS;
+
 const SHADER: &str = "embedded://game/core/shallows/shallows.wgsl";
+const SKIN: &str = "embedded://game/core/shallows/skin.wgsl";
 const WORKGROUP: u32 = 64;
 /// Sweeps of the pressure a step, each of both colours, from where the last step left it.
 const SWEEPS: usize = 4;
@@ -84,9 +99,11 @@ enum Kernel {
     YieldTo,
     Share,
     Rise,
+    SkinCorners,
+    SkinCells,
 }
 
-const KERNELS: [(Kernel, &str); 10] = [
+const KERNELS: [(Kernel, &str); 12] = [
     (Kernel::Lay, "lay"),
     (Kernel::Stand, "stand"),
     (Kernel::Pour, "pour"),
@@ -97,7 +114,13 @@ const KERNELS: [(Kernel, &str); 10] = [
     (Kernel::YieldTo, "yield_to"),
     (Kernel::Share, "share"),
     (Kernel::Rise, "rise"),
+    (Kernel::SkinCorners, "skin_corners"),
+    (Kernel::SkinCells, "skin_cells"),
 ];
+
+fn skins(kernel: Kernel) -> bool {
+    matches!(kernel, Kernel::SkinCorners | Kernel::SkinCells)
+}
 
 #[derive(ShaderType, Clone, Copy, Default)]
 struct ShallowsUniform {
@@ -115,6 +138,7 @@ struct ShallowsUniform {
 struct Pipelines {
     ids: Vec<CachedComputePipelineId>,
     layout: BindGroupLayoutDescriptor,
+    skin_layout: BindGroupLayoutDescriptor,
 }
 
 #[derive(Resource, Default)]
@@ -125,6 +149,7 @@ struct Uniforms(DynamicUniformBuffer<ShallowsUniform>);
 #[derive(Resource)]
 struct BindGroups {
     group: BindGroup,
+    skin: BindGroup,
     made_of: Vec<BufferId>,
     asking: u32,
     steps: Vec<u32>,
@@ -144,19 +169,38 @@ fn init_pipelines(
         }));
     entries.push(storage_buffer_read_only_sized(false, None).build(6, ShaderStages::COMPUTE));
     let layout = BindGroupLayoutDescriptor::new("shallows", &entries);
+    let mut skin_entries: Vec<BindGroupLayoutEntry> =
+        vec![uniform_buffer_sized(true, None).build(0, ShaderStages::COMPUTE)];
+    skin_entries.extend((1..=2).map(|binding| {
+        storage_buffer_read_only_sized(false, None).build(binding, ShaderStages::COMPUTE)
+    }));
+    skin_entries
+        .extend((3..=5).map(|binding| {
+            storage_buffer_sized(false, None).build(binding, ShaderStages::COMPUTE)
+        }));
+    let skin_layout = BindGroupLayoutDescriptor::new("shallows skin", &skin_entries);
     let ids = KERNELS
         .iter()
-        .map(|(_, entry)| {
+        .map(|(kernel, entry)| {
+            let (own, shader) = if skins(*kernel) {
+                (&skin_layout, SKIN)
+            } else {
+                (&layout, SHADER)
+            };
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some((*entry).into()),
-                layout: vec![layout.clone(), vessel.0.clone()],
-                shader: asset_server.load(SHADER),
+                layout: vec![own.clone(), vessel.0.clone()],
+                shader: asset_server.load(shader),
                 entry_point: Some((*entry).into()),
                 ..default()
             })
         })
         .collect();
-    commands.insert_resource(Pipelines { ids, layout });
+    commands.insert_resource(Pipelines {
+        ids,
+        layout,
+        skin_layout,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -183,6 +227,9 @@ fn prepare(
         &buffers.pressing,
         &buffers.giving,
         &buffers.poured,
+        &buffers.skin_vertices,
+        &buffers.skin_indices,
+        &buffers.skin_counters,
     ];
     let Some(raw) = handles
         .iter()
@@ -227,21 +274,32 @@ fn prepare(
         made.steps = steps;
         return;
     }
-    let mut entries = vec![BindGroupEntry {
-        binding: 0,
-        resource: binding,
-    }];
-    entries.extend(raw.iter().enumerate().map(|(i, buffer)| BindGroupEntry {
-        binding: i as u32 + 1,
-        resource: buffer.as_entire_binding(),
-    }));
-    let group = device.create_bind_group(
-        None,
-        &pipeline_cache.get_bind_group_layout(&pipelines.layout),
-        &entries,
-    );
+    // the water's own buffers, then, for the skin, the ground and the cells with the skin's
+    let bound = |buffers: &[usize], layout: &BindGroupLayoutDescriptor| {
+        let mut entries = vec![BindGroupEntry {
+            binding: 0,
+            resource: binding.clone(),
+        }];
+        entries.extend(
+            buffers
+                .iter()
+                .enumerate()
+                .map(|(i, &buffer)| BindGroupEntry {
+                    binding: i as u32 + 1,
+                    resource: raw[buffer].as_entire_binding(),
+                }),
+        );
+        device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(layout),
+            &entries,
+        )
+    };
+    let group = bound(&[0, 1, 2, 3, 4, 5], &pipelines.layout);
+    let skin = bound(&[0, 1, 6, 7, 8], &pipelines.skin_layout);
     commands.insert_resource(BindGroups {
         group,
+        skin,
         made_of,
         asking,
         steps,
@@ -276,6 +334,7 @@ fn dispatch(
         return;
     };
     let cells = (chart.cells() as u32).div_ceil(WORKGROUP);
+    let corners = ((chart.size[0] + 1) * (chart.size[1] + 1)).div_ceil(WORKGROUP);
     let encoder = render_context.command_encoder();
     let mut run = |label: &'static str, params: u32, vessel_at: u32, kernels: &[Kernel]| {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -288,9 +347,18 @@ fn dispatch(
                 .position(|(k, _)| k == kernel)
                 .unwrap_or_default();
             pass.set_pipeline(computes[index]);
-            pass.set_bind_group(0, &groups.group, &[params]);
+            let own = if skins(*kernel) {
+                &groups.skin
+            } else {
+                &groups.group
+            };
+            pass.set_bind_group(0, own, &[params]);
             pass.set_bind_group(1, &vessel.bind_group, &[vessel_at]);
-            let threads = if *kernel == Kernel::Pour { 1 } else { cells };
+            let threads = match kernel {
+                Kernel::Pour => 1,
+                Kernel::SkinCorners => corners,
+                _ => cells,
+            };
             pass.dispatch_workgroups(threads, 1, 1);
         }
     };
@@ -309,4 +377,10 @@ fn dispatch(
         let vessel_at = vessel.offsets.get(k).copied().unwrap_or(vessel_now);
         run("shallows step", params, vessel_at, &step);
     }
+    run(
+        "shallows skin",
+        groups.asking,
+        vessel_now,
+        &[Kernel::SkinCorners, Kernel::SkinCells],
+    );
 }

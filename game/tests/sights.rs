@@ -11,8 +11,9 @@ use bevy::prelude::*;
 use game::core::avatar::{self, Gyros};
 use game::core::fluid::{Fluid, Particle};
 use game::core::math::{cross, norm, quat_from_basis, quat_rotate};
+use game::core::shallows::Shallows;
 use game::core::units::{Metres, Radians, Seconds};
-use game::systems::drum::{DEFAULT_RING, Place, Ring, Round};
+use game::systems::drum::{DEFAULT_RING, GROUND_DEPTH, Place, Ring, Round};
 use game::systems::scene::SUN_DIRECTION;
 use game::systems::settings::{Dial, Settings};
 use game::systems::sim::{Simulation, standing_spin};
@@ -619,6 +620,25 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
     sight
         .view("from_35m", from_35m.0, from_35m.1, false)
         .seen(0.001);
+}
+
+/// Water lying on the ground a metre and a half deep all the way round the ring, as the ground's
+/// own water keeps it, seen from under it, from over it and from the axis.
+#[test]
+#[ignore = "wants a GPU"]
+fn water_lying_on_the_ground_is_seen_from_everywhere() {
+    let mut sight = Sight::new("lying", |app: &mut App| {
+        app.world_mut()
+            .resource_mut::<Shallows>()
+            .stand(Metres(GROUND_DEPTH.0 + 1.5), [0.0; 2]);
+        testing::run(app, Seconds(1.0));
+    });
+    let under = ([0.0, 0.0, 0.8], [-8.0, 0.0, 0.8]);
+    let over = ([0.0, 0.0, 3.0], [-8.0, 0.0, 1.5]);
+    let axis = ([0.0, 0.0, 9.0], [-4.0, 1.0, 0.0]);
+    sight.view("under", under.0, under.1, true).seen(0.3).blue();
+    sight.view("over", over.0, over.1, true).seen(0.15);
+    sight.view("axis", axis.0, axis.1, true).seen(0.15);
 }
 
 /// A pool between two ridges, seen from its bed, its shore, over it, and from outside.

@@ -22,9 +22,10 @@ use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 
 use crate::core::fluid::{FluidBuffers, MAX_INDICES};
+use crate::core::shallows::ShallowsBuffers;
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::{SeenFrom, VANTAGES};
-use crate::systems::water::{WaterMesh, numbered_mesh, water_bounds};
+use crate::systems::water::{LyingWaterMesh, WaterMesh, numbered_mesh, water_bounds};
 
 const SHADER: &str = "embedded://game/systems/shaders/water_column.wgsl";
 
@@ -112,9 +113,15 @@ impl Material for WaterColumnMaterial {
     }
 }
 
-/// The camera that counts the water for a vantage, and its material.
+/// The mesh the water lying on the ground is drawn by, which is kept as large as the chart the
+/// water lies on has corners to its triangles.
+#[derive(Resource)]
+pub struct LyingSheets(pub Handle<Mesh>);
+
+/// The camera that counts the water for a vantage, and its materials: the water in flight's
+/// and that of the water lying on the ground.
 #[derive(Component)]
-struct WaterColumnEye(Handle<WaterColumnMaterial>);
+struct WaterColumnEye([Handle<WaterColumnMaterial>; 2]);
 
 fn layers(seen: SeenFrom) -> RenderLayers {
     RenderLayers::layer(VANTAGES + seen.0)
@@ -123,11 +130,14 @@ fn layers(seen: SeenFrom) -> RenderLayers {
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
+    lying: Res<ShallowsBuffers>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WaterColumnMaterial>>,
 ) {
     let faces = meshes.add(numbered_mesh(MAX_INDICES));
+    let sheets = meshes.add(numbered_mesh(3));
+    commands.insert_resource(LyingSheets(sheets.clone()));
     let pictures = [(); VANTAGES].map(|()| {
         images.add(Image::new_target_texture(
             1,
@@ -143,6 +153,12 @@ fn spawn(
             indices: buffers.surface.indices.clone(),
             counters: buffers.surface.counters.clone(),
         });
+        let lain = materials.add(WaterColumnMaterial {
+            seen_past: Vec4::ZERO,
+            vertices: lying.skin_vertices.clone(),
+            indices: lying.skin_indices.clone(),
+            counters: lying.skin_counters.clone(),
+        });
         commands.spawn((
             WaterMesh,
             seen,
@@ -154,7 +170,18 @@ fn spawn(
             Transform::default(),
         ));
         commands.spawn((
-            WaterColumnEye(material),
+            WaterMesh,
+            LyingWaterMesh,
+            seen,
+            layers(seen),
+            NotShadowCaster,
+            Mesh3d(sheets.clone()),
+            MeshMaterial3d(lain.clone()),
+            water_bounds(),
+            Transform::default(),
+        ));
+        commands.spawn((
+            WaterColumnEye([material, lain]),
             seen,
             layers(seen),
             Camera3d::default(),
@@ -223,7 +250,7 @@ fn follow(
     >,
     mut materials: ResMut<Assets<WaterColumnMaterial>>,
 ) {
-    for (WaterColumnEye(material), seen, mut camera, mut transform, mut projection) in &mut counting
+    for (WaterColumnEye(counted), seen, mut camera, mut transform, mut projection) in &mut counting
     {
         let eye = match seen.0 {
             0 => player.iter().next(),
@@ -251,10 +278,12 @@ fn follow(
         {
             *projection = Projection::Perspective(plain);
         }
-        if let Some(mut material) = materials.get_mut(material)
-            && material.seen_past != lens.near_clip_plane
-        {
-            material.seen_past = lens.near_clip_plane;
+        for material in counted {
+            if let Some(mut material) = materials.get_mut(material)
+                && material.seen_past != lens.near_clip_plane
+            {
+                material.seen_past = lens.near_clip_plane;
+            }
         }
     }
 }

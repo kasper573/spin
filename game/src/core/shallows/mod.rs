@@ -16,7 +16,7 @@ use bevy::render::storage::ShaderBuffer;
 
 use crate::core::units::{Litres, Metres, Seconds};
 
-pub use gpu::{ShallowsBuffers, ShallowsStep};
+pub use gpu::{SKIN_INDICES_PER_CELL, ShallowsBuffers, ShallowsStep};
 
 /// The most cells a chart may have.
 pub const MAX_SHALLOWS_CELLS: usize = 1 << 18;
@@ -30,6 +30,7 @@ pub struct ShallowsPlugin;
 impl Plugin for ShallowsPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shallows.wgsl");
+        embedded_asset!(app, "skin.wgsl");
         let buffers =
             gpu::create_buffers(&mut app.world_mut().resource_mut::<Assets<ShaderBuffer>>());
         let ready = ShallowsReady::default();

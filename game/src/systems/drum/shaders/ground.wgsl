@@ -44,6 +44,27 @@ fn ground_raised(held: f32) -> f32 {
     return 2.0 * held / (1.0 + sqrt(max(1.0 - 2.0 * held * drum.per_metre / drum.radius, 0.0)));
 }
 
+/// A place on the chart raised by a height, in the water's frame and units.
+fn ground_point(at: vec2<f32>, height: f32) -> vec3<f32> {
+    let turn = at.x * drum.per_metre / drum.radius;
+    let half = sin(0.5 * turn);
+    let raised = height * drum.per_metre;
+    return vec3(
+        -raised * cos(turn) - 2.0 * drum.radius * half * half,
+        at.y * drum.per_metre,
+        (drum.radius - raised) * sin(turn),
+    );
+}
+
+/// A flow along the chart's axes and up at a place, as a velocity in the water's frame, units
+/// and clock.
+fn ground_carried(at: vec2<f32>, flow: vec3<f32>) -> vec3<f32> {
+    let turn = at.x * drum.per_metre / drum.radius;
+    let round = vec3(-sin(turn), 0.0, cos(turn));
+    let up = vec3(-cos(turn), 0.0, -sin(turn));
+    return (flow.x * round + flow.y * vec3(0.0, 1.0, 0.0) + flow.z * up) * drum.per_metre / drum.per_second;
+}
+
 fn from_the_axis(height: f32) -> f32 {
     return drum.radius / drum.per_metre - height;
 }
