@@ -27,6 +27,10 @@ const ADAPTING_WIDTH: u32 = WIDTH / 8;
 const ADAPTING_HEIGHT: u32 = HEIGHT / 8;
 /// A pixel counts as changed when a channel moves by this much, out of 255.
 const CHANGED: i32 = 20;
+/// By how much a colour channel must differ for the water to have dimmed a pixel: what still
+/// water does to a dim ground seen straight down through it, which is lose it the little light
+/// the way down and back up takes.
+const DIMMED: i32 = 8;
 /// How long the eye is given to adapt to the light of a sight before it is drawn, and in how
 /// many steps: the eye adapts several stops a second, so a second of it is plenty.
 const ADAPTING: f32 = 1.0;
@@ -299,6 +303,8 @@ struct View {
     name: String,
     /// The share of the frame the water changed.
     changed: f64,
+    /// The share of the frame the water at least dimmed.
+    dimmed: f64,
     /// The mean colour of the water where it changed the frame, out of 255.
     water: [f64; 3],
     /// The frame itself, with the water in it, and with it hidden.
@@ -309,9 +315,12 @@ struct View {
 impl View {
     fn compare(name: &str, tag: &str, with: &[u8], without: &[u8]) -> View {
         let mut changed = 0usize;
+        let mut dimmed = 0usize;
         let mut sum = [0.0; 3];
         for (a, b) in with.chunks_exact(4).zip(without.chunks_exact(4)) {
-            let moved = (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() > CHANGED);
+            let differs_by = |by: i32| (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() > by);
+            dimmed += usize::from(differs_by(DIMMED));
+            let moved = differs_by(CHANGED);
             if moved {
                 changed += 1;
                 for c in 0..3 {
@@ -323,6 +332,7 @@ impl View {
         View {
             name: format!("{name} by {tag}"),
             changed: changed as f64 / (WIDTH * HEIGHT) as f64,
+            dimmed: dimmed as f64 / (WIDTH * HEIGHT) as f64,
             water: sum.map(|s| s / n),
             pixels: with.to_vec(),
             hidden: without.to_vec(),
@@ -364,6 +374,19 @@ impl View {
             self.name,
             share * 100.0,
             other.name,
+            at_least * 100.0
+        );
+        self
+    }
+
+    /// The water must at least dim this share of the frame: all that calm water does to a
+    /// ground seen straight down through it by night, however still it lies.
+    fn seen_dimly(&self, at_least: f64) -> &View {
+        assert!(
+            self.dimmed >= at_least,
+            "{}: the water dims only {:.2}% of the frame, at least {:.2}% was expected",
+            self.name,
+            self.dimmed * 100.0,
             at_least * 100.0
         );
         self
@@ -589,7 +612,7 @@ fn half_a_ring_of_water_is_seen_from_everywhere() {
     let end_night = sight.view("end_on_axis", end_on_axis.0, end_on_axis.1, false);
     unlit_by_night(&end_day, &end_night);
     sight.view("under", under.0, under.1, false).seen(0.3);
-    sight.view("axis", axis.0, axis.1, false).seen(0.08);
+    sight.view("axis", axis.0, axis.1, false).seen_dimly(0.4);
     sight
         .view("through_floor", through_floor.0, through_floor.1, false)
         .unseen();
