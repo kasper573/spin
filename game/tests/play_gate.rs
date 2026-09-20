@@ -286,7 +286,7 @@ impl Measured {
         ) + &self
             .gpu_ms
             .iter()
-            .take(12)
+            .filter(|(_, ms)| *ms >= 0.1)
             .map(|(path, ms)| format!("\n    {ms:6.2} ms  {path}"))
             .collect::<String>()
     }
