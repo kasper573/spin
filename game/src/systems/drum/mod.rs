@@ -25,6 +25,7 @@ pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
 use serde::{Deserialize, Serialize};
 
 use crate::core::math::{Quatd, Vec3d, quat_about_y, quat_mul, rotate_y};
+use crate::core::shallows::{MAX_SHALLOWS_CELLS, ShallowsChart};
 use crate::core::units::{Metres, Radians, RadiansPerSecond, RadiansPerSecondSquared};
 use crate::core::vessel::{Passage, Penetration, Penetrations, Vessel, WaterFrame};
 
@@ -346,6 +347,35 @@ impl Drum {
         let at = self.place(p);
         self.landscape.sculpt(at, radius, amount);
         self.refit_mouths();
+    }
+
+    /// The chart the water lying on the ground is kept on: the whole of the glass, round the
+    /// ring from where the landscape's cells are counted from and along the axis from one end to
+    /// the other, in cells as fine as the landscape's unless the ring is too large for so many;
+    /// and where the chart's low corner is from the water's site, which the ground's shader
+    /// module counts from.
+    pub fn ground_chart(&self) -> (ShallowsChart, [f64; 2]) {
+        let grid = self.landscape.grid();
+        let round = grid.round as f64 * grid.arc;
+        let along = 2.0 * self.ring.half_width.0 as f64;
+        let mut cell = landscape::CELL;
+        while (round / cell).ceil() * (along / cell).ceil() > MAX_SHALLOWS_CELLS as f64 {
+            cell *= 2.0;
+        }
+        let size = [
+            (round / cell).round().max(1.0),
+            (along / cell).ceil().max(1.0),
+        ];
+        let chart = ShallowsChart {
+            size: [size[0] as u32, size[1] as u32],
+            wraps: [true, false],
+            cell: [
+                Metres((round / size[0]) as f32),
+                Metres((along / size[1]) as f32),
+            ],
+        };
+        let site = (self.water.round.cell as f64 + self.water.round.across) * grid.arc;
+        (chart, [-site, -along / 2.0 - self.water.y])
     }
 
     /// Put the water's site on the wall under a point of the frame, which is only done while

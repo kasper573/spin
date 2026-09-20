@@ -23,6 +23,7 @@ use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
+use crate::core::shallows::{Shallows, ShallowsBuffers, ShallowsCell};
 use crate::core::units::{Metres, Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::aim::Aim;
@@ -708,6 +709,26 @@ pub fn spray(app: &mut App) -> Vec<Mote> {
             position: [mote[0], mote[1], mote[2]],
             velocity: [mote[4], mote[5], mote[6]],
         })
+        .collect()
+}
+
+/// The water lying on the ground, cell by cell of its chart, the first axis running fastest,
+/// and the ground under each cell.
+pub fn ground_water(app: &mut App) -> Vec<(ShallowsCell, f32)> {
+    let buffers = app.world().resource::<ShallowsBuffers>().clone();
+    let cells = app
+        .world()
+        .resource::<Shallows>()
+        .charted()
+        .map_or(0, |chart| chart.cells());
+    let water = read_back(app, Readback::buffer(buffers.cells));
+    let beds = read_back(app, Readback::buffer(buffers.bed));
+    ShallowsCell::read(&water)
+        .zip(
+            beds.chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        )
+        .take(cells)
         .collect()
 }
 

@@ -70,7 +70,7 @@ pub const GRID_SLOTS: usize = 4 * MAX_PARTICLES;
 pub const MAX_SUBSTEPS_PER_FRAME: usize = 4;
 /// What a rough bed takes of the dynamic pressure of the water running over it: Manning's
 /// roughness of earth and short grass, under a particle's depth of water.
-const BED_FRICTION: f32 = 0.008;
+pub const BED_FRICTION: f32 = 0.008;
 /// Water's surface tension, in newtons a metre, and the Weber number past which the air tears
 /// a drop apart: what it leaves whole is as wide as has that number at the speed it meets.
 const SURFACE_TENSION: f64 = 0.072;

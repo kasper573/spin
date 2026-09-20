@@ -4,6 +4,7 @@ pub mod codec;
 pub mod fluid;
 pub mod math;
 pub mod rigid;
+pub mod shallows;
 pub mod units;
 pub mod vessel;
 #[cfg(target_arch = "wasm32")]

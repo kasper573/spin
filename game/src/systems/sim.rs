@@ -18,10 +18,11 @@ use bevy::prelude::*;
 
 use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
-    Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
+    BED_FRICTION, Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
 use crate::core::math::{Quatd, Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape};
+use crate::core::shallows::{Shallows, ShallowsFrame, ShallowsReady};
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
     RadiansPerSecond, RadiansPerSecondSquared, Seconds,
@@ -439,14 +440,18 @@ fn register_shapes(sim: Res<Simulation>, mut fluid: ResMut<Fluid>) {
     fluid.set_shapes(sim.shapes());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step(
     mut sim: ResMut<Simulation>,
     mut fluid: ResMut<Fluid>,
     mut frame: ResMut<FluidFrame>,
+    mut shallows: ResMut<Shallows>,
+    mut shallows_frame: ResMut<ShallowsFrame>,
     ready: Res<FluidReady>,
+    shallows_ready: Res<ShallowsReady>,
     time: Res<Time>,
 ) {
-    if !ready.get() {
+    if !ready.get() || !shallows_ready.get() {
         return;
     }
     fluid.keep_floor();
@@ -457,4 +462,8 @@ fn step(
         .map(|r| (r.dt, r.bodies.clone()))
         .collect();
     *frame = fluid.frame(&sim.params, &substeps, &sim.drum.water_frame());
+    let (chart, low) = sim.drum.ground_chart();
+    shallows.chart(chart, BED_FRICTION);
+    let steps: Vec<Seconds> = sim.substeps.iter().map(|r| r.dt).collect();
+    *shallows_frame = shallows.frame(&steps, low);
 }

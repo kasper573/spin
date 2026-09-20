@@ -40,4 +40,5 @@ pub fn embed_shaders(app: &mut App) {
     embedded_asset!(app, "shaders/solid.wgsl");
     embedded_asset!(app, "drum/shaders/drum.wgsl");
     embedded_asset!(app, "drum/shaders/columns.wgsl");
+    embedded_asset!(app, "drum/shaders/ground.wgsl");
 }

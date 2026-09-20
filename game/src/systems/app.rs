@@ -8,6 +8,7 @@ use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
 use crate::core::fluid::FluidPlugin;
+use crate::core::shallows::ShallowsPlugin;
 use crate::core::web;
 use crate::systems::{
     aim::AimPlugin, body::BodyPlugin, controls::ControlsPlugin, drum::DrumPlugin,
@@ -63,6 +64,7 @@ fn simulation(app: &mut App) {
         SettingsPlugin,
         DrumPlugin,
         FluidPlugin,
+        ShallowsPlugin,
         WaterPlugin,
         PlayerPlugin,
         ThrustersPlugin,
