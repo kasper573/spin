@@ -6,37 +6,23 @@ lint:
     cargo clippy --release --all-targets -- -D warnings
     cargo clippy --release -p game --lib --bin client --target wasm32-unknown-unknown -- -D warnings
 
-# The tests a machine without a GPU can afford: seconds each.
+# What a machine without a GPU can afford.
 test:
     cargo test --release -p game
 
-# The rest: stirring the water and looking at it costs minutes where the GPU is emulated on the
-# CPU, so these are run here, where there is a real one, rather than on a shared runner.
-gpu:
-    cargo test --release -p game -- --ignored
+# The game played as a player plays it, every frame drawn, on this machine's GPU. Each scene
+# leaves its frames, a sheet of them and what it measured in target/playgate/<scene>/. A scene
+# that passes has only kept its numbers: whether the game looks and plays right is seen on the
+# sheets, which are there to be looked at.
+gate:
+    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1; status=$?; \
+    for scene in target/playgate/*/; do \
+      ffmpeg -y -loglevel error -pattern_type glob -i "${scene}frame_*.png" \
+        -vf "select='not(mod(n\,7))',scale=640:360,tile=4x3" -frames:v 1 "${scene}sheet.png"; \
+    done; exit $status
 
 # The whole gate before pushing: what the runners check, plus everything they cannot afford.
-verify: lint test gpu e2e
-
-# The water held against real water: every measurement, how far it is from the real thing, and
-# the least it has been. `WATER_PHYSICS_ACCEPT=1 just reference` keeps readings that got better.
-reference:
-    cargo test --release -p game --test water_physics -- --ignored --test-threads=1
-    cargo test --release -p game --test water_physics the_scoreboard -- --ignored --exact --nocapture
-
-# Fixed fluid workload; prints microseconds per particle-substep.
-bench:
-    cargo run --release -p game --bin bench
-
-# A short first-person video of the avatar walking and jumping on the ring, rendered headless
-# into target/record/ and stitched by ffmpeg with the thrusters' voices and the avatar's readouts
-# as subtitles, which keep to the right of the HUD's list.
-record script="":
-    cargo run --release -p game --bin record {{script}}
-    ffmpeg -y -loglevel error -framerate 30 -i target/record/frame_%04d.png -i target/record/thrusters.wav \
-      -vf "scale=1280:720:flags=lanczos,subtitles=target/record/readout.srt:force_style='FontName=DejaVu Sans Mono,FontSize=10,Alignment=7,MarginL=185,MarginR=6,MarginV=8,Outline=1'" \
-      -c:v libx264 -pix_fmt yuv420p -crf 20 -c:a aac -shortest target/record/ring-walk.mp4
-    @echo "wrote target/record/ring-walk.mp4"
+verify: lint test gate e2e
 
 # The browser client: a wasm binary post-processed by wasm-bindgen into the bundle the page loads.
 # The `wasm` profile is the small, slow-to-build deploy; `release` is the fast local loop.

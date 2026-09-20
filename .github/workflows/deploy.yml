@@ -17,7 +17,7 @@ concurrency:
 jobs:
   # A runner has no GPU and four cores, so it is asked only for what it can do quickly: that the
   # code is clean, that the simulation behaves, and that the page builds. What wants a GPU of its
-  # own — the sights and the browser test — is run by `just verify` before pushing.
+  # own — the play gate and the browser test — is run by `just verify` before pushing.
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

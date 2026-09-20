@@ -8,8 +8,7 @@ use bevy::camera::RenderTarget;
 use bevy::diagnostic::{DiagnosticsStore, FrameCount};
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
-use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
-use bevy::input::touch::TouchPhase;
+use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -23,7 +22,7 @@ use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
-use crate::core::shallows::{Shallows, ShallowsBuffers, ShallowsCell};
+use crate::core::shallows::Shallows;
 use crate::core::units::{Metres, Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::aim::Aim;
@@ -406,17 +405,6 @@ pub fn button(app: &mut App, button: MouseButton, down: bool) {
     });
 }
 
-/// Turn the mouse wheel by this many clicks, up when positive, over the coming frame.
-pub fn wheel(app: &mut App, clicks: i32) {
-    app.world_mut().write_message(MouseWheel {
-        unit: MouseScrollUnit::Line,
-        x: 0.0,
-        y: clicks as f32,
-        window: Entity::PLACEHOLDER,
-        phase: TouchPhase::Moved,
-    });
-}
-
 /// A headless app and its turn on the GPU, which it keeps until it is dropped.
 pub struct Headless {
     app: App,
@@ -470,13 +458,6 @@ pub fn run(app: &mut App, seconds: Seconds) {
 pub fn watch(app: &mut App, seconds: Seconds) {
     watching(app, true);
     advance(app, seconds);
-    watching(app, false);
-}
-
-/// Draw one frame of this much simulated time, without waiting for the water's report on it.
-pub fn frame(app: &mut App, seconds: Seconds) {
-    watching(app, true);
-    step(app, seconds);
     watching(app, false);
 }
 
@@ -543,25 +524,6 @@ pub fn settle(app: &mut App) {
         idle += 1;
         assert!(idle < 2000, "the water never reported back");
     }
-}
-
-/// Run frames until a fresh copy of the water has been read back, then return it.
-pub fn particles(app: &mut App) -> Vec<crate::core::fluid::Particle> {
-    watching(app, false);
-    let buffers = app.world().resource::<FluidBuffers>().clone();
-    let ticket = app
-        .world_mut()
-        .resource_scope(|world, mut fluid: Mut<Fluid>| {
-            let mut commands = world.commands();
-            fluid.request_snapshot(&mut commands, &buffers)
-        });
-    for _ in 0..600 {
-        app.update();
-        if app.world().resource::<Fluid>().snapshot_ready(ticket) {
-            break;
-        }
-    }
-    app.world().resource::<Fluid>().particles().collect()
 }
 
 /// Draw what the player's camera sees into this image from now on. Bevy sizes a camera to
@@ -655,81 +617,6 @@ pub fn surface_vertices(app: &mut App) -> Vec<[f32; 4]> {
             let f = |i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
             [f(0) * metres, f(4) * metres, f(8) * metres, f(12)]
         })
-        .collect()
-}
-
-/// How many triangles the water's surface currently has, read back from the GPU.
-pub fn surface_triangles(app: &mut App) -> u32 {
-    surface_demand(app).indices / 3
-}
-
-/// What the last extraction of the water's surface asked for, whether or not it fit.
-#[derive(Clone, Copy, Debug)]
-pub struct SurfaceDemand {
-    pub vertices: u32,
-    pub indices: u32,
-    pub blocks: u32,
-    /// The particles left out of the surface to be drawn as drops.
-    pub droplets: u32,
-}
-
-pub fn surface_demand(app: &mut App) -> SurfaceDemand {
-    let counters = app
-        .world()
-        .resource::<FluidBuffers>()
-        .surface
-        .counters
-        .clone();
-    let counts = read_u32s(app, counters);
-    let at = |i: usize| counts.get(i).copied().unwrap_or(0);
-    SurfaceDemand {
-        vertices: at(0),
-        indices: at(1),
-        blocks: at(2),
-        droplets: at(3),
-    }
-}
-
-/// A mote of the spray: where it is in the water's frame and units, and how fast it flies.
-pub struct Mote {
-    pub position: [f32; 3],
-    pub velocity: [f32; 3],
-}
-
-/// The motes of spray in flight.
-pub fn spray(app: &mut App) -> Vec<Mote> {
-    let motes = app.world().resource::<FluidBuffers>().surface.motes.clone();
-    let floats: Vec<f32> = read_back(app, Readback::buffer(motes))
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-    floats
-        .chunks_exact(8)
-        .filter(|mote| mote[7] > 0.0)
-        .map(|mote| Mote {
-            position: [mote[0], mote[1], mote[2]],
-            velocity: [mote[4], mote[5], mote[6]],
-        })
-        .collect()
-}
-
-/// The water lying on the ground, cell by cell of its chart, the first axis running fastest,
-/// and the ground under each cell.
-pub fn ground_water(app: &mut App) -> Vec<(ShallowsCell, f32)> {
-    let buffers = app.world().resource::<ShallowsBuffers>().clone();
-    let cells = app
-        .world()
-        .resource::<Shallows>()
-        .charted()
-        .map_or(0, |chart| chart.cells());
-    let water = read_back(app, Readback::buffer(buffers.cells));
-    let beds = read_back(app, Readback::buffer(buffers.bed));
-    ShallowsCell::read(&water)
-        .zip(
-            beds.chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-        )
-        .take(cells)
         .collect()
 }
 

@@ -21,15 +21,14 @@ own on the screen in its back, and answers to the mouse buttons and the wheel wh
 | Command           | What it does                                                        |
 | ----------------- | ------------------------------------------------------------------- |
 | `just lint`       | `cargo fmt --check`, the layering lint, clippy (native and wasm)     |
-| `just test`       | the contract tests in `game/tests/`, headless on the machine's GPU  |
-| `just bench`      | a fixed fluid workload, timed per frame on the GPU                  |
+| `just test`       | what a machine without a GPU can afford                             |
+| `just gate`       | the game played scene by scene on the GPU: frames, sheets, measures |
 | `just wasm`       | the browser client through `wasm-bindgen` into `target/wasm/`       |
 | `just dist`       | the page plus the wasm bundle in `dist/`                            |
 | `just serve`      | build `dist/` and serve it on http://localhost:8000                 |
 | `just dev`        | the same with a fast plain-release build, for local iteration       |
 | `just dev-native` | the client in a native window                                       |
 | `just e2e`        | build `dist/` and drive it in headless Chrome                       |
-| `just record`     | an mp4 of the avatar put through its paces, into `target/record/`   |
 
 Pushes to `main` lint, test, build, run the e2e and deploy `dist/` to GitHub Pages.
 
@@ -46,8 +45,8 @@ One crate, `game/`, in two layers plus thin binaries:
   rendering, the player's camera and body, the tools and what the mirrors show of them, the
   portals and what is seen and lit through them, controls, settings, HUD, persistence, and the script
   commands and status the tests and the page's `?probe` mode drive it through.
-- `src/bin/` — the browser client, the bench, the recorder and the layering lint.
-- `tests/` — contract tests against the public API, run headless.
+- `src/bin/` — the browser client and the layering lint.
+- `tests/` — the play gate: the game played as a player plays it, drawn and measured.
 - `static/` — the page that loads the wasm bundle; `e2e/` — the headless Chrome smoke test.
 
 Each module's doc comment explains what it does and why; the code is meant to be read.

@@ -56,10 +56,22 @@ The binaries under `src/bin/` are thin: the client only assembles the app, nothi
 
 ## Verification
 
-Before you start work on a task run benchmarks via `just bench` and save the results to a temporary file.
+The played game is the only evidence that a change works. `game/tests/play_gate.rs` plays it as a
+player does — the default ring, the avatar in its body, tools worked by their keys and buttons,
+every frame drawn — and `just gate` runs it and lays each scene's frames out on a sheet in
+`target/playgate/<scene>/`.
 
-After you finish the task:
-
-- `cargo fmt`, then `just verify` (no warnings, no failures): the runners only run what a
-  machine without a GPU can afford, so the rest of the suite is yours to run here.
-- Run benchmarks again and compare the results to the previous run. If there is a significant regression, investigate and fix it.
+- Before a change: `just gate`, and keep the sheets and `measured.txt` of every scene.
+- After it: `cargo fmt`, `just verify` (no warnings, no failures), then look at every scene's
+  sheet beside the one from before, as a critical player would, and compare what was measured.
+  A change that makes any scene look or run worse is not done, whatever passes.
+- A defect is reproduced in a gate scene before it is worked on, and is fixed when that same scene
+  shows it gone. Until then a cause is a hypothesis, and is called one.
+- One change at a time, the smallest that tests the hypothesis. A change that does not cure the
+  defect is reverted in full before the next is tried: fixes are never stacked on fixes.
+- Something new replaces what is there only once it does better than it in every scene of the
+  gate; if it does not, it is deleted rather than patched in place.
+- Anything a player can do that the gate does not yet play gets a scene before it gets code.
+  Tests drive the game through what a player has — keys, buttons, dials — never by putting the
+  simulation into a state from outside.
+- Measure on an idle GPU: nothing else building, testing or recording while the gate runs.
