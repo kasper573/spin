@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use bevy::diagnostic::DiagnosticsStore;
+use bevy::diagnostic::{Diagnostic, DiagnosticsStore};
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
@@ -75,8 +75,7 @@ struct Measured {
     most_vertices: usize,
     poured_m3: f64,
     water_m3: Vec<f64>,
-    /// What the GPU spent on each of its passes, in milliseconds a pass, the most first. A
-    /// pass that runs for every substep of the water runs more than once a frame.
+    /// What the GPU spent on each of its passes, in milliseconds a frame, the most first.
     gpu_ms: Vec<(String, f64)>,
 }
 
@@ -152,12 +151,29 @@ fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) 
         .resource::<DiagnosticsStore>()
         .iter()
         .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
-        .filter_map(|d| Some((d.path().as_str().to_owned(), d.average()?)))
+        .filter_map(|d| Some((d.path().as_str().to_owned(), each_frame(d)?)))
         .collect();
     measured.gpu_ms.sort_by(|a, b| b.1.total_cmp(&a.1));
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
     eprintln!("{}", measured.report(scene));
     measured
+}
+
+/// What a pass cost the GPU a frame, in milliseconds. A pass that runs more than once a frame,
+/// for every substep of the water or for every camera, reports each run on its own, all of a
+/// frame's within a moment of each other: they are summed frame by frame.
+fn each_frame(pass: &Diagnostic) -> Option<f64> {
+    let mut frames = 0u32;
+    let mut total = 0.0;
+    let mut last = None;
+    for run in pass.measurements() {
+        if last.is_none_or(|last| run.time.duration_since(last).as_secs_f64() > 5e-4) {
+            frames += 1;
+        }
+        last = Some(run.time);
+        total += run.value;
+    }
+    (frames > 0).then(|| total / frames as f64)
 }
 
 fn keep(app: &mut App, pixels: &[u8], out: &std::path::Path, frame: u32, measured: &mut Measured) {
