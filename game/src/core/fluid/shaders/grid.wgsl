@@ -1691,6 +1691,19 @@ fn stopped_at_the_wall(v: vec3<f32>, across: array<vec3<f32>, 3>, wall: vec4<f32
     return v - into_the_wall * n;
 }
 
+/// What a step adds to the motion of water lying on a wall in a sheet too thin for the cells'
+/// pressure to hold: its weight presses it against the wall, and where its face is not level
+/// with the wall that weight runs it out along the wall toward where it lies thinner, as the
+/// pressure does with water deep enough for it.
+fn run_out(q: vec3<f32>, wall: vec4<f32>, face: FaceOver) -> vec3<f32> {
+    if (wall.w <= 0.0 || !face.told) {
+        return vec3(0.0);
+    }
+    let pressing = max(-dot(vessel_gravity(q), wall.xyz), 0.0);
+    let tilted = -face.deeper - wall.xyz;
+    return pressing * (tilted - dot(tilted, wall.xyz) * wall.xyz) * params.dt;
+}
+
 /// A velocity with a share of what of it goes into the walls a particle has met taken out.
 fn stopped(v_in: vec3<f32>, first: vec4<f32>, second: vec4<f32>, share: f32) -> vec3<f32> {
     var v = v_in;
@@ -1730,9 +1743,9 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let flown = velocity[i].xyz;
     var v = flown;
     let round = array<Faces, 3>(faces_round(q, 0u), faces_round(q, 1u), faces_round(q, 2u));
-    let own = stopped(flown, contact[2u * i], contact[2u * i + 1u], 1.0);
     let face = face_over(q);
     let under_face = face.under;
+    let own = stopped(flown, contact[2u * i], contact[2u * i + 1u], 1.0) + run_out(q, contact[2u * i], face);
     // only a particle with faces of the water's round it has any water to be held by
     var held = 0.0;
     if ((round[0].settled | round[1].settled | round[2].settled) != 0u) {
