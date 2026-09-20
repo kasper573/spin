@@ -154,10 +154,10 @@ fn play_in(
     let mut frame = 0u32;
     let mut started = Instant::now();
     for stretch in stretches {
-        if button != stretch.button || tool != Some(stretch.tool) {
-            if let Some(held) = button.take() {
-                testing::button(&mut app, held, false);
-            }
+        if (button != stretch.button || tool != Some(stretch.tool))
+            && let Some(held) = button.take()
+        {
+            testing::button(&mut app, held, false);
         }
         if tool != Some(stretch.tool) {
             testing::tap(&mut app, Toolbelt::key(stretch.tool));
