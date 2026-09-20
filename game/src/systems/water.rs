@@ -26,6 +26,7 @@ use crate::core::fluid::{
     FluidBuffers, GRID_REACH, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, surface_cell,
 };
 use crate::core::math::quat_conjugate;
+use crate::core::sheet::{Sheet, SheetBuffers};
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
@@ -71,7 +72,7 @@ impl Plugin for WaterPlugin {
         .add_systems(Startup, spawn.after(MakeWaterColumns))
         .add_systems(
             Update,
-            (tick.after(SettleVantages), submerge).in_set(SimSet::Observe),
+            (tick.after(SettleVantages), size_lying, submerge).in_set(SimSet::Observe),
         )
         .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
@@ -93,7 +94,8 @@ struct WaterUniform {
     /// The ground's colour as seen from across the ring.
     ground: Vec4,
     background: Vec4,
-    /// x: metres per unit of the water's length; y: a cell of the surface's grid in metres.
+    /// x: metres per unit of the water's length; y: a cell of the surface's grid in metres;
+    /// z: 1 where the surface is a sheet's, whose vertices say how deep the water stands.
     units: Vec4,
     /// x: simulated seconds; y: metres per second per unit of the water's velocity; z: a
     /// droplet's radius in metres.
@@ -225,9 +227,13 @@ impl Material for SprayMaterial {
     }
 }
 
-/// The water's material as each vantage sees it, and its spray's.
+/// The water's material as each vantage sees it, the material of the sheet of it lying on the
+/// floor, and its spray's.
 #[derive(Resource)]
 struct Water([Handle<WaterMaterial>; VANTAGES]);
+
+#[derive(Resource)]
+struct LyingWater([Handle<WaterMaterial>; VANTAGES]);
 
 #[derive(Resource)]
 struct Spray([Handle<SprayMaterial>; VANTAGES]);
@@ -235,6 +241,14 @@ struct Spray([Handle<SprayMaterial>; VANTAGES]);
 /// The mesh the water is drawn through, turned with the drum.
 #[derive(Component)]
 pub struct WaterMesh;
+
+/// The mesh the sheet of water lying on the floor is drawn through, which is measured in
+/// metres rather than in the water's units, and how many of the sheet's cells it has the
+/// vertices to draw.
+#[derive(Component)]
+struct LyingWaterMesh {
+    cells: u32,
+}
 
 /// A mesh that only says how many vertices are drawn: the vertex shader fetches each one from
 /// the water's buffers by its number, which the vertex carries as its place along x. The
@@ -274,6 +288,7 @@ const ORDER: f32 = 1.0e6;
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
+    sheet: Res<SheetBuffers>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WaterMaterial>>,
     mut sprays: ResMut<Assets<SprayMaterial>>,
@@ -323,6 +338,38 @@ fn spawn(
     }
     commands.insert_resource(Water(seen));
 
+    // the sheet has no parcels, and its count of them is always none
+    let lying = std::array::from_fn(|vantage| {
+        materials.add(WaterMaterial {
+            water: water.clone(),
+            order: ORDER,
+            vertices: sheet.vertices.clone(),
+            indices: sheet.indices.clone(),
+            counters: sheet.counters.clone(),
+            droplets: buffers.surface.droplets.clone(),
+            figure: FigureUniform::default(),
+            mouths: MouthsUniform::default(),
+            through_blue: None,
+            through_orange: None,
+            columns: columns.seen_from(vantage),
+        })
+    });
+    let yet_to_fit = meshes.add(numbered_mesh(3));
+    for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&lying) {
+        commands.spawn((
+            LyingWaterMesh { cells: 0 },
+            Visibility::Hidden,
+            seen,
+            seen.layers(),
+            NotShadowCaster,
+            Mesh3d(yet_to_fit.clone()),
+            MeshMaterial3d(material.clone()),
+            water_bounds(),
+            Transform::default(),
+        ));
+    }
+    commands.insert_resource(LyingWater(lying));
+
     let spray = [(); VANTAGES].map(|()| {
         sprays.add(SprayMaterial {
             water: water.clone(),
@@ -349,16 +396,17 @@ fn spawn(
     commands.insert_resource(Spray(spray));
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn tick(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     vantages: Res<Vantages>,
     pictures: Res<Pictures>,
     air: Res<Air>,
-    (water, spray): (Res<Water>, Res<Spray>),
+    (water, lying, spray): (Res<Water>, Res<LyingWater>, Res<Spray>),
     (mut materials, mut sprays): (ResMut<Assets<WaterMaterial>>, ResMut<Assets<SprayMaterial>>),
-    mut meshes: Query<(&SeenFrom, &mut Transform), With<WaterMesh>>,
+    mut meshes: Query<(&SeenFrom, &mut Transform), (With<WaterMesh>, Without<LyingWaterMesh>)>,
+    mut lying_meshes: Query<(&SeenFrom, &mut Transform), With<LyingWaterMesh>>,
 ) {
     let resolution = fluid.resolution();
     let metres_per_unit = resolution.length();
@@ -372,6 +420,11 @@ fn tick(
     for (seen, mut transform) in &mut meshes {
         if let Some(vantage) = &vantages.0[seen.0] {
             *transform = pose(vantage).with_scale(Vec3::splat(metres_per_unit as f32));
+        }
+    }
+    for (seen, mut transform) in &mut lying_meshes {
+        if let Some(vantage) = &vantages.0[seen.0] {
+            *transform = pose(vantage);
         }
     }
     for (k, vantage) in vantages.0.iter().enumerate() {
@@ -405,12 +458,56 @@ fn tick(
             droplet_radius(resolution) as f32,
             0.0,
         );
+        let shared = WaterMaterial::clone(&material);
+        drop(material);
+        if let Some(mut material) = materials.get_mut(&lying.0[k]) {
+            material.order = shared.order;
+            material.mouths = shared.mouths.clone();
+            material.through_blue = shared.through_blue.clone();
+            material.through_orange = shared.through_orange.clone();
+            material.water = WaterUniform {
+                units: Vec4::new(1.0, 0.0, 1.0, 0.0),
+                clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
+                ..shared.water.clone()
+            };
+        }
         if let Some(mut mist) = sprays.get_mut(&spray.0[k]) {
+            let material = &shared;
             mist.water = material.water.clone();
             mist.order = material.order;
             mist.mouths = material.mouths.clone();
             mist.through_blue = material.through_blue.clone();
             mist.through_orange = material.through_orange.clone();
+        }
+    }
+}
+
+/// The sheet is drawn only while there is water on it, through a mesh with no more vertices
+/// than its cells' triangles have corners: every vertex of a mesh is run whether the sheet has
+/// a triangle for it or not.
+fn size_lying(
+    sheet: Res<Sheet>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut lying: Query<(&mut LyingWaterMesh, &mut Mesh3d, &mut Visibility)>,
+) {
+    let cells = sheet.lie().map_or(0, |lie| lie.cells[0] * lie.cells[1]);
+    let shown = if sheet.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    let fitting = lying
+        .iter()
+        .any(|(mesh, ..)| mesh.cells != cells)
+        .then(|| meshes.add(numbered_mesh(6 * cells as usize)));
+    for (mut mesh, mut drawn, mut visibility) in &mut lying {
+        if let Some(fitting) = &fitting {
+            meshes.remove(&drawn.0);
+            *drawn = Mesh3d(fitting.clone());
+            mesh.cells = cells;
+        }
+        if *visibility != shown {
+            *visibility = shown;
         }
     }
 }

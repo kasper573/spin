@@ -21,9 +21,11 @@ use bevy::shader::ShaderRef;
 
 use super::gpu::{COLUMN_FIXED, Columns, GroundLayout, SURVEY_SLOTS};
 use super::landscape::{Landscape, PATCH};
+use super::sheet::{SheetWindow, feed_sheet};
 use super::{DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Round, Site, TILE};
 use crate::core::fluid::Fluid;
 use crate::core::math::Vec3d;
+use crate::core::sheet::{SHEET_CELLS, Sheet, SheetBuffers};
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
 use crate::systems::portal::{MouthsUniform, Pictures, SolidCopies, SolidMaterial, solid};
@@ -87,10 +89,11 @@ impl Plugin for DrumPlugin {
             MaterialPlugin::<GlassMaterial>::default(),
             MaterialPlugin::<TerrainMaterial>::default(),
         ))
+        .init_resource::<SheetWindow>()
         .add_systems(Startup, spawn)
         .add_systems(
             Update,
-            (rebuild, place, light, wet, feed_water)
+            (rebuild, place, light, wet, feed_water, feed_sheet)
                 .chain()
                 .in_set(SimSet::Observe)
                 .after(SettleVantages),
@@ -212,8 +215,19 @@ struct TerrainMaterial {
     /// The air between the eye and the ground; see `systems/air.rs`.
     #[uniform(0)]
     air: AirUniform,
+    /// The sheet of water lying on the floor: where its first corner lies from the water's site,
+    /// round the ring and along the axis, and a cell's arc and width, in metres; then how many
+    /// cells it has each way, how many corners a row of its vertices holds, and whether its
+    /// cells close on themselves round the ring.
+    #[uniform(0)]
+    lying: Vec4,
+    #[uniform(0)]
+    lying_cells: Vec4,
     #[storage(1, read_only)]
     columns: Handle<ShaderBuffer>,
+    /// The corners of the sheet's surface, which say how deep it lies at each.
+    #[storage(2, read_only)]
+    lying_corners: Handle<ShaderBuffer>,
     /// The portals let into the ground; see `systems/portal`.
     #[uniform(11)]
     mouths: MouthsUniform,
@@ -296,6 +310,7 @@ struct SeenMaterials {
 fn spawn(
     mut commands: Commands,
     frame: Res<DrumFrame>,
+    sheet: Res<SheetBuffers>,
     mut glass: ResMut<Assets<GlassMaterial>>,
     mut standard: ResMut<Assets<SolidMaterial>>,
     mut copies: ResMut<SolidCopies>,
@@ -328,7 +343,10 @@ fn spawn(
             absorption: water::ABSORPTION.extend(0.0),
             scatter: water::SCATTERING.extend(0.0),
             air: AirUniform::default(),
+            lying: Vec4::ZERO,
+            lying_cells: Vec4::ZERO,
             columns: frame.columns.clone(),
+            lying_corners: sheet.vertices.clone(),
             mouths: MouthsUniform::default(),
             through_blue: None,
             through_orange: None,
@@ -501,6 +519,7 @@ fn mirror(
 fn wet(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
+    sheet: Res<Sheet>,
     vantages: Res<Vantages>,
     pictures: Res<Pictures>,
     air: Res<Air>,
@@ -529,6 +548,17 @@ fn wet(
         );
         let [x, y, z] = vantage.viewpoint.origin;
         material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        material.lying_cells = Vec4::ZERO;
+        if let Some(lie) = sheet.lie().filter(|_| !sheet.is_empty()) {
+            let [round, along] = sheet.origin();
+            material.lying = Vec4::new(round.0, along.0, lie.cell[0].0, lie.cell[1].0);
+            material.lying_cells = Vec4::new(
+                lie.cells[0] as f32,
+                lie.cells[1] as f32,
+                (SHEET_CELLS[0] + 1) as f32,
+                f32::from(u8::from(lie.closed)),
+            );
+        }
         material.grid = Vec4::new(
             across as f32,
             along as f32,

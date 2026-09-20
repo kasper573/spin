@@ -13,6 +13,7 @@ mod gpu;
 mod landscape;
 mod mouths;
 mod render;
+mod sheet;
 
 pub use gpu::{DrumFrame, DrumUniform};
 pub use landscape::{CELL, Flood, Grid, Ground, Landscape, PATCH, Patch, Place, Round};
@@ -21,6 +22,7 @@ pub use mouths::{
     MouthSeat, MouthSight, Mouths, OPENING,
 };
 pub use render::{DrumPlugin, bed_albedo, chord, ground_albedo, slack};
+pub use sheet::{SheetPour, SheetWindow};
 
 use serde::{Deserialize, Serialize};
 

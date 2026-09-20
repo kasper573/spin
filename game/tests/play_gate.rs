@@ -10,6 +10,7 @@ use bevy::diagnostic::{Diagnostic, DiagnosticsStore};
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
+use game::core::sheet::Sheet;
 use game::core::units::Metres;
 use game::core::units::Seconds;
 use game::systems::drum::{DEFAULT_RING, Ring};
@@ -298,8 +299,11 @@ fn keep(app: &mut App, pixels: &[u8], out: &std::path::Path, frame: u32, measure
     measured.water_m3.push(water_m3(app));
 }
 
+/// All the water there is: what flies as parcels, and what the GPU last found lying on the floor.
 fn water_m3(app: &App) -> f64 {
-    app.world().resource::<Fluid>().litres().0 as f64 / 1000.0
+    let flying = app.world().resource::<Fluid>().litres().0;
+    let lying = app.world().resource::<Sheet>().held().0;
+    (flying + lying) as f64 / 1000.0
 }
 
 impl Measured {

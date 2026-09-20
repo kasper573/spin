@@ -70,6 +70,8 @@ const SPRAY_WHITE: f32 = 0.9;
 // cannot make out: it is drawn the fainter the thinner it is, rather than ending at a rim the
 // grid's own shape gave it
 const FILM: f32 = 0.4;
+// a sheet of water thinner than this, in metres, is drawn the fainter the thinner it is
+const SHEET_FILM: f32 = 0.001;
 
 struct Fragment {
     @builtin(position) clip: vec4<f32>,
@@ -86,6 +88,9 @@ struct Fragment {
     // and on a parcel's square, the wall it has come down on: which way the wall faces, and
     // how much of the way the parcel has come from a particle's width off it to lying against it
     @location(6) @interpolate(flat) lain: vec4<f32>,
+    // on the surface of a sheet of water lying on the floor, how deep it stands there;
+    // otherwise negative
+    @location(7) standing: f32,
 }
 
 /// A point of the water's surface as a pixel sees it, however the surface was come by.
@@ -116,6 +121,7 @@ fn vertex(@location(0) numbered: vec3<f32>, @builtin(instance_index) instance: u
     let i = u32(numbered.x);
     out.drop = vec4(0.0);
     out.lain = vec4(0.0);
+    out.standing = -1.0;
     let world_from_local = get_world_from_local(instance);
     if (i < counters[1]) {
         let v = vertices[indices[i]];
@@ -126,6 +132,9 @@ fn vertex(@location(0) numbered: vec3<f32>, @builtin(instance_index) instance: u
         out.foam = v.position.w;
         out.wheel_position = v.position.xyz * water.units.x;
         out.wheel_velocity = v.velocity.xyz * water.clock.y;
+        if (water.units.z > 0.5) {
+            out.standing = v.normal.w;
+        }
         return out;
     }
     let square = i - counters[1];
@@ -305,9 +314,16 @@ fn fragment(in: Fragment) -> Shaded {
         let held = ring_run(in.world_position + water.origin.xyz, away / distance, water.ring.xy).distance;
         behind = max(counted.x * COLUMN_STEP + counted.y + distance + held, 0.0);
     }
+    var film = smoothstep(0.0, FILM * water.units.y, behind);
+    if (in.standing >= 0.0) {
+        // a sheet lies on the floor, so the water behind its surface reaches whatever the scene
+        // shows there, and how thin it is is known rather than made out
+        behind = 1e9;
+        film = smoothstep(0.0, SHEET_FILM, in.standing);
+    }
     var out: Shaded;
     out.depth = in.clip.z;
-    out.colour = surface(Surfaced(in.clip.xy, in.world_position, in.world_normal, in.foam, in.wheel_position, in.wheel_velocity, behind, smoothstep(0.0, FILM * water.units.y, behind), 1.0));
+    out.colour = surface(Surfaced(in.clip.xy, in.world_position, in.world_normal, in.foam, in.wheel_position, in.wheel_velocity, behind, film, 1.0));
     return out;
 }
 

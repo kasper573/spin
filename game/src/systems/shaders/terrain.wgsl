@@ -38,11 +38,26 @@ struct Terrain {
     absorption: vec4<f32>,
     scatter: vec4<f32>,
     air: Air,
+    // the sheet of water lying on the floor: where its first corner lies from the water's
+    // site, round the ring and along the axis, and a cell's arc and width, in metres
+    lying: vec4<f32>,
+    // how many cells it has each way, how many corners a row of its vertices holds, and
+    // whether its cells close on themselves round the ring
+    lying_cells: vec4<f32>,
+}
+
+// a corner of the sheet's surface as the water's shader draws it: see `sheet.wgsl`
+struct LyingCorner {
+    position: vec4<f32>,
+    // w: how deep the water stands at the corner
+    normal: vec4<f32>,
+    velocity: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> terrain: Terrain;
 // the water surveyed over the ground: see `columns.wgsl`
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> columns: array<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> lying_corners: array<LyingCorner>;
 
 const PI: f32 = 3.14159265;
 // water's index against the air it is seen through rather than against vacuum
@@ -106,6 +121,9 @@ struct Column {
     depth: f32,
     top: f32,
     flow: vec3<f32>,
+    // and the sheet of it lying on the floor: how deep, and its flow
+    lying: f32,
+    lying_flow: vec3<f32>,
 }
 
 /// One column of the survey, by where it is from the water's site: the water's thickness over it
@@ -183,7 +201,43 @@ fn column_over(p: vec3<f32>) -> Column {
     let flow = carried / max(thickness, 1e-6);
     let spinward = normalize(vec3(-p.z, 0.0, terrain.site.z + p.x));
     out.flow = spinward * flow.x + vec3(0.0, flow.y, 0.0);
+    let lying = lying_over(arc, terrain.site.y + p.y);
+    out.lying = lying.x;
+    out.lying_flow = spinward * lying.y + vec3(0.0, lying.z, 0.0);
     return out;
+}
+
+/// The sheet of water lying on the floor at a corner of its cells: how deep, and its run round
+/// the ring and along the axis.
+fn lying_at(corner: vec2<i32>) -> vec3<f32> {
+    let cells = vec2<i32>(terrain.lying_cells.xy);
+    var at = corner;
+    if (terrain.lying_cells.w > 0.5) {
+        at.x = (at.x % cells.x + cells.x) % cells.x;
+    }
+    if (at.x < 0 || at.y < 0 || at.x > cells.x || at.y > cells.y) {
+        return vec3(0.0);
+    }
+    let found = lying_corners[at.y * i32(terrain.lying_cells.z) + at.x];
+    let turn = (terrain.lying.x + f32(at.x) * terrain.lying.z) / terrain.site.z;
+    let round = dot(found.velocity.xyz, vec3(-sin(turn), 0.0, cos(turn)));
+    return vec3(found.normal.w, round, found.velocity.y);
+}
+
+/// The sheet over a point of the ground, by how far round the ring and along the axis the
+/// point lies from the water's site.
+fn lying_over(arc: f32, along: f32) -> vec3<f32> {
+    if (terrain.lying_cells.x < 1.0) {
+        return vec3(0.0);
+    }
+    let at = (vec2(arc, along) - terrain.lying.xy) / terrain.lying.zw;
+    let first = vec2<i32>(floor(at));
+    let f = at - floor(at);
+    return mix(
+        mix(lying_at(first), lying_at(first + vec2(1, 0)), f.x),
+        mix(lying_at(first + vec2(0, 1)), lying_at(first + vec2(1, 1)), f.x),
+        f.y,
+    );
 }
 
 /// How much of the sun's light reaches the bed through this much water, by way of the surface
@@ -265,8 +319,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
     // the water counted in it.
     let span = max(water.top - height, 0.0);
     let standing = smoothstep(STANDING.x, STANDING.y, water.depth / max(span, 1e-6));
-    let body = span * standing;
+    // the sheet lying on the floor stands on it as a body however thin, as deep as it says
+    let body = span * standing + water.lying;
     water.depth = mix(min(water.depth, span), span, standing);
+    water.flow = (water.flow * water.depth + water.lying_flow * water.lying)
+        / max(water.depth + water.lying, 1e-6);
+    water.depth += water.lying;
     if (underside) {
         albedo = terrain.dirt.rgb;
         water.depth = 0.0;

@@ -1,26 +1,32 @@
 //! The water tool: a hose in the shape of a gun. The left mouse button pours water where the
 //! crosshair rests, and the wheel turns the flow, which the screen on its back shows. Nothing
-//! is seen to leave the barrel: the water is put straight where it is aimed, and the ring
-//! light round the muzzle is what says it is pouring.
+//! is seen to leave the barrel: the water comes straight down on the floor under where it is
+//! aimed, over as much of it as the flow falling that fast is wide, and the ring light round the
+//! muzzle is what says it is pouring. It comes down at rest over the floor: a ring this small
+//! turns about as fast as any hose throws water, and water thrown against the turning that
+//! fast weighs nothing.
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
 use crate::core::fluid::Fluid;
-use crate::core::units::Metres;
+use crate::core::sheet::Sheet;
+use crate::core::units::{Litres, Metres, MetresPerSecond};
 use crate::systems::aim::Aim;
+use crate::systems::drum::{SheetPour, SheetWindow};
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::tools::muzzle::MuzzleLight;
 use crate::systems::tools::{Tool, ToolApp, Workbench, laid_along, lying_on, side_on};
 
-/// Water appears this far in front of the surface the crosshair rests on.
-pub const INJECT_DEPTH: Metres = Metres(1.0);
+/// How fast the water comes down, which with the flow says how wide it falls: as fast as
+/// what has fallen half a metre under the Earth's gravity.
+const FALL_SPEED: MetresPerSecond = MetresPerSecond(3.0);
 
 #[derive(Resource, Default, PartialEq)]
 pub struct WaterTool {
     pub pouring: bool,
-    /// Litres asked for but not yet turned into whole particles.
-    carry: f32,
+    /// Water asked for that nothing has taken yet.
+    carry: Litres,
 }
 
 impl Tool for WaterTool {
@@ -190,7 +196,9 @@ fn operate(
     aim: Res<Aim>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
-    mut fluid: ResMut<Fluid>,
+    fluid: Res<Fluid>,
+    mut sheet: ResMut<Sheet>,
+    mut window: ResMut<SheetWindow>,
 ) {
     if scroll.delta.y != 0.0 {
         Dial::Flow.adjust(&mut settings, scroll.delta.y.signum() as i32);
@@ -198,14 +206,29 @@ fn operate(
     let target = aim.target.filter(|_| mouse.pressed(MouseButton::Left));
     tool.pouring = target.is_some();
     let Some(target) = target else {
-        tool.carry = 0.0;
+        tool.carry = Litres(0.0);
         return;
     };
-    tool.carry += settings.flow.0 * time.delta_secs() / fluid.resolution().litres_per_particle().0;
-    let count = tool.carry.floor();
-    tool.carry -= count;
-    let at = target.point + target.normal * INJECT_DEPTH.0 as f64;
-    sim.inject(&mut fluid, at.to_array(), count as u32);
+    tool.carry.0 += settings.flow.0 * time.delta_secs();
+    // a round fall of water thinning to its rim is three times as wide as an even one of the
+    // same flow would be: its mean is a third of what falls in its middle
+    let even = settings.flow.0 / 1000.0 / FALL_SPEED.0;
+    let wide = Metres(2.0 * (3.0 * even / std::f32::consts::PI).sqrt());
+    let (_, outward) = sim.drum.depth_and_outward(target.point.to_array());
+    let taken = window.pour(
+        &mut sim.drum,
+        &mut sheet,
+        fluid.is_empty(),
+        SheetPour {
+            at: target.point.to_array(),
+            velocity: outward.map(|out| out * FALL_SPEED.0 as f64),
+            wide,
+            water: tool.carry,
+        },
+    );
+    if taken {
+        tool.carry = Litres(0.0);
+    }
 }
 
 fn light(tool: Res<WaterTool>, mut rings: Query<&mut MuzzleLight, With<Nozzle>>) {

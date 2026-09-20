@@ -21,13 +21,14 @@ use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
 use crate::core::math::{Quatd, Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
-use crate::core::rigid::{self, Body, BodyParams, BodyShape};
+use crate::core::rigid::{self, Body, BodyParams, BodyShape, WaterCoupling};
+use crate::core::sheet::Sheet;
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
     RadiansPerSecond, RadiansPerSecondSquared, Seconds,
 };
 use crate::core::vessel::Vessel;
-use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, Shift};
+use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, SheetWindow, Shift};
 
 /// The most the bodies are stepped by at once.
 pub const SUBSTEP_RATE: Hertz = Hertz(120.0);
@@ -207,8 +208,9 @@ fn standing_avatar(shape: &BodyShape) -> Body {
 
 impl Simulation {
     /// Advance by one frame of real time, or by queued time if any was requested. The water's
-    /// coupling from the last frame lands on the bodies first.
-    pub fn advance(&mut self, real: Seconds, fluid: &mut Fluid) {
+    /// coupling from the last frame lands on the bodies first, and with it what the sheet of
+    /// water lying on the floor does to them.
+    pub fn advance(&mut self, real: Seconds, fluid: &mut Fluid, lying: (&Sheet, &SheetWindow)) {
         let max_dt = SUBSTEP_RATE.period().0;
         self.substeps.clear();
         let (steps, dt) = if self.queued > 0.0 {
@@ -231,7 +233,8 @@ impl Simulation {
             }
         };
         let coupling = if steps > 0 {
-            fluid.take_coupling(steps as f64 * dt as f64)
+            let flying = fluid.take_coupling(steps as f64 * dt as f64);
+            self.with_lying(flying, lying, steps as f64, dt as f64)
         } else {
             None
         };
@@ -287,6 +290,41 @@ impl Simulation {
             self.rate = (self.window.1 / self.window.0).min(1.0);
             self.window = (0.0, 0.0);
         }
+    }
+
+    /// What all the water does to the bodies over the frame: what the water in flight did, if
+    /// it reported, and what the sheet does over the same time and as many substeps.
+    fn with_lying(
+        &self,
+        flying: Option<Vec<WaterCoupling>>,
+        (sheet, window): (&Sheet, &SheetWindow),
+        steps: f64,
+        dt: f64,
+    ) -> Option<Vec<WaterCoupling>> {
+        let mut all = flying;
+        for (i, body) in self.bodies.iter().enumerate() {
+            let Some(felt) = window.bearing(&self.drum, sheet, body, &self.shapes[body.shape])
+            else {
+                continue;
+            };
+            let all = all.get_or_insert_with(|| {
+                let none = WaterCoupling {
+                    seconds: steps * dt,
+                    substeps: steps,
+                    ..default()
+                };
+                vec![none; self.bodies.len()]
+            });
+            let had = &mut all[i];
+            for k in 0..3 {
+                had.buoyancy[k] += felt.buoyancy[k] * had.seconds;
+                had.buoyancy_torque[k] += felt.buoyancy_torque[k] * had.seconds;
+                had.flow[k] += felt.flow[k] * had.substeps;
+            }
+            had.coupling += felt.coupling * had.substeps;
+            had.wet += felt.wet * had.substeps;
+        }
+        all
     }
 
     /// Keep the safety clamps on speed and spin above what the spinning rim reaches, whatever
@@ -445,12 +483,13 @@ fn step(
     mut frame: ResMut<FluidFrame>,
     ready: Res<FluidReady>,
     time: Res<Time>,
+    (sheet, window): (Res<Sheet>, Res<SheetWindow>),
 ) {
     if !ready.get() {
         return;
     }
     fluid.keep_floor();
-    sim.advance(Seconds(time.delta_secs()), &mut fluid);
+    sim.advance(Seconds(time.delta_secs()), &mut fluid, (&sheet, &window));
     let substeps: Vec<(Seconds, Bodies)> = sim
         .substeps
         .iter()
