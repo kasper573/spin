@@ -561,16 +561,18 @@ fn water_coarsened_while_it_waits_to_join_is_as_much_water() {
         fluid.litres().0
     );
 
-    let mut placed = Fluid::default();
-    let asked = MAX_PARTICLES as u32 + 1000;
-    let asked_litres = asked as f32 * placed.resolution().litres_per_particle().0;
-    let added = placed.inject([0.0; 3], asked, |_| true);
-    assert!(placed.len() <= MAX_PARTICLES);
-    assert_eq!(added as usize, placed.len());
-    let one = placed.resolution().litres_per_particle().0;
-    assert!(
-        (placed.litres().0 - asked_litres).abs() <= one,
-        "{asked_litres} l asked for came to {} l",
-        placed.litres().0
-    );
+    for times_over in [1, 5] {
+        let mut placed = Fluid::default();
+        let asked = times_over * MAX_PARTICLES as u32 + 1000;
+        let asked_litres = asked as f32 * placed.resolution().litres_per_particle().0;
+        let added = placed.inject([0.0; 3], asked, |_| true);
+        assert!(placed.len() <= MAX_PARTICLES);
+        assert_eq!(added as usize, placed.len());
+        let one = placed.resolution().litres_per_particle().0;
+        assert!(
+            (placed.litres().0 - asked_litres).abs() <= one * times_over as f32,
+            "{asked_litres} l asked for came to {} l",
+            placed.litres().0
+        );
+    }
 }

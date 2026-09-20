@@ -354,7 +354,7 @@ impl Fluid {
         mut has_room: impl FnMut(Vec3d) -> bool,
     ) -> u32 {
         let mut count = count;
-        if self.count as usize + count as usize > MAX_PARTICLES && self.thin.is_none() {
+        while self.count as usize + count as usize > MAX_PARTICLES && self.thin.is_none() {
             self.coarsen();
             count = count.div_ceil(2);
         }
@@ -625,7 +625,10 @@ impl Fluid {
     /// those it has, and whatever is waiting to join them joins the rest.
     fn coarsen(&mut self) {
         let on_gpu = self.count - self.pending.len() as u32 - self.joining;
-        self.thin = Some((on_gpu, self.resolution));
+        // only water on the GPU is thinned there, which it can be once a frame
+        if on_gpu > 0 {
+            self.thin = Some((on_gpu, self.resolution));
+        }
         // the water waiting to join is thinned as the water on the GPU is: every other
         // particle of it, and every other site of the lattice, which are the sites of a
         // lattice with twice the room to each
