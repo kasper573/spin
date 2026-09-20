@@ -145,6 +145,8 @@ const DEEP: f32 = 0.9;
 // how little a solid's face may turn toward a line through a cell for the line to run along
 // it: a quarter, which is a wall within fifteen degrees of the line
 const RUNS_ALONG: f32 = 0.26;
+// how squarely a solid faces along an axis for it to face along it rather than across it
+const FACES_ALONG: f32 = 0.7;
 // how far from a cell's middle the water's face may be for the column of five cells about the
 // cell to have the face in it, in cells: all but the last hair of the column's reach
 const FACE_IN_THE_COLUMN: f32 = 2.45;
@@ -1520,12 +1522,15 @@ fn clamp_speed(p: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 
 /// The eight faces round a particle that carry one part of its velocity: what flows through
 /// those that have a flow, which those are, and which of them the pressure set, the rest
-/// having been told theirs by the set ones next to them.
+/// having been told theirs by the set ones next to them. What flows through a face is known
+/// where the pressure set it, and where a solid that faces along the face's axis covers it
+/// and lets through only its own motion; what the rest were told is a guess at it.
 struct Faces {
     flows: array<f32, 8>,
     shifts: array<f32, 8>,
     settled: u32,
     flowing: u32,
+    known: u32,
     first: vec3<i32>,
     within: vec3<f32>,
 }
@@ -1549,23 +1554,29 @@ fn faces_round(x: vec3<f32>, axis: u32) -> Faces {
         }
         out.flows[n] = cell.flow[axis];
         out.flowing |= 1u << n;
+        let nearest = select(cell.walls[1], cell.walls[0], cell.walls[0].w <= cell.walls[1].w);
+        if (cell.open[axis] <= 0.0 && abs(nearest[axis]) >= FACES_ALONG) {
+            out.known |= 1u << n;
+        }
         if (((marks >> axis) & 1u) == 1u) {
             out.shifts[n] = cell.shift[axis];
             out.settled |= 1u << n;
+            out.known |= 1u << n;
         }
     }
     return out;
 }
 
-/// What stands in for a face that has no flow: the mean of the faces nearest it among the
-/// eight that have, so that what is read changes across the particle no faster than they
-/// differ, however few they are, and as they do along the ways in which they are told.
-fn stand_in(faces: Faces, n: u32) -> f32 {
+/// What stands in for a face that is not `among` those to be read: the mean of the faces
+/// nearest it among the eight that are, so that what is read changes across the particle no
+/// faster than they differ, however few they are, and as they do along the ways in which
+/// they are told.
+fn stand_in(faces: Faces, n: u32, among: u32) -> f32 {
     var nearest = 4u;
     var total = 0.0;
     var count = 0.0;
     for (var m = 0u; m < 8u; m++) {
-        if ((faces.flowing & (1u << m)) == 0u) {
+        if ((among & (1u << m)) == 0u) {
             continue;
         }
         let apart = countOneBits(n ^ m);
@@ -1585,6 +1596,12 @@ fn stand_in(faces: Faces, n: u32) -> f32 {
 /// What a particle takes back from the faces round it of one part of its velocity: the part
 /// itself, how it changes across the particle, how those changes change in turn, and how far
 /// the particle is shifted along this axis, in cells.
+///
+/// How the part changes across the particle is taken from the faces whose flow is known
+/// alone. Where the pressure holds no sway, as in a sheet of water too thin for the cells,
+/// the flow still has in it the fall of a step that the walls have yet to stop, while the
+/// faces the walls cover have not: a change from the one to the other is no motion of the
+/// water's, and a particle that carried it would hand it back as one, more of it each step.
 struct Taken {
     part: f32,
     across: vec3<f32>,
@@ -1603,10 +1620,13 @@ fn take(faces: Faces) -> Taken {
         let way = vec3<f32>(o) * 2.0 - 1.0;
         var flow = faces.flows[n];
         if ((faces.flowing & (1u << n)) == 0u) {
-            flow = stand_in(faces, n);
+            flow = stand_in(faces, n, faces.flowing);
         }
         out.shifted += wx * wy * wz * faces.shifts[n];
         out.part += wx * wy * wz * flow;
+        if ((faces.known & (1u << n)) == 0u) {
+            flow = stand_in(faces, n, faces.known);
+        }
         out.across += vec3(way.x * wy * wz, wx * way.y * wz, wx * wy * way.z) * flow;
         out.twists += vec4(way.x * way.y * wz, wx * way.y * way.z, way.x * wy * way.z, way.x * way.y * way.z) * flow;
     }
@@ -1738,8 +1758,9 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let at = read_at(q);
     affine[6u * i].w = at.pressure;
     let landed = velocity_next[i].xyz;
-    let pushed = 0.5 * (v - flown) * params.dt;
-    let turned = vessel_star_velocity(landed + pushed) - vessel_star_velocity(landed);
+    // what the walls stopped of the particle's flight they have moved it for already
+    let pushed = 0.5 * (v - own) * params.dt;
+    let turned = vessel_star_velocity(landed + 0.5 * (v - flown) * params.dt) - vessel_star_velocity(landed);
     // All of a parcel is water, so all of it belongs under the water's face, as all of it
     // belongs within the walls: what of a parcel the water holds stands over a face that a
     // column of cells told of settles under it, in its own time, as water that is too close
@@ -1749,7 +1770,6 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         shifted += face.deeper * (EVENED_OUT_IN_A_STEP * held * standing_over * params.h);
     }
     let confined = vessel_confine(exclude_from_bodies(q + pushed + turned * (2.0 / 3.0 * params.dt) + shifted), params.margin);
-    v += 2.0 * turned;
     var first = contact[2u * i];
     var second = contact[2u * i + 1u];
     if (confined.first.w > 0.0) {
@@ -1764,6 +1784,14 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     if (first.w > 0.0) {
         v = dragged_by_wall(v, under_face);
     }
+    // The frame turns under the particle for as far as it is moved from where its flight
+    // landed it. What pushes it there, the water or a wall, pushes as the frame turns, which
+    // turns the push as well: twice the frame's turn over the way. What only shifts it, to
+    // keep the water as dense as water is, leaves its motion among the stars alone: once.
+    // Left out, water lying on the floor of a spinning vessel is left behind by it a little
+    // more with every step.
+    v += 2.0 * (vessel_star_velocity(confined.p) - vessel_star_velocity(landed));
+    v -= vessel_star_velocity(landed + shifted) - vessel_star_velocity(landed);
     contact[2u * i] = first;
     contact[2u * i + 1u] = second;
     position[i] = vec4(confined.p, position[i].w);
