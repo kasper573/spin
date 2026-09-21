@@ -532,7 +532,7 @@ fn a_portal_pair_opened_in_a_dry_ring() {
 #[ignore = "wants a GPU"]
 fn a_hill_raised_and_a_pit_dug_and_water_poured_between_them() {
     let scene = [
-        Stretch::flying(0.3, Thruster::PitchDown).with(LAND_TOOL),
+        Stretch::flying(0.2, Thruster::PitchDown).with(LAND_TOOL),
         Stretch::sculpting(2.5, MouseButton::Left),
         Stretch::flying(0.5, Thruster::YawLeft).with(LAND_TOOL),
         Stretch::sculpting(3.0, MouseButton::Right),
@@ -541,6 +541,19 @@ fn a_hill_raised_and_a_pit_dug_and_water_poured_between_them() {
         Stretch::idle(4.0),
     ];
     play("land", Seat::Body, 20_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_mound_raised_at_the_feet_and_the_horizon_looked_at_again() {
+    let scene = [
+        Stretch::idle(1.0).with(LAND_TOOL),
+        Stretch::flying(0.5, Thruster::PitchDown).with(LAND_TOOL),
+        Stretch::sculpting(1.5, MouseButton::Left),
+        Stretch::flying(0.5, Thruster::PitchUp).with(LAND_TOOL),
+        Stretch::idle(2.0).with(LAND_TOOL),
+    ];
+    play("mound", Seat::Body, 0.0, &scene).hold();
 }
 
 #[test]

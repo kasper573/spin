@@ -223,11 +223,11 @@ impl Default for AvatarInput {
 }
 
 /// The gyros' reference: the attitude they hold the hull to, carried along by the turning
-/// thrusters, by the air the hull is in and, standing, by the ground turning under its feet.
+/// thrusters, by the air the hull is in and, standing, by the way up turning where it stands.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Gyros {
     pub held: Quatd,
-    /// The ground's normal under the hull during the last substep it stood on one.
+    /// Which way was up for the hull during the last substep it stood on the ground.
     pub footing: Option<Vec3d>,
 }
 
@@ -344,13 +344,14 @@ fn fly(body: &mut Body, thrust: &Vec3d, power: f64, vessel: &impl Vessel, dt: f6
     add_scaled(&mut body.v, &brake, dt);
 }
 
-/// Gyros: carry the held attitude along with the ground turning under the feet, or with the air
-/// when there is no ground, and as the turning thrusters ask; then turn the hull toward it, as
-/// hard as they may. Standing, the local vertical turns as the hull walks round the vessel, and
-/// the reference turns with it, so walking keeps the hull as upright as it stood.
+/// Gyros: carry the held attitude along with the way up turning where the hull stands, or with
+/// the air when there is no ground, and as the turning thrusters ask; then turn the hull toward
+/// it, as hard as they may. Standing, the local vertical turns as the hull walks round the
+/// vessel, and the reference turns with it, so walking keeps the hull as upright as it stood,
+/// whatever slopes it walks over.
 fn hold(body: &mut Body, thrusters: &Thrusters, gyros: &mut Gyros, vessel: &impl Vessel, dt: f64) {
     let footing = match (body.solid, body.ground) {
-        (true, Some(ground)) => Some(ground.normal),
+        (true, Some(ground)) => Some(upward(vessel, body.p).unwrap_or(ground.normal)),
         _ => None,
     };
     // what the held attitude turns by, and the spin the hull should have in the frame: the
@@ -398,6 +399,23 @@ fn hold(body: &mut Body, thrusters: &Thrusters, gyros: &mut Gyros, vessel: &impl
         GYRO_AUTHORITY * dt,
     );
     add_scaled(&mut body.w, &change, 1.0);
+}
+
+/// Which way is up for a body standing at `p`: toward the axis the vessel turns about, against
+/// the way its turning flings the body, whichever way the ground under it slopes. A vessel that
+/// does not turn has no up of its own.
+fn upward(vessel: &impl Vessel, p: Vec3d) -> Option<Vec3d> {
+    let spin = vessel.angular_velocity();
+    let rate = norm(&spin);
+    if rate < 1e-9 {
+        return None;
+    }
+    let pivot = vessel.pivot();
+    let from = [p[0] - pivot[0], p[1] - pivot[1], p[2] - pivot[2]];
+    let along = dot(&from, &spin) / (rate * rate);
+    let out = [0, 1, 2].map(|k| from[k] - spin[k] * along);
+    let far = norm(&out);
+    (far > 1e-9).then(|| out.map(|o| -o / far))
 }
 
 /// `v` without its component along the unit normal `n`.
