@@ -116,6 +116,38 @@ impl Round {
     }
 }
 
+/// How what lies on a ring's cells is carried over to the cells of a ring of another size, as
+/// it lies about a place: every cell keeps how far round the ring it is from the one under
+/// `from`, which is now under `to`. What the new ring has no room for is lost, and what it has
+/// more room for was on no cell before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroundCarry {
+    pub old: Grid,
+    pub new: Grid,
+    pub from: Round,
+    pub to: Round,
+}
+
+impl GroundCarry {
+    /// The new ring's cell that one of the old ring's is carried to, if there is room for it.
+    pub fn onto(self, cell: i64) -> Option<i64> {
+        let offset = self.old.short_way(cell as i128 - self.from.cell as i128);
+        let room = self.new.round / 2;
+        (-room..room)
+            .contains(&offset)
+            .then(|| self.new.wrap(self.to.cell as i128 + offset as i128))
+    }
+
+    /// The old ring's cell that was carried to one of the new ring's, if any was.
+    pub fn out_of(self, cell: i64) -> Option<i64> {
+        let offset = self.new.short_way(cell as i128 - self.to.cell as i128);
+        let room = self.old.round / 2;
+        (-room..room)
+            .contains(&offset)
+            .then(|| self.old.wrap(self.from.cell as i128 + offset as i128))
+    }
+}
+
 /// A point of the ground: its place round the ring, and along the axis from the middle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Place {
@@ -214,33 +246,34 @@ impl Landscape {
         self.base
     }
 
-    /// Lay the ground round a ring of another size, as it lies about a place: every cell keeps
-    /// how far round the ring it is from the one under `from`, which is now under `to`, and
-    /// where it is along the axis. What the new ring has no room for is lost, and what it has
-    /// more room for is laid as the rest of the ground is.
-    pub fn resize(&mut self, ring: Ring, from: Round, to: Round) {
-        let old = self.grid;
+    /// Lay the ground round a ring of another size, as it lies about a place: every cell is
+    /// carried round the ring as the returned carry says, and keeps where it is along the
+    /// axis. What the new ring has more room for is laid as the rest of the ground is.
+    pub fn resize(&mut self, ring: Ring, from: Round, to: Round) -> GroundCarry {
         let patches = std::mem::take(&mut self.patches);
+        let carry = GroundCarry {
+            old: self.grid,
+            new: Grid::of(ring),
+            from,
+            to,
+        };
         self.ring = ring;
-        self.grid = Grid::of(ring);
+        self.grid = carry.new;
         let max = ring.max_height().0;
         self.base = self.base.min(max);
-        let room = self.grid.round / 2;
         for ((round, along), patch) in patches {
             for (k, height) in patch.heights.iter().enumerate() {
                 let (cell, row) = cell_of(round, along, k);
-                let offset = old.short_way(cell as i128 - from.cell as i128);
-                if row.abs() > self.grid.rows || offset < -room || offset >= room {
-                    continue;
+                if let Some(cell) = carry.onto(cell).filter(|_| row.abs() <= self.grid.rows) {
+                    self.set(cell, row, height.min(max));
                 }
-                let cell = self.grid.wrap(to.cell as i128 + offset as i128);
-                self.set(cell, row, height.min(max));
             }
         }
         let base = self.base;
         self.patches
             .retain(|_, patch| patch.heights.iter().any(|h| *h != base));
         self.relaid();
+        carry
     }
 
     /// Make the ground one depth everywhere.

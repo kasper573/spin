@@ -4,12 +4,13 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::avatar;
+use crate::core::sheet::Sheet;
 use crate::core::units::{
     EARTH_GRAVITY, KilogramsPerCubicMetre, LitresPerSecond, Metres, MetresPerSecondSquared,
     RadiansPerSecond,
 };
 use crate::systems::air::Air;
-use crate::systems::drum::{DEFAULT_RING, Ring};
+use crate::systems::drum::{DEFAULT_RING, Ring, SheetWindow};
 use crate::systems::sim::{SimSet, Simulation, standing_gravity, standing_spin};
 
 /// How many of a dial's fine steps it takes before the steps grow tenfold.
@@ -358,8 +359,13 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-fn apply(settings: Res<Settings>, air: Res<Air>, mut sim: ResMut<Simulation>) {
-    sim.resize(settings.ring());
+fn apply(
+    settings: Res<Settings>,
+    air: Res<Air>,
+    mut sim: ResMut<Simulation>,
+    (mut sheet, mut window): (ResMut<Sheet>, ResMut<SheetWindow>),
+) {
+    sim.resize(settings.ring(), (&mut sheet, &mut window));
     sim.drum.target_spin = settings.spin;
     sim.thrusters.power = settings.thrust;
     let air_density = if settings.air {

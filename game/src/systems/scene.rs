@@ -35,6 +35,12 @@ use crate::systems::player::PlayerCamera;
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
 
+/// How many of the things that let the scene through, the water and the glass among them, are
+/// each drawn over a picture of all that is behind it: every one of them, however many a view
+/// has. Drawn fewer pictures than that, they share them by their count alone, and whichever
+/// shares one with what is behind it is drawn as if that were not there.
+pub const SEEN_THROUGH_LAYERS: usize = 64;
+
 /// Where the sun is among the stars.
 pub const SUN_DIRECTION: Vec3 = Vec3::new(0.5145, 0.7717, 0.3430);
 pub const SPACE: Color = Color::srgb(0.02, 0.027, 0.05);
@@ -525,7 +531,7 @@ fn spawn(
             ..Bloom::NATURAL
         },
         ScreenSpaceTransmission {
-            steps: 2,
+            steps: SEEN_THROUGH_LAYERS,
             ..default()
         },
         Msaa::Sample4,

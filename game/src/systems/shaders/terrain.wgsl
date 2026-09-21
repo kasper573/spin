@@ -240,6 +240,31 @@ fn lying_over(arc: f32, along: f32) -> vec3<f32> {
     );
 }
 
+/// A point of the site's frame in the water's, a vector of it, and a vector of the water's
+/// frame in the site's. The water's frame is fixed to the wheel and the site is not: whatever
+/// is drawn on the ground by where on the ground it is is drawn by its place in the water's
+/// frame, as the water's own ripples are, or it would shift with every move of the site. It is
+/// worked out so that near the water's site nothing small is the difference of two large.
+fn to_waters_frame(at: vec3<f32>) -> vec3<f32> {
+    let radius = terrain.site.z;
+    let from_axis = length(vec2(radius + at.x, at.z));
+    let inside = -(2.0 * radius * at.x + at.x * at.x + at.z * at.z) / (from_axis + radius);
+    let turn = terrain.site.x / radius + atan2(at.z, radius + at.x);
+    let half = sin(0.5 * turn);
+    let wall = vec3(-2.0 * radius * half * half, terrain.site.y + at.y, radius * sin(turn));
+    return wall + vec3(-cos(turn), 0.0, -sin(turn)) * inside;
+}
+
+fn vector_to_waters_frame(v: vec3<f32>) -> vec3<f32> {
+    let turn = terrain.site.x / terrain.site.z;
+    return vec3(v.x * cos(turn) - v.z * sin(turn), v.y, v.x * sin(turn) + v.z * cos(turn));
+}
+
+fn vector_from_waters_frame(v: vec3<f32>) -> vec3<f32> {
+    let turn = terrain.site.x / terrain.site.z;
+    return vec3(v.x * cos(turn) + v.z * sin(turn), v.y, v.z * cos(turn) - v.x * sin(turn));
+}
+
 /// How much of the sun's light reaches the bed through this much water, by way of the surface
 /// above: what crossing the water leaves of it, and how the ripples it came through gather it.
 /// Ripples too small to resolve at a pixel `footprint` wide are left out, since their caustics
@@ -254,8 +279,8 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
     let path = water.depth / cos_r;
     // where the light came through the surface: back up its refracted way
     let down = refract(-l, up, 1.0 / IOR);
-    let entry = p - down * path;
-    let run = carried(entry, water.flow, terrain.clock.x);
+    let entry = to_waters_frame(p - down * path);
+    let run = carried(entry, vector_to_waters_frame(water.flow), terrain.clock.x);
     // waves whose caustics have crossed before the light reaches the bed draw no pattern on
     // it, and neither do those too small to resolve: a wave is left out once the footprint
     // reaches half its length
@@ -264,7 +289,7 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
     // rays bent by the ripples' slopes converge or spread by the time they reach the bed
     let spread = (1.0 - 1.0 / IOR) * path;
     let e1 = vec3(0.0, 1.0, 0.0);
-    let e2 = cross(up, e1);
+    let e2 = cross(vector_to_waters_frame(up), e1);
     let m = mat2x2<f32>(
         1.0 + spread * dot(e1, w.curve * e1), spread * dot(e2, w.curve * e1),
         spread * dot(e1, w.curve * e2), 1.0 + spread * dot(e2, w.curve * e2),
@@ -341,26 +366,28 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
     if (bedded > 0.0) {
         // the ripples are the work of the currents there have been rather than of the water's
         // run now, and the currents of a ring run round it as it is spun up and slowed
-        let along = cross(up, normalize(vec3(-at.z, 0.0, terrain.site.z + at.x)));
+        let fixed = to_waters_frame(at);
+        let fixed_up = vector_to_waters_frame(up);
+        let along = cross(fixed_up, normalize(vec3(-fixed.z, 0.0, terrain.site.z + fixed.x)));
         // no bed is a corrugation: the crests turn slowly out of true, meander over a few
         // wavelengths, and give out over stretches the water has left alone
-        let turn = (noise3(at / (SAND_RIPPLE * 40.0)) - 0.5) * SAND_TURN;
-        let across = normalize(cross(up, along) + along * turn);
-        let meander = (noise3(at / (SAND_RIPPLE * 4.0)) - 0.5)
-            + (noise3(at / (SAND_RIPPLE * 15.0)) - 0.5) * 2.0;
-        let phase = dot(at, across) * 2.0 * PI / SAND_RIPPLE + meander * SAND_MEANDER;
-        let worked = smoothstep(0.3, 0.7, noise3(at / (SAND_RIPPLE * 25.0)));
+        let turn = (noise3(fixed / (SAND_RIPPLE * 40.0)) - 0.5) * SAND_TURN;
+        let across = normalize(cross(fixed_up, along) + along * turn);
+        let meander = (noise3(fixed / (SAND_RIPPLE * 4.0)) - 0.5)
+            + (noise3(fixed / (SAND_RIPPLE * 15.0)) - 0.5) * 2.0;
+        let phase = dot(fixed, across) * 2.0 * PI / SAND_RIPPLE + meander * SAND_MEANDER;
+        let worked = smoothstep(0.3, 0.7, noise3(fixed / (SAND_RIPPLE * 25.0)));
         // each of the three scales is left at its mean once a pixel is too wide to draw it,
         // so what a bed loses with distance is its grain first and its patchiness last
         let crisp = 1.0 - smoothstep(0.08 * SAND_RIPPLE, 0.25 * SAND_RIPPLE, footprint);
         let relief = SAND_RELIEF * bedded * crisp * worked;
         let slope = relief * cos(phase) * 2.0 * PI / SAND_RIPPLE;
-        n = normalize(n - across * slope);
+        n = normalize(n - vector_from_waters_frame(across) * slope);
         let grained = 1.0 - smoothstep(0.08 * SAND_GRAIN, 0.25 * SAND_GRAIN, footprint);
-        let grain = (noise3(at / SAND_GRAIN) - 0.5) * SAND_MOTTLE * grained;
+        let grain = (noise3(fixed / SAND_GRAIN) - 0.5) * SAND_MOTTLE * grained;
         let broad = 1.0 - smoothstep(0.25 * SAND_PATCH, 0.5 * SAND_PATCH, footprint);
         // sand the water has worked lies looser and darker than sand it has left flat
-        let coarse = ((noise3(at / SAND_PATCH) - 0.5) * SAND_PATCHY - worked * SAND_WORKED) * broad;
+        let coarse = ((noise3(fixed / SAND_PATCH) - 0.5) * SAND_PATCHY - worked * SAND_WORKED) * broad;
         albedo *= 1.0 + (grain + coarse) * bedded;
     }
     // a portal let into the ground here is part of the ground: what is filled in of it takes

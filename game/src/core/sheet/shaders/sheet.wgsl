@@ -87,6 +87,19 @@ struct SurfaceVertex {
 // the glass, and its run round the ring and along it
 @group(0) @binding(12) var<storage, read_write> watched: array<vec4<f32>>;
 const WATCHED: u32 = 16u;
+// `SheetCarried`, for a sheet laid anew with water on it
+struct Carried {
+    // the cells that were in use
+    used: vec2<u32>,
+    // how many grains each way a cell was made of, and is made of now
+    grains: vec2<u32>,
+    spread: f32,
+    // how many of `was` are the grains round the ring, which those along it come after
+    round: u32,
+    // the grain each of the sheet's grains was, or less than none
+    was: array<i32>,
+}
+@group(0) @binding(13) var<storage, read> carried: Carried;
 
 const STEEPEST: f32 = 1.3;
 // water thinner than the fourth root of this runs slower than its momentum says
@@ -370,6 +383,39 @@ fn pour(@builtin(global_invocation_id) id: vec3<u32>) {
         let run = sheet.pour_run + sheet.pour_spread * from_middle / sheet.pour_reach;
         let water = sheet.pour * falling(length(from_middle) / sheet.pour_reach);
         after[slot(at)] += vec4(water, water * run, 0.0);
+    }
+}
+
+/// The water by the glass's area that a cell's grains along one axis had, of which `first` is
+/// the first, in the cells they were in along that axis and the cell's own along the other.
+fn carried_over(first: u32, cell: vec2<u32>, axis: u32) -> vec4<f32> {
+    var had = vec4(0.0);
+    for (var grain = 0u; grain < carried.grains.y; grain++) {
+        let was = carried.was[first + grain];
+        if (was >= 0) {
+            var at = cell;
+            at[axis] = u32(was) / carried.grains.x;
+            had += before[slot(at)];
+        }
+    }
+    return had / f32(carried.grains.y);
+}
+
+/// Water is carried over to a sheet laid anew one axis at a time: first round the ring, into
+/// the cells there are now round it and those there were along it.
+@compute @workgroup_size(8, 8)
+fn carry_round(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < sheet.used.x && id.y < carried.used.y) {
+        after[slot(id.xy)] = carried_over(id.x * carried.grains.y, id.xy, ROUND);
+    }
+}
+
+/// And then along the axis, where it comes to stand as deep as its grains' new area has it.
+@compute @workgroup_size(8, 8)
+fn carry_along(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (in_use(id)) {
+        let first = carried.round + id.y * carried.grains.y;
+        after[slot(id.xy)] = carried.spread * carried_over(first, id.xy, ALONG);
     }
 }
 

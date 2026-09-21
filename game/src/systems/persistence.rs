@@ -10,9 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::core::avatar::Gyros;
 use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
+use crate::core::sheet::Sheet;
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
-use crate::systems::drum::{Grid, Ground, Landscape, Mouths, Patch, Ring, Round, Site};
+use crate::systems::drum::{
+    Grid, Ground, Landscape, Mouths, Patch, Ring, Round, SheetWindow, Site,
+};
 use crate::systems::settings::Settings;
 use crate::systems::sim::{SimSet, Simulation};
 
@@ -99,11 +102,12 @@ pub fn apply(
     snapshot: &Snapshot,
     settings: &mut Settings,
     sim: &mut Simulation,
-    fluid: &mut Fluid,
+    (fluid, sheet, window): (&mut Fluid, &mut Sheet, &mut SheetWindow),
 ) {
     *settings = snapshot.settings.clone().sanitized();
     sim.reset();
-    sim.resize(settings.ring());
+    sheet.empty();
+    sim.resize(settings.ring(), (sheet, window));
     fluid.restore(water_resolution(snapshot.water));
     sim.drum.spin = RadiansPerSecond(finite(snapshot.spin.0).clamp(-999.0, 999.0));
     sim.drum.target_spin = settings.spin;
@@ -299,8 +303,12 @@ fn restore(world: &mut World) {
     snapshot.landscape.patches = patches;
     world.resource_scope(|world, mut settings: Mut<Settings>| {
         world.resource_scope(|world, mut sim: Mut<Simulation>| {
-            world.resource_scope(|_, mut fluid: Mut<Fluid>| {
-                apply(&snapshot, &mut settings, &mut sim, &mut fluid)
+            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world.resource_scope(|world, mut sheet: Mut<Sheet>| {
+                    let mut window = world.resource_mut::<SheetWindow>();
+                    let water = (&mut *fluid, &mut *sheet, &mut *window);
+                    apply(&snapshot, &mut settings, &mut sim, water)
+                })
             })
         })
     });

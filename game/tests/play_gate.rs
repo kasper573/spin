@@ -33,17 +33,19 @@ const TIMED_RUNS_KEPT: u32 = 128;
 /// The slowest the game may run.
 const FRAME_BUDGET_MS: f64 = 1000.0 / 120.0;
 const WATER_TOOL: usize = 0;
+const LAND_TOOL: usize = 1;
 
 const PORTAL_TOOL: usize = 2;
 
 /// What a player does for a stretch of a scene: which tool is out, which button of it is held,
-/// and which thruster.
+/// which thruster, and a dial turned to a new setting as the stretch begins.
 #[derive(Clone, Copy)]
 struct Stretch {
     seconds: f32,
     pilot: Option<Thruster>,
     tool: usize,
     button: Option<MouseButton>,
+    dial: Option<(Dial, f32)>,
 }
 
 impl Stretch {
@@ -53,6 +55,24 @@ impl Stretch {
             pilot: None,
             tool: WATER_TOOL,
             button: None,
+            dial: None,
+        }
+    }
+
+    /// A dial turned to a setting, and what comes of it watched.
+    fn dialling(seconds: f32, dial: Dial, to: f32) -> Stretch {
+        Stretch {
+            dial: Some((dial, to)),
+            ..Stretch::idle(seconds)
+        }
+    }
+
+    /// One of the land tool's buttons held: the left raises the ground, the right lowers it.
+    fn sculpting(seconds: f32, button: MouseButton) -> Stretch {
+        Stretch {
+            tool: LAND_TOOL,
+            button: Some(button),
+            ..Stretch::idle(seconds)
         }
     }
 
@@ -181,6 +201,9 @@ fn play_in(
                 testing::button(&mut app, pressed, true);
             }
             button = stretch.button;
+        }
+        if let Some((dial, to)) = stretch.dial {
+            dial.set(&mut app.world_mut().resource_mut::<Settings>(), to);
         }
         let pouring = stretch.tool == WATER_TOOL && stretch.button == Some(MouseButton::Left);
         let held: Vec<Thruster> = stretch.pilot.iter().copied().collect();
@@ -448,6 +471,36 @@ fn a_portal_pair_opened_in_a_dry_ring() {
         Stretch::idle(4.0),
     ];
     play("dry_portals", Seat::Body, 0.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_hill_raised_and_a_pit_dug_and_water_poured_between_them() {
+    let scene = [
+        Stretch::flying(0.3, Thruster::PitchDown).with(LAND_TOOL),
+        Stretch::sculpting(2.5, MouseButton::Left),
+        Stretch::flying(0.5, Thruster::YawLeft).with(LAND_TOOL),
+        Stretch::sculpting(3.0, MouseButton::Right),
+        Stretch::flying(0.25, Thruster::YawRight),
+        Stretch::pouring(6.0),
+        Stretch::idle(4.0),
+    ];
+    play("land", Seat::Body, 20_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_ring_with_water_in_it_widened_and_grown_and_spun_down() {
+    let scene = [
+        Stretch::flying(0.3, Thruster::PitchDown).with(LAND_TOOL),
+        Stretch::sculpting(3.0, MouseButton::Right),
+        Stretch::pouring(3.0),
+        Stretch::idle(1.5),
+        Stretch::dialling(3.0, Dial::Width, 20.0),
+        Stretch::dialling(4.0, Dial::Diameter, 30.0),
+        Stretch::dialling(4.0, Dial::Spin, 0.4),
+    ];
+    play("dials", Seat::Body, 5_000.0, &scene).hold();
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! The render world's half of the sheet: its buffers, a pipeline for each kernel of
-//! `sheet.wgsl`, and the frame's order of them: the water poured, then as many steps as the
-//! frame's time takes, each as long as the GPU itself finds its quickest wave allows, and
-//! at last the surface to be drawn and the water there is, counted.
+//! `sheet.wgsl`, and the frame's order of them: the water carried over if the sheet was laid
+//! anew, the water poured, then as many steps as the frame's time takes, each as long as the
+//! GPU itself finds its quickest wave allows, and at last the surface to be drawn and the water
+//! there is, counted.
 use bevy::core_pipeline::schedule::camera_driver;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
@@ -22,8 +23,8 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
 use super::{
-    SHADER, SHEET_CELLS, SHEET_CORNERS, SHEET_INDICES, SHEET_WATCHED, SHEET_WATCHED_CORNERS,
-    SheetFrame, SheetParams, SheetReady,
+    SHADER, SHEET_CELLS, SHEET_CORNERS, SHEET_INDICES, SHEET_MOST_GRAINS, SHEET_WATCHED,
+    SHEET_WATCHED_CORNERS, SheetFrame, SheetParams, SheetReady,
 };
 
 /// Threads to a workgroup of the kernels that go row by row.
@@ -41,6 +42,7 @@ pub struct SheetBuffers {
     crossing_along: Handle<ShaderBuffer>,
     clock: Handle<ShaderBuffer>,
     threads: Handle<ShaderBuffer>,
+    carried: Handle<ShaderBuffer>,
     /// The surface, as the water's shader draws one: its vertices, the corners of its
     /// triangles, and how many of those there are, second of four counts.
     pub vertices: Handle<ShaderBuffer>,
@@ -61,6 +63,7 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> SheetBuffers {
     };
     let cells = (SHEET_CELLS[0] * SHEET_CELLS[1]) as usize;
     let rows = SHEET_CELLS[1] as usize;
+    let grains = ((SHEET_CELLS[0] + SHEET_CELLS[1]) * SHEET_MOST_GRAINS) as usize;
     SheetBuffers {
         bed: make(SHEET_CORNERS * 4),
         state: make(cells * 16),
@@ -69,6 +72,7 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> SheetBuffers {
         crossing_along: make(cells * 16),
         clock: make(12 + rows * 4),
         threads: make(16),
+        carried: make((6 + grains) * 4),
         vertices: make(SHEET_CORNERS * 48),
         indices: make(SHEET_INDICES * 4),
         counters: make(16),
@@ -99,6 +103,8 @@ pub fn install(render_app: &mut SubApp) {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kernel {
+    CarryRound,
+    CarryAlong,
     Pour,
     Quickest,
     Pace,
@@ -112,16 +118,20 @@ enum Kernel {
     Report,
 }
 
-/// Which of `sheet.wgsl`'s bindings a kernel's layout holds: the solver's, the pacing's, which
-/// alone writes how many threads the step's kernels are sent out with, or the surface's.
+/// Which of `sheet.wgsl`'s bindings a kernel's layout holds: the carrying's, the solver's, the
+/// pacing's, which alone writes how many threads the step's kernels are sent out with, or the
+/// surface's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bound {
+    Carrying,
     Solver,
     Pacing,
     Surface,
 }
 
-const KERNELS: [(Kernel, &str, Bound); 11] = [
+const KERNELS: [(Kernel, &str, Bound); 13] = [
+    (Kernel::CarryRound, "carry_round", Bound::Carrying),
+    (Kernel::CarryAlong, "carry_along", Bound::Carrying),
     (Kernel::Pour, "pour", Bound::Solver),
     (Kernel::Quickest, "quickest", Bound::Solver),
     (Kernel::Pace, "pace", Bound::Pacing),
@@ -139,6 +149,7 @@ impl Bound {
     /// The bindings, and which of them are only read.
     fn bindings(self) -> (&'static [u32], &'static [u32]) {
         match self {
+            Bound::Carrying => (&[0, 2, 3, 13], &[2, 13]),
             Bound::Solver => (&[0, 1, 2, 3, 4, 5, 6], &[1, 2]),
             Bound::Pacing => (&[0, 6, 11], &[]),
             Bound::Surface => (&[0, 1, 2, 6, 7, 8, 9, 10, 12], &[1, 2]),
@@ -186,19 +197,23 @@ fn init_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Res<P
 #[derive(Resource, Default)]
 struct Uniform(UniformBuffer<SheetParams>);
 
-/// The floor and the emptying the GPU has been brought up to.
+/// The floor, the carrying and the emptying the GPU has been brought up to.
 #[derive(Resource, Default)]
 struct Seen {
     floors: u32,
+    carries: u32,
     emptied: u32,
 }
 
 /// The solver's bindings with the water read where a step begins and written halfway, and the
-/// other way about; the pacing's; and the surface's, which reads the water where steps begin.
+/// other way about; the carrying's, likewise; the pacing's; and the surface's, which reads the
+/// water where steps begin.
 #[derive(Resource)]
 struct BindGroups {
     forth: BindGroup,
     back: BindGroup,
+    carry_forth: BindGroup,
+    carry_back: BindGroup,
     pacing: BindGroup,
     surface: BindGroup,
     raw: Raw,
@@ -210,6 +225,7 @@ struct Raw {
     halfway: Buffer,
     clock: Buffer,
     threads: Buffer,
+    carried: Buffer,
     counters: Buffer,
 }
 
@@ -246,6 +262,7 @@ fn prepare(
             &buffers.held,
             &buffers.threads,
             &buffers.watched,
+            &buffers.carried,
         ]
         .into_iter()
         .map(get)
@@ -266,6 +283,7 @@ fn prepare(
         held,
         threads,
         watched,
+        carried,
     ] = &all[..]
     else {
         return;
@@ -299,9 +317,14 @@ fn prepare(
             ],
         )
     };
+    let carrying = |before: &Buffer, after: &Buffer| {
+        group(Bound::Carrying, &[(2, before), (3, after), (13, carried)])
+    };
     commands.insert_resource(BindGroups {
         forth: solver(state, halfway),
         back: solver(halfway, state),
+        carry_forth: carrying(state, halfway),
+        carry_back: carrying(halfway, state),
         pacing: group(Bound::Pacing, &[(6, clock), (11, threads)]),
         surface: group(
             Bound::Surface,
@@ -322,6 +345,7 @@ fn prepare(
             halfway: halfway.clone(),
             clock: clock.clone(),
             threads: threads.clone(),
+            carried: carried.clone(),
             counters: counters.clone(),
         },
     });
@@ -358,6 +382,11 @@ fn dispatch(
         queue.write_buffer(&groups.raw.bed, 0, bytemuck::cast_slice(&frame.bed));
         seen.floors = frame.floors;
     }
+    let carry = seen.carries != frame.carries && frame.wetted;
+    seen.carries = frame.carries;
+    if carry {
+        queue.write_buffer(&groups.raw.carried, 0, bytemuck::cast_slice(&frame.carried));
+    }
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
@@ -385,6 +414,20 @@ fn dispatch(
         (used.x + 1).div_ceil(CELL_THREADS),
         (used.y + 1).div_ceil(CELL_THREADS),
     ];
+    if carry {
+        for (half, kernel) in [
+            (&groups.carry_forth, Kernel::CarryRound),
+            (&groups.carry_back, Kernel::CarryAlong),
+        ] {
+            pass.set_pipeline(pipeline(kernel));
+            pass.set_bind_group(0, half, &[]);
+            pass.dispatch_workgroups(
+                SHEET_CELLS[0].div_ceil(CELL_THREADS),
+                SHEET_CELLS[1].div_ceil(CELL_THREADS),
+                1,
+            );
+        }
+    }
     let poured = frame.params.pour_cells;
     pass.set_pipeline(pipeline(Kernel::Pour));
     pass.set_bind_group(0, &groups.back, &[]);

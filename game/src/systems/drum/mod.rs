@@ -16,7 +16,9 @@ mod render;
 mod sheet;
 
 pub use gpu::{DrumFrame, DrumUniform};
-pub use landscape::{CELL, Flood, Grid, Ground, Landscape, PATCH, Patch, Place, Round};
+pub use landscape::{
+    CELL, Flood, Grid, Ground, GroundCarry, Landscape, PATCH, Patch, Place, Round,
+};
 pub use mouths::{
     CapSide, DrumSurface, FLAME_BAND, Mouth, MouthAnchor, MouthColour, MouthCoords, MouthFit,
     MouthSeat, MouthSight, Mouths, OPENING,
@@ -196,6 +198,15 @@ pub struct Shift {
     pub axial: f64,
 }
 
+/// What making the drum another size did: how a point of the frame that stays where it was
+/// about the axis is carried, which the frame's shift along the axis and its wall's move toward
+/// or away from the axis make of it, and how the ground was carried round the ring.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrumResized {
+    pub frame: Vec3d,
+    pub ground: GroundCarry,
+}
+
 pub struct Drum {
     pub ring: Ring,
     pub spin: RadiansPerSecond,
@@ -235,10 +246,8 @@ impl Drum {
     }
 
     /// Make the drum another size. The site stays at its angle round the ring, and the ground
-    /// and the water's site keep where they were from it; returns how a point of the frame
-    /// that stays where it was about the axis is carried, which the frame's shift along the
-    /// axis and its wall's move toward or away from the axis make of it.
-    pub fn resize(&mut self, ring: Ring) -> Vec3d {
+    /// and the water's site keep where they were from it.
+    pub fn resize(&mut self, ring: Ring) -> DrumResized {
         let old = self.landscape.grid();
         let (before, from) = (self.ring.radius.0 as f64, self.site);
         let half_width = ring.half_width.0 as f64;
@@ -250,9 +259,12 @@ impl Drum {
             across: self.water.round.across,
         };
         self.water = Site::on(water, self.water.y.clamp(-half_width, half_width), ring);
-        self.landscape.resize(ring, from.round, self.site.round);
+        let ground = self.landscape.resize(ring, from.round, self.site.round);
         self.carry_mouths(from.round, old);
-        [before - ring.radius.0 as f64, from.y - self.site.y, 0.0]
+        DrumResized {
+            frame: [before - ring.radius.0 as f64, from.y - self.site.y, 0.0],
+            ground,
+        }
     }
 
     /// Spin up or down toward the target and turn; the angle is kept to one turn so that its

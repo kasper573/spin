@@ -72,7 +72,13 @@ impl Plugin for WaterPlugin {
         .add_systems(Startup, spawn.after(MakeWaterColumns))
         .add_systems(
             Update,
-            (tick.after(SettleVantages), size_lying, submerge).in_set(SimSet::Observe),
+            (
+                tick.after(SettleVantages),
+                show_flying,
+                size_lying,
+                submerge,
+            )
+                .in_set(SimSet::Observe),
         )
         .add_systems(PostUpdate, mirror.after(FigureGathered));
     }
@@ -478,6 +484,24 @@ fn tick(
             mist.mouths = material.mouths.clone();
             mist.through_blue = material.through_blue.clone();
             mist.through_orange = material.through_orange.clone();
+        }
+    }
+}
+
+/// The water in flight and its spray are drawn only while there is any: whatever is drawn that
+/// lets the scene through costs every view of it a picture of the scene.
+fn show_flying(
+    fluid: Res<Fluid>,
+    mut flying: Query<&mut Visibility, (With<WaterMesh>, Without<LyingWaterMesh>)>,
+) {
+    let shown = if fluid.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in &mut flying {
+        if *visibility != shown {
+            *visibility = shown;
         }
     }
 }

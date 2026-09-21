@@ -34,13 +34,9 @@ use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, SheetWindow, 
 pub const SUBSTEP_RATE: Hertz = Hertz(120.0);
 /// The speed clamps sit this far above the rim of the drum.
 const SPEED_HEADROOM: f32 = 40.0;
-/// The hull is this wet when the eye has gone under the water, and this dry again when the eye
-/// is back out of it. The wetted fraction is measured over the whole hull rather than at the
-/// eye, so where the avatar floats it wavers by a sample or two from one substep to the next: a
-/// single mark to cross would have the eye diving and surfacing several times a second while
-/// the avatar simply bobs, and everything seen through the water switching with it.
-const SUBMERGED: f64 = 0.9;
-const SURFACED: f64 = 0.75;
+/// How far the eye's pupil reaches from its middle: while the water's surface lies across it the
+/// eye is no more under the water than over it, and sees as it last did.
+const PUPIL: Metres = Metres(0.02);
 /// Shortest substep real time is split into; faster frames are gathered into one.
 const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
@@ -101,8 +97,7 @@ pub struct Simulation {
     water_due: f64,
     queued: f32,
     window: (f32, f32),
-    /// Whether the eye is under the water, which only changes when the hull is clearly one side
-    /// of the surface or the other.
+    /// Whether the eye is under the water's surface.
     eye_under: bool,
 }
 
@@ -168,11 +163,13 @@ impl Simulation {
     /// Change the ring's size about every body, which stays where it was about the axis: the
     /// wall moves, not the bodies, except that solid ones are kept inside it. The ground and
     /// the water stay where they were on the wall.
-    pub fn resize(&mut self, ring: Ring) {
+    pub fn resize(&mut self, ring: Ring, (sheet, window): (&mut Sheet, &mut SheetWindow)) {
         if ring == self.drum.ring {
             return;
         }
-        let carried = self.drum.resize(ring);
+        let resized = self.drum.resize(ring);
+        window.lay(&self.drum, sheet, Some(resized.ground));
+        let carried = resized.frame;
         for body in &mut self.bodies {
             body.p = [
                 body.p[0] + carried[0],
@@ -239,11 +236,9 @@ impl Simulation {
             None
         };
         self.clamp_speeds();
-        let wet = self.avatar().wet;
-        if wet > SUBMERGED {
-            self.eye_under = true;
-        } else if wet < SURFACED {
-            self.eye_under = false;
+        let sunk = lying.1.sunk(&self.drum, lying.0, self.eye().0);
+        if sunk.0.abs() > PUPIL.0 {
+            self.eye_under = sunk.0 > 0.0;
         }
         let water_step = fluid.step().0 as f64;
         for k in 0..steps {

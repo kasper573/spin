@@ -19,7 +19,9 @@ use bevy::render::render_resource::{Extent3d, TextureFormat};
 use crate::core::math::{Quatd, Vec3d, dot, norm, quat_conjugate, quat_rotate};
 use crate::systems::drum::{Drum, FLAME_BAND, Mouth, MouthAnchor, MouthColour, MouthCoords, Site};
 use crate::systems::player::PlayerCamera;
-use crate::systems::scene::{NEAR, SeenFrom, SettleVantages, VANTAGES, Vantage, Vantages};
+use crate::systems::scene::{
+    NEAR, SEEN_THROUGH_LAYERS, SeenFrom, SettleVantages, VANTAGES, Vantage, Vantages,
+};
 use crate::systems::sim::Simulation;
 
 /// The pictures of what lies beyond each mouth, and where in them each vantage finds what a
@@ -118,7 +120,7 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Exposure::SUNLIGHT,
             Tonemapping::None,
             ScreenSpaceTransmission {
-                steps: 2,
+                steps: SEEN_THROUGH_LAYERS,
                 ..default()
             },
             Msaa::Sample4,

@@ -35,6 +35,9 @@ pub const SHEET_INDICES: usize = 6 * SHEET_CELLS[0] as usize * SHEET_CELLS[1] as
 pub const SHEET_WATCHED: u32 = 16;
 pub const SHEET_WATCHED_CORNERS: usize = ((SHEET_WATCHED + 1) * (SHEET_WATCHED + 1)) as usize;
 
+/// The most grains each way a cell is made of: see [`SheetCarried`].
+pub const SHEET_MOST_GRAINS: u32 = 32;
+
 /// The most steps a frame's water takes; time it has no steps for is owed to the next frame.
 const MOST_STEPS: u32 = 8;
 /// `COURANT` in `sheet.wgsl`: the share of a cell the quickest wave may cross in a step.
@@ -66,6 +69,19 @@ pub struct SheetLie {
     pub closed: bool,
     pub cell: [Metres; 2],
     pub radius: Metres,
+}
+
+/// How water that is on the sheet lies on it once the sheet is laid anew. The cells it lay on
+/// and those it lies on now are both made of whole grains of the floor, so many each way to a
+/// cell then and now, and each of the sheet's grains as it is now, round the ring and along
+/// its axis, was one of its grains as it was or none of them. A grain keeps the water it had,
+/// which stands the deeper on it the smaller the grain has become: `spread` is how many times
+/// its area now its area was.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetCarried {
+    pub grains: [u32; 2],
+    pub was: [Vec<Option<u32>>; 2],
+    pub spread: f32,
 }
 
 /// How poured water lands: how fast it runs over the floor as it does, round the ring and
@@ -144,12 +160,22 @@ impl Sheet {
     }
 
     /// Lay the sheet's cells on a floor, whose height over the glass `floor` gives at every
-    /// corner of them, by which corner round the ring and along it.
-    pub fn lay(&mut self, lie: SheetLie, floor: impl Fn(u32, u32) -> f32) {
+    /// corner of them, by which corner round the ring and along it. Water on the sheet is
+    /// carried as `carried` says, and left in the cells it is in if nothing says.
+    pub fn lay(
+        &mut self,
+        lie: SheetLie,
+        carried: Option<SheetCarried>,
+        floor: impl Fn(u32, u32) -> f32,
+    ) {
         assert!(
             lie.cells[0] <= SHEET_CELLS[0] && lie.cells[1] <= SHEET_CELLS[1],
             "the sheet has no more cells than its buffers hold"
         );
+        if let (Some(carried), Some(was)) = (carried, self.lie) {
+            self.frame.carried = carried.packed(was, lie);
+            self.frame.carries += 1;
+        }
         let stride = SHEET_CELLS[0] as usize + 1;
         let mut bed = vec![0.0; SHEET_CORNERS];
         for along in 0..=lie.cells[1] {
@@ -246,6 +272,29 @@ impl Sheet {
     }
 }
 
+impl SheetCarried {
+    /// `Carried` in `sheet.wgsl`.
+    fn packed(&self, was: SheetLie, now: SheetLie) -> Arc<[u32]> {
+        assert!(
+            self.grains.iter().all(|grains| (1..=SHEET_MOST_GRAINS).contains(grains))
+                && (0..2).all(|axis| self.was[axis].len() == (now.cells[axis] * self.grains[1]) as usize),
+            "every grain of the sheet's cells is carried, and a cell has no more than the most"
+        );
+        let grain = |was: &Option<u32>| was.map_or(u32::MAX, |was| was);
+        [
+            was.cells[0],
+            was.cells[1],
+            self.grains[0],
+            self.grains[1],
+            self.spread.to_bits(),
+            self.was[0].len() as u32,
+        ]
+        .into_iter()
+        .chain(self.was.iter().flatten().map(grain))
+        .collect()
+    }
+}
+
 /// What the render world is handed of the sheet for a frame.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct SheetFrame {
@@ -253,6 +302,9 @@ pub struct SheetFrame {
     /// The floor's height at every corner, and how many floors there have been.
     bed: Arc<[f32]>,
     floors: u32,
+    /// How the water was last carried, and how many times it has been.
+    carried: Arc<[u32]>,
+    carries: u32,
     /// How many times the sheet has been emptied, and whether water has been poured since.
     emptied: u32,
     wetted: bool,
@@ -267,6 +319,8 @@ impl Default for SheetFrame {
             params: SheetParams::default(),
             bed: Arc::from(Vec::new()),
             floors: 0,
+            carried: Arc::from(Vec::new()),
+            carries: 0,
             emptied: 0,
             wetted: false,
             steps: MOST_STEPS,
