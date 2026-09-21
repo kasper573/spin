@@ -477,7 +477,7 @@ fn pace() {
 }
 
 @compute @workgroup_size(8, 8)
-fn cross(@builtin(global_invocation_id) id: vec3<u32>) {
+fn find_crossings(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!in_use(id)) {
         return;
     }

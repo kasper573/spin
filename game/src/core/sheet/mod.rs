@@ -22,6 +22,9 @@ use bevy::shader::Shader;
 
 pub use gpu::{DRAINS as SHEET_DRAINS, JET_INDICES as SHEET_JET_INDICES, SheetBuffers, SheetStep};
 
+use serde::{Deserialize, Serialize};
+
+use crate::core::codec;
 use crate::core::fluid::ReadOnce;
 use crate::core::units::{Litres, Metres, MetresPerSecond, RadiansPerSecond, Seconds};
 
@@ -179,6 +182,19 @@ pub struct Sheet {
     held: Litres,
     flying: Litres,
     watched: SheetWatched,
+    /// How many times the sheet's water has been asked to be kept, and what was last kept.
+    keeps: u32,
+    kept: Option<(u32, SheetKept)>,
+}
+
+/// The sheet's water as it was kept: how many of its cells were in use round the ring and
+/// along it, and for each of them, a row round the ring at a time, the water over it by the
+/// glass's area, that times its run round the ring and along it, and the air in it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SheetKept {
+    pub cells: [u32; 2],
+    #[serde(with = "codec::f32s")]
+    pub water: Vec<f32>,
 }
 
 impl Sheet {
@@ -213,6 +229,60 @@ impl Sheet {
         self.lie = Some(lie);
         self.frame.bed = Arc::from(bed);
         self.frame.floors += 1;
+    }
+
+    /// Ask for the sheet's water to be kept, which it is once the GPU has given it back: see
+    /// `kept`. Says which asking this is.
+    pub fn keep(&mut self, commands: &mut Commands, buffers: &SheetBuffers) -> u32 {
+        self.keeps += 1;
+        let Some(lie) = self.lie.filter(|_| self.frame.wetted) else {
+            self.kept = Some((self.keeps, SheetKept::default()));
+            return self.keeps;
+        };
+        let bytes = lie.cells[1] as u64 * SHEET_CELLS[0] as u64 * 16;
+        commands
+            .spawn((
+                Readback::buffer_range(buffers.state.clone(), 0, bytes),
+                ReadOnce,
+                KeptWatcher {
+                    asked: self.keeps,
+                    cells: lie.cells,
+                    emptied: self.frame.emptied,
+                },
+            ))
+            .observe(receive_kept);
+        self.keeps
+    }
+
+    /// The sheet's water as it was kept when asked for this time, once it has come back.
+    pub fn kept(&self, asked: u32) -> Option<&SheetKept> {
+        self.kept
+            .as_ref()
+            .filter(|(kept, _)| *kept == asked)
+            .map(|(_, kept)| kept)
+    }
+
+    /// Lay water that was kept back on the sheet, if the sheet lies on as many cells as it did
+    /// when the water was kept. Says whether it was laid.
+    pub fn lay_kept(&mut self, kept: &SheetKept) -> bool {
+        let cells = kept.cells.map(|n| n as usize);
+        let fits = self.lie.is_some_and(|lie| lie.cells == kept.cells)
+            && kept.water.len() == 4 * cells[0] * cells[1]
+            && cells[0] * cells[1] > 0
+            && kept.water.iter().all(|v| v.is_finite());
+        if !fits {
+            return false;
+        }
+        let stride = SHEET_CELLS[0] as usize;
+        let mut state = vec![0.0; 4 * stride * cells[1]];
+        for (row, water) in kept.water.chunks_exact(4 * cells[0]).enumerate() {
+            let at = 4 * row * stride;
+            state[at..at + water.len()].copy_from_slice(water);
+        }
+        self.frame.laid = Arc::from(state);
+        self.frame.lays += 1;
+        self.frame.wetted = true;
+        true
     }
 
     /// Where the sheet's first corner lies from the site its surface is drawn about: how far
@@ -364,6 +434,10 @@ pub struct SheetFrame {
     /// How many times the sheet has been emptied, and whether water has been poured since.
     emptied: u32,
     wetted: bool,
+    /// Water kept earlier to be laid on the sheet, rows of it as the buffers hold them, and how
+    /// many times it has been.
+    laid: Arc<[f32]>,
+    lays: u32,
     /// How many steps the frame's kernels are sent out for. The GPU takes no more of them than
     /// the frame's time asks for, but each costs its sending out whether it is taken or not.
     steps: u32,
@@ -380,6 +454,8 @@ impl Default for SheetFrame {
             carries: 0,
             emptied: 0,
             wetted: false,
+            laid: Arc::from(Vec::new()),
+            lays: 0,
             steps: MOST_STEPS,
         }
     }
@@ -487,6 +563,43 @@ fn hand_over(mut sheet: ResMut<Sheet>, mut frame: ResMut<SheetFrame>) {
 #[derive(Component)]
 struct HeldWatcher {
     awaiting: Option<u32>,
+}
+
+/// The entity whose readback brings back the sheet's water to be kept: which asking it answers,
+/// how many cells were in use when it was asked, and of which water.
+#[derive(Component)]
+struct KeptWatcher {
+    asked: u32,
+    cells: [u32; 2],
+    emptied: u32,
+}
+
+fn receive_kept(
+    event: On<ReadbackComplete>,
+    mut sheet: ResMut<Sheet>,
+    watchers: Query<&KeptWatcher>,
+) {
+    let Ok(watcher) = watchers.get(event.entity) else {
+        return;
+    };
+    let state: Vec<Vec4> = event.to_shader_type();
+    let [round, along] = watcher.cells.map(|n| n as usize);
+    let stride = SHEET_CELLS[0] as usize;
+    let water = if watcher.emptied == sheet.frame.emptied && state.len() >= along * stride {
+        state
+            .chunks_exact(stride)
+            .take(along)
+            .flat_map(|row| row[..round].iter().flat_map(|cell| cell.to_array()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cells = if water.is_empty() {
+        [0, 0]
+    } else {
+        watcher.cells
+    };
+    sheet.kept = Some((watcher.asked, SheetKept { cells, water }));
 }
 
 /// The entity whose readback brings back the water round the watched block.

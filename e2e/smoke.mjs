@@ -33,6 +33,11 @@ fs.mkdirSync(out, { recursive: true });
 
 const server = http
   .createServer((req, res) => {
+    if (req.url === "/blank") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end('<!doctype html><link rel="icon" href="data:," />');
+      return;
+    }
     const file = path.join(dist, req.url === "/" ? "index.html" : req.url.split("?")[0]);
     const types = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
     fs.readFile(file, (err, data) => {
@@ -50,13 +55,34 @@ await new Promise((resolve) => server.once("listening", resolve));
 const port = server.address().port;
 const url = `http://127.0.0.1:${port}/`;
 
-const { chrome, page } = await launchChrome(9333, path.join(out, "chrome-profile"));
-const { send, evaluate, logs, ready } = connect(page);
-await ready;
-await send("Runtime.enable");
-await send("Log.enable");
-await send("Page.enable");
-await send("Emulation.setDeviceMetricsOverride", { width: 800, height: 500, deviceScaleFactor: 1, mobile: false });
+// Every load of the client gets a browser of its own on the one profile: the NVIDIA driver faults
+// the GPU (Xid 32) once a GPU process has made and dropped a few devices, as reloading a page does.
+let chrome, send, evaluate;
+const sessions = [];
+const logs = () => sessions.flatMap((session) => session.logs);
+const openClient = async () => {
+  let page;
+  ({ chrome, page } = await launchChrome(9333, path.join(out, "chrome-profile")));
+  const session = connect(page);
+  sessions.push(session);
+  ({ send, evaluate } = session);
+  await session.ready;
+  await send("Runtime.enable");
+  await send("Log.enable");
+  await send("Page.enable");
+  await send("Emulation.setDeviceMetricsOverride", { width: 800, height: 500, deviceScaleFactor: 1, mobile: false });
+  // The GPU process can come up after a page's first ask for an adapter, which the client takes
+  // for a browser without one, so the client is only loaded once a blank page is offered one.
+  await send("Page.navigate", { url: `${url}blank` });
+  await waitFor(() => evaluate("navigator.gpu?.requestAdapter().then((adapter) => adapter !== null) ?? false"), "a GPU adapter");
+  await send("Page.navigate", { url });
+};
+const restartClient = async () => {
+  const exited = new Promise((resolve) => chrome.once("exit", resolve));
+  chrome.kill();
+  await exited;
+  await openClient();
+};
 
 let failures = 0;
 const check = (name, ok, detail = "") => {
@@ -96,7 +122,7 @@ const waitForApp = async () => {
 };
 
 try {
-  await send("Page.navigate", { url });
+  await openClient();
   check("app starts", await waitForApp());
   const fresh = await status();
   check("starts empty", fresh.particles === 0, JSON.stringify(fresh));
@@ -132,18 +158,20 @@ try {
   const landed = await status();
   check("and lands again", !landed.airborne && Math.abs(landed.weight - 1) < 0.1 && landed.ground_speed < 0.2, JSON.stringify({ airborne: landed.airborne, weight: landed.weight, speed: landed.ground_speed }));
 
+  // the frame's origin is the site on the floor, and the ring's axis lies a radius over it
+  const axis = -21 / 2;
   await command({ cmd: "spin", value: 1.0 });
   await command({ cmd: "advance", seconds: 2 });
   for (let k = 0; k < 12; k++) {
     const a = k * 0.52;
-    await command({ cmd: "inject", x: Math.cos(a) * 8.0, y: (k % 3) * 2.0 - 2.0, z: Math.sin(a) * 8.0, count: 150 });
+    await command({ cmd: "inject", x: axis + Math.cos(a) * 8.0, y: (k % 3) * 2.0 - 2.0, z: Math.sin(a) * 8.0, count: 150 });
     await command({ cmd: "advance", seconds: 0.2 });
   }
   await command({ cmd: "advance", seconds: 8 });
   const filled = await status();
   check("water injected", filled.particles === 1800, `${filled.particles} particles, ${filled.litres} L`);
   check("drum spinning", Math.abs(filled.spin - 1.0) < 1e-3, `${filled.spin}`);
-  await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
+  await command({ cmd: "camera", x: axis + 14.7, y: 16.5, z: 21.6, look_x: axis, look_y: 0, look_z: 0 });
   await screenshot("water");
 
   await command({ cmd: "sculpt", phi: 0.8, y: 0, radius: 3.0, amount: 1.0 });
@@ -155,23 +183,23 @@ try {
   const still = await status();
   check("drum stopped", still.spin === 0, `${still.spin}`);
   const a = 0.8 - still.angle;
-  await command({ cmd: "camera", x: Math.cos(a) * 3.0, y: 2.5, z: Math.sin(a) * 3.0, look_x: Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
+  await command({ cmd: "camera", x: axis + Math.cos(a) * 3.0, y: 2.5, z: Math.sin(a) * 3.0, look_x: axis + Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
   await screenshot("landscape-inside");
-  await command({ cmd: "camera", x: Math.cos(a) * 16.0, y: 7.0, z: Math.sin(a) * 16.0, look_x: Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
+  await command({ cmd: "camera", x: axis + Math.cos(a) * 16.0, y: 7.0, z: Math.sin(a) * 16.0, look_x: axis + Math.cos(a) * 9.0, look_y: 0, look_z: Math.sin(a) * 9.0 });
   await screenshot("landscape-outside");
   await command({ cmd: "portal", orange: false, phi: a + still.angle + 0.45, y: 2.0, diameter: 2.5 });
   await command({ cmd: "advance", seconds: 1 });
   const lone = await status();
   check("a portal alone is filled in", lone.portals === 1 && lone.portal_fill === 1, JSON.stringify({ portals: lone.portals, fill: lone.portal_fill }));
   const b = a + 0.45;
-  await command({ cmd: "camera", x: Math.cos(b) * 7.0, y: 0.0, z: Math.sin(b) * 7.0, look_x: Math.cos(b) * 10.0, look_y: 2.0, look_z: Math.sin(b) * 10.0 });
+  await command({ cmd: "camera", x: axis + Math.cos(b) * 7.0, y: 0.0, z: Math.sin(b) * 7.0, look_x: axis + Math.cos(b) * 10.0, look_y: 2.0, look_z: Math.sin(b) * 10.0 });
   await screenshot("portal-lone");
   await command({ cmd: "portal", orange: true, phi: a + still.angle + 2.4, y: -2.0, diameter: 2.5 });
   await command({ cmd: "advance", seconds: 1.5 });
   const pair = await status();
   check("a pair of portals opens", pair.portals === 2 && pair.portal_fill === 0, JSON.stringify({ portals: pair.portals, fill: pair.portal_fill }));
   await screenshot("portal-open");
-  await command({ cmd: "camera", x: 14.7, y: 16.5, z: 21.6, look_x: 0, look_y: 0, look_z: 0 });
+  await command({ cmd: "camera", x: axis + 14.7, y: 16.5, z: 21.6, look_x: axis, look_y: 0, look_z: 0 });
   await command({ cmd: "spin", value: 1.0 });
   await command({ cmd: "advance", seconds: 4 });
 
@@ -186,6 +214,15 @@ try {
   await screenshot("resized");
   await command({ cmd: "ring", diameter: 21, width: 12 });
   await command({ cmd: "advance", seconds: 2 });
+  // a ring made smaller keeps only the ground within half its round of the eye, which drifts
+  // over the turning floor as a ghost, so a hill is raised afresh on the ring as it is now
+  await command({ cmd: "sculpt", phi: 2.3, y: -4, radius: 3.0, amount: 1.0 });
+  await command({ cmd: "advance", seconds: 0.5 });
+
+  await command({ cmd: "pour", phi: 2.0, y: 1.5, litres: 30000 });
+  await command({ cmd: "advance", seconds: 3 });
+  const poured = await status();
+  check("water poured lies on the floor", Math.abs(poured.lying - 30000) < 300, `${poured.lying} L`);
 
   await sleep(2000);
   const live = await status();
@@ -194,11 +231,18 @@ try {
   const before = (await status()).saves;
   await command({ cmd: "save" });
   await waitFor(async () => (await status()).saves > before, "the save to land");
-  await send("Page.reload");
+  await restartClient();
   check("app restarts", await waitForApp());
   const restored = await status();
-  check("portals persist across reload", restored.portals === 2 && restored.portal_fill === 0, JSON.stringify({ portals: restored.portals, fill: restored.portal_fill }));
-  check("state persists across reload", restored.particles === live.particles && restored.landscape_max > 1.2 && restored.sculpted === live.sculpted && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, sculpted: [live.sculpted, restored.sculpted], spin: restored.spin }));
+  check("portals persist across a restart", restored.portals === 2 && restored.portal_fill === 0, JSON.stringify({ portals: restored.portals, fill: restored.portal_fill }));
+  // what lies on the floor is reported by the GPU some frames after the water is laid back
+  const reported = await waitFor(async () => (await status()).lying > 0, "the water lying on the floor to be reported", 30).then(
+    () => true,
+    () => false,
+  );
+  const relaid = await status();
+  check("the water lying on the floor persists across a restart", reported && Math.abs(relaid.lying - live.lying) < 0.01 * live.lying, JSON.stringify({ lying: [live.lying, relaid.lying] }));
+  check("state persists across a restart", restored.particles === live.particles && restored.landscape_max > 1.2 && restored.sculpted === live.sculpted && Math.abs(restored.spin - 1.0) < 1e-3, JSON.stringify({ particles: restored.particles, land: restored.landscape_max, sculpted: [live.sculpted, restored.sculpted], spin: restored.spin }));
   await screenshot("restored");
 
   // where the first hill lies on the resized ring depends on where the eye stood as it was
@@ -209,19 +253,19 @@ try {
   const saved = more.saves;
   await command({ cmd: "save" });
   await waitFor(async () => (await status()).saves > saved, "the second save to land");
-  await send("Page.reload");
+  await restartClient();
   check("app restarts again", await waitForApp());
   const again = await status();
   check("a save keeps what was sculpted since the last", more.landscape_max > restored.landscape_max + 0.3 && again.sculpted === more.sculpted && again.particles === more.particles && Math.abs(again.landscape_max - more.landscape_max) < 1e-4, JSON.stringify({ sculpted: [restored.sculpted, more.sculpted, again.sculpted], land: [restored.landscape_max, more.landscape_max, again.landscape_max], particles: again.particles }));
 
-  const errors = [...new Set(logs.filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];
+  const errors = [...new Set(logs().filter((l) => l.startsWith("[exception]") || l.includes("panicked") || l.startsWith("[log:error]")))];
   check("no errors in the console", errors.length === 0, errors.join(" | ").slice(0, 1500));
 } catch (error) {
   failures++;
   console.log("FAIL", error.stack ?? error);
-  console.log(logs.slice(-20).join("\n"));
+  console.log(logs().slice(-20).join("\n"));
 } finally {
-  chrome.kill();
+  chrome?.kill();
   server.close();
 }
 console.log(failures ? `${failures} check(s) failed` : "e2e passed");

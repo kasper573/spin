@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::avatar::Gyros;
 use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
-use crate::core::sheet::Sheet;
+use crate::core::sheet::{Sheet, SheetBuffers, SheetKept};
 use crate::core::units::{Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::drum::{
@@ -43,6 +43,9 @@ pub struct Snapshot {
     pub landscape: Ground,
     #[serde(default)]
     pub portals: Mouths,
+    /// The water lying on the floor.
+    #[serde(default)]
+    pub sheet: SheetKept,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -58,7 +61,8 @@ pub struct AvatarPose {
 #[derive(Resource, Default)]
 pub struct Saves {
     pub completed: u32,
-    pending: Option<u32>,
+    /// Which askings for the water in flight and the water lying on the floor a save waits on.
+    pending: Option<(u32, u32)>,
     restored: bool,
 }
 
@@ -94,7 +98,7 @@ impl Plugin for PersistencePlugin {
 pub fn snapshot(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
     Snapshot {
         landscape: sim.drum.landscape.ground(),
-        ..kept(settings, sim, fluid)
+        ..kept(settings, sim, fluid, SheetKept::default())
     }
 }
 
@@ -131,6 +135,8 @@ pub fn apply(
     }
     pose_avatar(&snapshot.avatar, sim);
     sim.avatar_mut().solid = settings.collisions;
+    window.lay(&sim.drum, sheet, None);
+    sheet.lay_kept(&snapshot.sheet);
 }
 
 /// A saved site on this ring, unless it is nonsense, in which case it is made a place on it.
@@ -148,15 +154,25 @@ fn site_on(saved: Site, ring: Ring) -> Site {
     )
 }
 
-/// Ask for the water and save once it has arrived.
+/// Ask for the water and save once it has arrived, unless a save is already waiting on it: the
+/// GPU can take longer to give the water back than saves are asked apart, and a save asked
+/// again before it lands would never land.
 pub fn save_soon(world: &mut World) {
+    if world.resource::<Saves>().pending.is_some() {
+        return;
+    }
     let buffers = world.resource::<FluidBuffers>().clone();
-    let ticket = world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+    let flying = world.resource_scope(|world, mut fluid: Mut<Fluid>| {
         let mut commands = world.commands();
         fluid.request_snapshot(&mut commands, &buffers)
     });
+    let buffers = world.resource::<SheetBuffers>().clone();
+    let lying = world.resource_scope(|world, mut sheet: Mut<Sheet>| {
+        let mut commands = world.commands();
+        sheet.keep(&mut commands, &buffers)
+    });
     world.flush();
-    world.resource_mut::<Saves>().pending = Some(ticket);
+    world.resource_mut::<Saves>().pending = Some((flying, lying));
 }
 
 #[derive(Resource)]
@@ -190,7 +206,7 @@ fn pose_avatar(pose: &AvatarPose, sim: &mut Simulation) {
 }
 
 /// Everything but the sculpted patches, which storage keeps one by one.
-fn kept(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
+fn kept(settings: &Settings, sim: &Simulation, fluid: &Fluid, sheet: SheetKept) -> Snapshot {
     let avatar = sim.avatar();
     Snapshot {
         settings: settings.clone(),
@@ -219,6 +235,7 @@ fn kept(settings: &Settings, sim: &Simulation, fluid: &Fluid) -> Snapshot {
             patches: Vec::new(),
         },
         portals: sim.drum.mouths,
+        sheet,
     }
 }
 
@@ -344,10 +361,13 @@ fn autosave(world: &mut World) {
 }
 
 fn flush(world: &mut World) {
-    let Some(ticket) = world.resource::<Saves>().pending else {
+    let Some((flying, lying)) = world.resource::<Saves>().pending else {
         return;
     };
-    if !world.resource::<Fluid>().snapshot_ready(ticket) {
+    let Some(sheet) = world.resource::<Sheet>().kept(lying).cloned() else {
+        return;
+    };
+    if !world.resource::<Fluid>().snapshot_ready(flying) {
         return;
     }
     world.resource_mut::<Saves>().pending = None;
@@ -355,6 +375,7 @@ fn flush(world: &mut World) {
         world.resource::<Settings>(),
         world.resource::<Simulation>(),
         world.resource::<Fluid>(),
+        sheet,
     );
     let Ok(text) = serde_json::to_string(&kept) else {
         return;

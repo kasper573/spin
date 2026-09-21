@@ -20,7 +20,7 @@ use crate::systems::tools::{Tool, ToolApp, Workbench, laid_along, lying_on, side
 
 /// How fast the water comes down, which with the flow says how wide it falls: as fast as
 /// what has fallen half a metre under the Earth's gravity.
-const FALL_SPEED: MetresPerSecond = MetresPerSecond(3.0);
+pub const FALL_SPEED: MetresPerSecond = MetresPerSecond(3.0);
 
 #[derive(Resource, Default, PartialEq)]
 pub struct WaterTool {

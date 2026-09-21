@@ -23,18 +23,20 @@ use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
-use crate::core::units::{Metres, Radians, RadiansPerSecond, Seconds};
+use crate::core::sheet::Sheet;
+use crate::core::units::{Litres, Metres, Radians, RadiansPerSecond, Seconds};
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::app;
 use crate::systems::controls::pilot;
-use crate::systems::drum::{DrumSurface, MouthColour, Place, Round};
+use crate::systems::drum::{DrumSurface, MouthColour, Place, Round, SheetPour, SheetWindow};
 use crate::systems::hud::FrameRate;
 use crate::systems::persistence::{self, Saves};
 use crate::systems::player::{PilotInput, Player, PlayerCamera};
 use crate::systems::settings::{Dial, Settings};
 use crate::systems::sim::{SUBSTEP_RATE, SimSet, Simulation};
 use crate::systems::tools::Toolbelt;
+use crate::systems::tools::water_tool::FALL_SPEED;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -50,6 +52,13 @@ pub enum ScriptCommand {
         y: f64,
         radius: f64,
         amount: f64,
+    },
+    /// Water poured on the floor as the water tool pours it, at a wheel angle and a place along
+    /// the axis.
+    Pour {
+        phi: f64,
+        y: f64,
+        litres: f32,
     },
     Spin {
         value: f32,
@@ -119,6 +128,8 @@ pub struct ScriptStatus {
     pub frame: u32,
     pub particles: usize,
     pub litres: f32,
+    /// The water lying on the floor, with what of it has run out of a drain and not come down.
+    pub lying: f32,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
     pub time: Seconds,
@@ -235,6 +246,25 @@ fn execute(world: &mut World, command: ScriptCommand) {
             };
             sim.drum.landscape.sculpt(at, radius, amount);
         }
+        ScriptCommand::Pour { phi, y, litres } => {
+            let dry = world.resource::<Fluid>().is_empty();
+            world.resource_scope(|world, mut sheet: Mut<Sheet>| {
+                world.resource_scope(|world, mut window: Mut<SheetWindow>| {
+                    let mut sim = world.resource_mut::<Simulation>();
+                    let at = sim
+                        .drum
+                        .wall_point(phi - sim.drum.site.phi, y - sim.drum.site.y);
+                    let (_, outward) = sim.drum.depth_and_outward(at);
+                    let poured = SheetPour {
+                        at,
+                        velocity: outward.map(|out| out * FALL_SPEED.0 as f64),
+                        wide: Metres(2.0),
+                        water: Litres(litres),
+                    };
+                    window.pour(&mut sim.drum, &mut sheet, dry, poured);
+                });
+            });
+        }
         ScriptCommand::Spin { value } => {
             world.resource_mut::<Settings>().spin = RadiansPerSecond(value);
             world.resource_mut::<Simulation>().drum.target_spin = RadiansPerSecond(value);
@@ -312,6 +342,7 @@ fn steer(thrust: Res<ScriptedThrust>, player: Res<Player>, mut sim: ResMut<Simul
 fn publish(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
+    sheet: Res<Sheet>,
     belt: Res<Toolbelt>,
     saves: Res<Saves>,
     fps: Res<FrameRate>,
@@ -323,6 +354,7 @@ fn publish(
         frame: frame.0,
         particles: fluid.len(),
         litres: fluid.litres().0,
+        lying: sheet.held().0,
         spin: sim.drum.spin,
         angle: sim.drum.angle,
         time: sim.time,

@@ -43,7 +43,7 @@ const CELL_THREADS: u32 = 8;
 pub struct SheetBuffers {
     bed: Handle<ShaderBuffer>,
     /// The water where a step begins, and where its first half leaves it.
-    state: Handle<ShaderBuffer>,
+    pub(super) state: Handle<ShaderBuffer>,
     halfway: Handle<ShaderBuffer>,
     crossing_round: Handle<ShaderBuffer>,
     crossing_along: Handle<ShaderBuffer>,
@@ -130,7 +130,7 @@ enum Kernel {
     Pour,
     Quickest,
     Pace,
-    Cross,
+    FindCrossings,
     Drain,
     StepOnce,
     StepTwice,
@@ -165,7 +165,7 @@ const KERNELS: [(Kernel, &str, Bound); 20] = [
     (Kernel::Pour, "pour", Bound::Solver),
     (Kernel::Quickest, "quickest", Bound::Solver),
     (Kernel::Pace, "pace", Bound::Pacing),
-    (Kernel::Cross, "cross", Bound::Solver),
+    (Kernel::FindCrossings, "find_crossings", Bound::Solver),
     (Kernel::Drain, "drain", Bound::Solver),
     (Kernel::StepOnce, "step_once", Bound::Solver),
     (Kernel::StepTwice, "step_twice", Bound::Solver),
@@ -250,6 +250,7 @@ struct Seen {
     floors: u32,
     carries: u32,
     emptied: u32,
+    lays: u32,
 }
 
 /// The solver's bindings with the water read where a step begins and written halfway, and the
@@ -482,11 +483,19 @@ fn dispatch(
     if carry {
         queue.write_buffer(&groups.raw.carried, 0, bytemuck::cast_slice(&frame.carried));
     }
+    // water laid back on the sheet is written before the frame's work, which is sent after it
+    let laying = seen.lays != frame.lays;
+    if laying {
+        queue.write_buffer(&groups.raw.state, 0, bytemuck::cast_slice(&frame.laid));
+        seen.lays = frame.lays;
+    }
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
     if seen.emptied != frame.emptied {
-        encoder.clear_buffer(&groups.raw.state, 0, None);
+        if !laying {
+            encoder.clear_buffer(&groups.raw.state, 0, None);
+        }
         encoder.clear_buffer(&groups.raw.halfway, 0, None);
         encoder.clear_buffer(&groups.raw.clock, 0, None);
         encoder.clear_buffer(&groups.raw.drained, 0, None);
@@ -554,7 +563,7 @@ fn dispatch(
             (&groups.back, Kernel::StepTwice),
         ] {
             pass.set_bind_group(0, half, &[]);
-            for kernel in [Kernel::Cross, Kernel::Drain, kernel] {
+            for kernel in [Kernel::FindCrossings, Kernel::Drain, kernel] {
                 pass.set_pipeline(pipeline(kernel));
                 pass.dispatch_workgroups_indirect(&groups.raw.threads, 0);
             }

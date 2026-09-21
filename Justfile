@@ -82,5 +82,5 @@ dev-native:
     cargo run --release -p game --bin client
 
 # Load dist/ in headless Chrome and drive it through the page's script hooks.
-e2e: dist
+e2e: (dist "release")
     node e2e/smoke.mjs
