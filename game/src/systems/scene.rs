@@ -7,6 +7,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::cluster::ClusterConfig;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster,
     NotShadowReceiver, ShadowFilteringMethod, light_consts,
@@ -510,6 +511,7 @@ fn spawn(
     );
     commands.spawn((
         Camera3d::default(),
+        ClusterConfig::Single,
         Hdr,
         Projection::Perspective(PerspectiveProjection {
             fov: 60f32.to_radians(),

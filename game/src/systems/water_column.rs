@@ -10,6 +10,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ClearColorConfig, Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::light::NotShadowCaster;
+use bevy::light::cluster::ClusterConfig;
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
@@ -158,6 +159,7 @@ fn spawn(
             seen,
             layers(seen),
             Camera3d::default(),
+            ClusterConfig::Single,
             Camera {
                 order: seen.0 as isize - 2 - VANTAGES as isize,
                 is_active: false,

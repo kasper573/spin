@@ -12,6 +12,7 @@ use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget, SubCameraView
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::ShadowFilteringMethod;
+use bevy::light::cluster::ClusterConfig;
 use bevy::pbr::ScreenSpaceTransmission;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureFormat};
@@ -107,6 +108,7 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             SeenFrom(i + 1),
             RenderLayers::layer(i + 1),
             Camera3d::default(),
+            ClusterConfig::Single,
             Camera {
                 order: i as isize - 2,
                 is_active: false,
