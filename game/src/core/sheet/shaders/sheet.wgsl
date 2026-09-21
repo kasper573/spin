@@ -14,6 +14,7 @@
 // A cell is a cell of the glass: further in, the ring is narrower round, and a cell holds the
 // less water for it. What is kept for a cell is the water over it by the glass's area, so that
 // what is added and what crosses the faces adds up to the water there is, exactly.
+#define_import_path lying_sheet
 
 struct Sheet {
     // cells round the ring and along it: as the buffers are laid out, and as are in use
@@ -76,7 +77,7 @@ struct SurfaceVertex {
 @group(0) @binding(8) var<storage, read_write> indices: array<u32>;
 // vertex count, index count, and two the water's shader has no use for here
 @group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>>;
-// the water in each row, in cubic metres
+// the water in each row, in cubic metres, and after them the water in the air: see `jets.wgsl`
 @group(0) @binding(10) var<storage, read_write> held: array<f32>;
 // how many workgroups visit the cells for the step being taken: none when none is taken. The
 // kernels that are sent out by it cannot have it bound, so it is kept apart from the clock.

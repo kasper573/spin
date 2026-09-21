@@ -43,6 +43,8 @@ const PORTAL_TOOL: usize = 2;
 struct Stretch {
     seconds: f32,
     pilot: Option<Thruster>,
+    /// A second thruster held all the while, as a player holds two keys.
+    held_too: Option<Thruster>,
     tool: usize,
     button: Option<MouseButton>,
     dial: Option<(Dial, f32)>,
@@ -53,6 +55,7 @@ impl Stretch {
         Stretch {
             seconds,
             pilot: None,
+            held_too: None,
             tool: WATER_TOOL,
             button: None,
             dial: None,
@@ -102,6 +105,13 @@ impl Stretch {
     fn with(self, tool: usize) -> Stretch {
         Stretch { tool, ..self }
     }
+
+    fn holding(self, thruster: Thruster) -> Stretch {
+        Stretch {
+            held_too: Some(thruster),
+            ..self
+        }
+    }
 }
 
 /// Where the player looks from, when not from the body standing where the game starts: outside
@@ -123,6 +133,8 @@ struct Measured {
     most_vertices: usize,
     poured_m3: f64,
     water_m3: Vec<f64>,
+    /// How much of the water was in the air, having run out of the sheet's drains.
+    in_the_air_m3: Vec<f64>,
     /// What the GPU spent on each of its passes, in milliseconds a frame and in so many runs
     /// of the pass a frame, the most first.
     gpu_ms: Vec<(String, f64, f64)>,
@@ -180,6 +192,7 @@ fn play_in(
         most_vertices: 0,
         poured_m3: 0.0,
         water_m3: Vec::new(),
+        in_the_air_m3: Vec::new(),
         gpu_ms: Vec::new(),
     };
     let mut tool = None;
@@ -206,7 +219,12 @@ fn play_in(
             dial.set(&mut app.world_mut().resource_mut::<Settings>(), to);
         }
         let pouring = stretch.tool == WATER_TOOL && stretch.button == Some(MouseButton::Left);
-        let held: Vec<Thruster> = stretch.pilot.iter().copied().collect();
+        let held: Vec<Thruster> = stretch
+            .pilot
+            .iter()
+            .chain(&stretch.held_too)
+            .copied()
+            .collect();
         for _ in 0..(stretch.seconds * FPS as f32).round() as u32 {
             let player = *app.world().resource::<Player>();
             app.world_mut().resource_mut::<Simulation>().avatar_input =
@@ -320,6 +338,8 @@ fn keep(app: &mut App, pixels: &[u8], out: &std::path::Path, frame: u32, measure
         }
     }
     measured.water_m3.push(water_m3(app));
+    let in_the_air = app.world().resource::<Sheet>().flying().0 as f64 / 1000.0;
+    measured.in_the_air_m3.push(in_the_air);
 }
 
 /// All the water there is: what flies as parcels, and what the GPU last found lying on the floor.
@@ -338,7 +358,7 @@ impl Measured {
 
     fn report(&self, scene: &str) -> String {
         format!(
-            "GATE {scene}: empty ring {:.1} ms a frame | frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {} | vertices at most {}, broken {}, stray {}",
+            "GATE {scene}: empty ring {:.1} ms a frame | frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {}, of which in the air: {} | vertices at most {}, broken {}, stray {}",
             self.empty_ring_ms,
             self.percentile(0.5),
             self.percentile(0.95),
@@ -347,6 +367,7 @@ impl Measured {
             by_the_second(&self.issuing_ms),
             self.poured_m3,
             by_the_second(&self.water_m3),
+            by_the_second(&self.in_the_air_m3),
             self.most_vertices,
             self.broken_vertices,
             self.stray_vertices,
@@ -458,6 +479,40 @@ fn a_stream_poured_into_a_portal_in_the_ground() {
         Stretch::idle(4.0),
     ];
     play("portals", Seat::Body, 50_000.0, &scene).hold();
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_pool_falling_through_a_portal_in_its_bed_out_of_one_in_the_cap_over_it() {
+    let braced = |stretch: Stretch| stretch.holding(Thruster::Down);
+    let scene = [
+        // facing a cap from well back, a small mouth let into the ground ahead and the other
+        // into the cap straight over it, a metre clear of where the pool will stand
+        Stretch::flying(0.98, Thruster::YawLeft).with(PORTAL_TOOL),
+        Stretch::flying(2.6, Thruster::Back).with(PORTAL_TOOL),
+        Stretch::dialling(0.5, Dial::Portal, 0.8).with(PORTAL_TOOL),
+        Stretch::flying(0.3, Thruster::PitchDown).with(PORTAL_TOOL),
+        Stretch::idle(0.3).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Left),
+        Stretch::flying(0.337, Thruster::PitchUp).with(PORTAL_TOOL),
+        Stretch::idle(0.3).with(PORTAL_TOOL),
+        Stretch::shooting(MouseButton::Right),
+        Stretch::flying(0.116, Thruster::PitchDown).with(PORTAL_TOOL),
+        Stretch::idle(0.3),
+        // round the ring and up to the cap, to where the fall is seen from its side
+        Stretch::flying(4.0, Thruster::Right),
+        Stretch::idle(0.4),
+        Stretch::flying(4.8, Thruster::Forward),
+        Stretch::idle(0.4),
+        // a pool a metre deep poured away from the fall, the body held down in it, and the
+        // fall watched
+        braced(Stretch::flying(0.98, Thruster::YawRight)),
+        braced(Stretch::pouring(39.4)),
+        braced(Stretch::flying(1.75, Thruster::YawLeft)),
+        braced(Stretch::flying(0.12, Thruster::PitchUp)),
+        braced(Stretch::idle(12.0)),
+    ];
+    play("waterfall", Seat::Body, 20_000.0, &scene).hold();
 }
 
 #[test]

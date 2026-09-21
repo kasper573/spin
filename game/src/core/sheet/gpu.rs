@@ -23,9 +23,16 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
 use super::{
-    SHADER, SHEET_CELLS, SHEET_CORNERS, SHEET_INDICES, SHEET_MOST_GRAINS, SHEET_WATCHED,
-    SHEET_WATCHED_CORNERS, SheetFrame, SheetParams, SheetReady,
+    JETS_SHADER, JetsParams, SHADER, SHEET_CELLS, SHEET_CORNERS, SHEET_INDICES, SHEET_MOST_GRAINS,
+    SHEET_WATCHED, SHEET_WATCHED_CORNERS, SheetFrame, SheetParams, SheetReady,
 };
+
+/// `jets.wgsl`'s counts: the drains, the points round a hoop's rim, and the hoops.
+pub const DRAINS: usize = 2;
+const RIM: usize = 16;
+const HOOPS: usize = 512;
+/// The corners of all the triangles the jets' surface can have.
+pub const JET_INDICES: usize = 6 * RIM * HOOPS;
 
 /// Threads to a workgroup of the kernels that go row by row.
 const ROW_THREADS: u32 = 64;
@@ -43,6 +50,14 @@ pub struct SheetBuffers {
     clock: Handle<ShaderBuffer>,
     threads: Handle<ShaderBuffer>,
     carried: Handle<ShaderBuffer>,
+    /// What has run down the drains, the hoops of it in the air, and what is known of them.
+    drained: Handle<ShaderBuffer>,
+    hoops: Handle<ShaderBuffer>,
+    flights: Handle<ShaderBuffer>,
+    /// The jets' surface, kept as the sheet's own is below.
+    pub jet_vertices: Handle<ShaderBuffer>,
+    pub jet_indices: Handle<ShaderBuffer>,
+    pub jet_counters: Handle<ShaderBuffer>,
     /// The surface, as the water's shader draws one: its vertices, the corners of its
     /// triangles, and how many of those there are, second of four counts.
     pub vertices: Handle<ShaderBuffer>,
@@ -73,10 +88,16 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> SheetBuffers {
         clock: make(12 + rows * 4),
         threads: make(16),
         carried: make((6 + grains) * 4),
+        drained: make(cells * 16),
+        hoops: make(HOOPS * (2 * RIM * 16 + 16)),
+        flights: make(4 + 2 * DRAINS * 4),
+        jet_vertices: make(JET_INDICES / 6 * 48),
+        jet_indices: make(JET_INDICES * 4),
+        jet_counters: make(16),
         vertices: make(SHEET_CORNERS * 48),
         indices: make(SHEET_INDICES * 4),
         counters: make(16),
-        held: make(rows * 4),
+        held: make((rows + 1) * 4),
         watched: make((1 + SHEET_WATCHED_CORNERS) * 16),
     }
 }
@@ -89,6 +110,7 @@ pub struct SheetStep;
 pub fn install(render_app: &mut SubApp) {
     render_app
         .init_resource::<Uniform>()
+        .init_resource::<JetsUniform>()
         .init_resource::<Seen>()
         .add_systems(RenderStartup, init_pipelines)
         .add_systems(Render, prepare.in_set(RenderSystems::PrepareBindGroups))
@@ -116,6 +138,13 @@ enum Kernel {
     Face,
     Measure,
     Report,
+    Press,
+    Sink,
+    Bear,
+    Fly,
+    Land,
+    Weigh,
+    Draw,
 }
 
 /// Which of `sheet.wgsl`'s bindings a kernel's layout holds: the carrying's, the solver's, the
@@ -124,12 +153,13 @@ enum Kernel {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bound {
     Carrying,
+    Jets,
     Solver,
     Pacing,
     Surface,
 }
 
-const KERNELS: [(Kernel, &str, Bound); 13] = [
+const KERNELS: [(Kernel, &str, Bound); 20] = [
     (Kernel::CarryRound, "carry_round", Bound::Carrying),
     (Kernel::CarryAlong, "carry_along", Bound::Carrying),
     (Kernel::Pour, "pour", Bound::Solver),
@@ -143,6 +173,13 @@ const KERNELS: [(Kernel, &str, Bound); 13] = [
     (Kernel::Face, "face", Bound::Surface),
     (Kernel::Measure, "measure", Bound::Surface),
     (Kernel::Report, "report", Bound::Surface),
+    (Kernel::Press, "press", Bound::Jets),
+    (Kernel::Sink, "sink", Bound::Jets),
+    (Kernel::Bear, "bear", Bound::Jets),
+    (Kernel::Fly, "fly", Bound::Jets),
+    (Kernel::Land, "land", Bound::Jets),
+    (Kernel::Weigh, "weigh", Bound::Jets),
+    (Kernel::Draw, "draw", Bound::Jets),
 ];
 
 impl Bound {
@@ -150,6 +187,7 @@ impl Bound {
     fn bindings(self) -> (&'static [u32], &'static [u32]) {
         match self {
             Bound::Carrying => (&[0, 2, 3, 13], &[2, 13]),
+            Bound::Jets => (&[0, 1, 3, 6, 10, 14, 15, 16, 17, 18, 19, 20], &[1]),
             Bound::Solver => (&[0, 1, 2, 3, 4, 5, 6], &[1, 2]),
             Bound::Pacing => (&[0, 6, 11], &[]),
             Bound::Surface => (&[0, 1, 2, 6, 7, 8, 9, 10, 12], &[1, 2]),
@@ -163,6 +201,8 @@ impl Bound {
             .map(|&binding| {
                 if binding == 0 {
                     uniform_buffer::<SheetParams>(false)
+                } else if binding == 14 {
+                    uniform_buffer::<JetsParams>(false)
                 } else if read_only.contains(&binding) {
                     storage_buffer_read_only_sized(false, None)
                 } else {
@@ -185,7 +225,11 @@ fn init_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Res<P
             cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some((*entry).into()),
                 layout: vec![bound.layout()],
-                shader: assets.load(SHADER),
+                shader: assets.load(if *bound == Bound::Jets {
+                    JETS_SHADER
+                } else {
+                    SHADER
+                }),
                 entry_point: Some((*entry).into()),
                 ..default()
             })
@@ -196,6 +240,9 @@ fn init_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Res<P
 
 #[derive(Resource, Default)]
 struct Uniform(UniformBuffer<SheetParams>);
+
+#[derive(Resource, Default)]
+struct JetsUniform(UniformBuffer<JetsParams>);
 
 /// The floor, the carrying and the emptying the GPU has been brought up to.
 #[derive(Resource, Default)]
@@ -214,6 +261,7 @@ struct BindGroups {
     back: BindGroup,
     carry_forth: BindGroup,
     carry_back: BindGroup,
+    jets: BindGroup,
     pacing: BindGroup,
     surface: BindGroup,
     raw: Raw,
@@ -226,6 +274,10 @@ struct Raw {
     clock: Buffer,
     threads: Buffer,
     carried: Buffer,
+    drained: Buffer,
+    hoops: Buffer,
+    flights: Buffer,
+    jet_counters: Buffer,
     counters: Buffer,
 }
 
@@ -238,17 +290,20 @@ fn prepare(
     buffers: Res<SheetBuffers>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
     frame: Res<SheetFrame>,
-    mut uniform: ResMut<Uniform>,
+    (mut uniform, mut jets_uniform): (ResMut<Uniform>, ResMut<JetsUniform>),
     made: Option<Res<BindGroups>>,
 ) {
     uniform.0.set(frame.params);
     uniform.0.write_buffer(&device, &queue);
+    jets_uniform.0.set(frame.jets);
+    jets_uniform.0.write_buffer(&device, &queue);
     if made.is_some() {
         return;
     }
     let get = |handle: &Handle<ShaderBuffer>| gpu_buffers.get(handle).map(|b| b.buffer.clone());
-    let (Some(params), Some(all)) = (
+    let (Some(params), Some(drains), Some(all)) = (
         uniform.0.binding(),
+        jets_uniform.0.binding(),
         [
             &buffers.bed,
             &buffers.state,
@@ -263,6 +318,12 @@ fn prepare(
             &buffers.threads,
             &buffers.watched,
             &buffers.carried,
+            &buffers.drained,
+            &buffers.hoops,
+            &buffers.flights,
+            &buffers.jet_vertices,
+            &buffers.jet_indices,
+            &buffers.jet_counters,
         ]
         .into_iter()
         .map(get)
@@ -284,6 +345,12 @@ fn prepare(
         threads,
         watched,
         carried,
+        drained,
+        hoops,
+        flights,
+        jet_vertices,
+        jet_indices,
+        jet_counters,
     ] = &all[..]
     else {
         return;
@@ -325,6 +392,30 @@ fn prepare(
         back: solver(halfway, state),
         carry_forth: carrying(state, halfway),
         carry_back: carrying(halfway, state),
+        jets: {
+            let buffers = [
+                (1, bed),
+                (3, state),
+                (6, clock),
+                (10, held),
+                (15, drained),
+                (16, hoops),
+                (17, flights),
+                (18, jet_vertices),
+                (19, jet_indices),
+                (20, jet_counters),
+            ];
+            let entries: Vec<BindGroupEntry> = [(0, params.clone()), (14, drains.clone())]
+                .into_iter()
+                .chain(buffers.map(|(binding, buffer)| (binding, buffer.as_entire_binding())))
+                .map(|(binding, resource)| BindGroupEntry { binding, resource })
+                .collect();
+            device.create_bind_group(
+                "sheet",
+                &cache.get_bind_group_layout(&Bound::Jets.layout()),
+                &entries,
+            )
+        },
         pacing: group(Bound::Pacing, &[(6, clock), (11, threads)]),
         surface: group(
             Bound::Surface,
@@ -346,6 +437,10 @@ fn prepare(
             clock: clock.clone(),
             threads: threads.clone(),
             carried: carried.clone(),
+            drained: drained.clone(),
+            hoops: hoops.clone(),
+            flights: flights.clone(),
+            jet_counters: jet_counters.clone(),
             counters: counters.clone(),
         },
     });
@@ -394,9 +489,13 @@ fn dispatch(
         encoder.clear_buffer(&groups.raw.state, 0, None);
         encoder.clear_buffer(&groups.raw.halfway, 0, None);
         encoder.clear_buffer(&groups.raw.clock, 0, None);
+        encoder.clear_buffer(&groups.raw.drained, 0, None);
+        encoder.clear_buffer(&groups.raw.hoops, 0, None);
+        encoder.clear_buffer(&groups.raw.flights, 0, None);
         seen.emptied = frame.emptied;
     }
     encoder.clear_buffer(&groups.raw.counters, 0, None);
+    encoder.clear_buffer(&groups.raw.jet_counters, 0, None);
     // a sheet nothing has been poured on has no water to step, draw or count
     if !frame.wetted {
         return;
@@ -428,6 +527,13 @@ fn dispatch(
             );
         }
     }
+    let draining = frame
+        .jets
+        .drains
+        .iter()
+        .map(|drain| drain.cells.max_element())
+        .max()
+        .map_or(0, |cells| cells.div_ceil(CELL_THREADS));
     let poured = frame.params.pour_cells;
     pass.set_pipeline(pipeline(Kernel::Pour));
     pass.set_bind_group(0, &groups.back, &[]);
@@ -453,6 +559,24 @@ fn dispatch(
                 pass.dispatch_workgroups_indirect(&groups.raw.threads, 0);
             }
         }
+        if draining > 0 {
+            pass.set_bind_group(0, &groups.jets, &[]);
+            pass.set_pipeline(pipeline(Kernel::Press));
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(pipeline(Kernel::Sink));
+            pass.dispatch_workgroups(draining, draining, 1);
+        }
+    }
+    pass.set_bind_group(0, &groups.jets, &[]);
+    for (kernel, threads) in [
+        (Kernel::Bear, 1),
+        (Kernel::Fly, (HOOPS as u32).div_ceil(ROW_THREADS)),
+        (Kernel::Land, 1),
+        (Kernel::Weigh, 1),
+        (Kernel::Draw, (HOOPS as u32).div_ceil(ROW_THREADS)),
+    ] {
+        pass.set_pipeline(pipeline(kernel));
+        pass.dispatch_workgroups(threads, 1, 1);
     }
     pass.set_bind_group(0, &groups.surface, &[]);
     pass.set_pipeline(pipeline(Kernel::Raise));

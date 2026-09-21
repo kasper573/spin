@@ -8,12 +8,14 @@
 //! water on it, the water is carried to where the ground it lay on has gone.
 use bevy::prelude::*;
 
-use super::{Drum, Grid, GroundCarry, PATCH, Place};
+use super::{Drum, DrumSurface, Grid, GroundCarry, MouthColour, MouthCoords, PATCH, Place};
 use crate::core::math::{Vec3d, cross, dot};
 use crate::core::rigid::{Body, BodyShape, WaterCoupling};
 use crate::core::sheet::{SHEET_CELLS, SHEET_MOST_GRAINS, Sheet, SheetCarried, SheetLie};
+use crate::core::sheet::{SHEET_DRAINS, SheetDrain, SheetOutlet};
 use crate::core::sheet::{SHEET_WATCHED, SheetLanding, SheetWater};
 use crate::core::units::{Litres, Metres, MetresPerSecond, Seconds};
+use crate::core::vessel::Vessel;
 use crate::systems::sim::Simulation;
 
 /// What the sheet was last laid on: which of the landscape's cells, how those lie on the ring,
@@ -184,6 +186,55 @@ impl SheetWindow {
         (felt.coupling > 0.0).then_some(felt)
     }
 
+    /// The drains a pair of open mouths makes of the floor: water over a mouth in the ground
+    /// runs out of it and comes out of the other mouth, wherever that is, against the water
+    /// over that one if it too is in the ground.
+    fn drains(&self, drum: &Drum) -> [Option<SheetDrain>; SHEET_DRAINS] {
+        let reach = drum.mouths.passable();
+        let Some((over, grid, _)) = self.0.filter(|_| reach > 0.0) else {
+            return [None; SHEET_DRAINS];
+        };
+        let frame = drum.water_frame();
+        MouthColour::BOTH.map(|colour| {
+            let mouth = drum.mouths.get(colour)?;
+            let other = drum.mouths.get(colour.other())?;
+            if mouth.surface() != DrumSurface::Wall {
+                return None;
+            }
+            let under = drum.place(drum.mouth_point(mouth, MouthCoords::default()));
+            let round = (grid.wrap(under.round.cell as i128 - over.first.0 as i128) as f64
+                + under.round.across)
+                / over.taken as f64;
+            let along = (under.along / grid.along - over.first.1 as f64) / over.taken as f64;
+            let cell = [grid.arc, grid.along].map(|cell| cell * over.taken as f64);
+            let half = [0, 1].map(|axis| (reach / cell[axis]).ceil() + 1.0);
+            let first = [round - half[0], along - half[1]].map(f64::floor);
+            if round >= over.cells[0] as f64 || first[1] < 0.0 || (first[0] < 0.0 && !over.closed) {
+                return None;
+            }
+            let [across, up, way] = drum
+                .mouth_frame(other, MouthCoords::default())
+                .map(|v| frame.vector_to_water(v).map(|x| x as f32).into());
+            let middle = frame.to_water(drum.mouth_point(other, MouthCoords::default()));
+            Some(SheetDrain {
+                first: [
+                    first[0].rem_euclid(over.cells[0] as f64) as u32,
+                    first[1] as u32,
+                ],
+                cells: half.map(|half| 2 * half as u32 + 1),
+                middle: [(round - first[0]) as f32, (along - first[1]) as f32],
+                reach: Metres(reach as f32),
+                far: (other.surface() == DrumSurface::Wall)
+                    .then_some(MouthColour::BOTH.iter().position(|c| *c != colour)?),
+                outlet: SheetOutlet {
+                    middle: middle.map(|x| x as f32).into(),
+                    way,
+                    across: [across, up],
+                },
+            })
+        })
+    }
+
     /// The sheet's water on the floor under a point of the drum's frame, as it was last reported,
     /// if it was reported there.
     fn water_under(&self, drum: &Drum, sheet: &Sheet, at: Vec3d) -> Option<SheetWater> {
@@ -215,6 +266,7 @@ pub fn feed_sheet(
         Metres((from_site * grid.arc) as f32),
         Metres((over.first.1 as f64 * grid.along - drum.water.y) as f32),
     ]);
+    sheet.drain(window.drains(drum));
     window.watch(drum, &mut sheet, sim.avatar().p);
     let run = Seconds((sim.time.0 - fed.0).max(0.0));
     *fed = sim.time;

@@ -20,7 +20,7 @@ use bevy::render::render_resource::ShaderType;
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::Shader;
 
-pub use gpu::{SheetBuffers, SheetStep};
+pub use gpu::{DRAINS as SHEET_DRAINS, JET_INDICES as SHEET_JET_INDICES, SheetBuffers, SheetStep};
 
 use crate::core::fluid::ReadOnce;
 use crate::core::units::{Litres, Metres, MetresPerSecond, RadiansPerSecond, Seconds};
@@ -44,6 +44,7 @@ const MOST_STEPS: u32 = 8;
 const COURANT: f32 = 0.2;
 
 const SHADER: &str = "embedded://game/core/sheet/shaders/sheet.wgsl";
+const JETS_SHADER: &str = "embedded://game/core/sheet/shaders/jets.wgsl";
 
 /// Set by the render world once every kernel has compiled; until then the sheet takes no water,
 /// so none is lost.
@@ -82,6 +83,31 @@ pub struct SheetCarried {
     pub grains: [u32; 2],
     pub was: [Vec<Option<u32>>; 2],
     pub spread: f32,
+}
+
+/// An opening in the sheet's floor that its water runs out of, as fast as its head drives it
+/// against whatever is on the far side: the block of cells it lies among, by the first of them
+/// and how many each way, its middle in cells from that first one, how far from its middle it is
+/// open, which other drain's water presses back on it from the far side, if any does, and
+/// where its water comes out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SheetDrain {
+    pub first: [u32; 2],
+    pub cells: [u32; 2],
+    pub middle: [f32; 2],
+    pub reach: Metres,
+    pub far: Option<usize>,
+    pub outlet: SheetOutlet,
+}
+
+/// Where a drain's water comes out, in the frame the sheet's surface is drawn in: the middle of
+/// the opening, the way out of it, and two ways across it, all three of unit length and square
+/// to one another.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SheetOutlet {
+    pub middle: Vec3,
+    pub way: Vec3,
+    pub across: [Vec3; 2],
 }
 
 /// How poured water lands: how fast it runs over the floor as it does, round the ring and
@@ -151,6 +177,7 @@ pub struct Sheet {
     lie: Option<SheetLie>,
     frame: SheetFrame,
     held: Litres,
+    flying: Litres,
     watched: SheetWatched,
 }
 
@@ -248,6 +275,23 @@ impl Sheet {
         self.frame.params.spin = spin.0;
     }
 
+    /// The openings the sheet's water runs out of from now on.
+    pub fn drain(&mut self, drains: [Option<SheetDrain>; SHEET_DRAINS]) {
+        self.frame.jets.drains = drains.map(|drain| {
+            drain.map_or_else(DrainParams::default, |drain| DrainParams {
+                first: drain.first.into(),
+                cells: drain.cells.into(),
+                middle: drain.middle.into(),
+                reach: drain.reach.0,
+                far: drain.far.map_or(SHEET_DRAINS as u32, |far| far as u32),
+                out_middle: drain.outlet.middle.extend(0.0),
+                out_way: drain.outlet.way.extend(0.0),
+                out_across: drain.outlet.across[0].extend(0.0),
+                out_up: drain.outlet.across[1].extend(0.0),
+            })
+        });
+    }
+
     /// Report the water round the block of cells that begins at this one from now on.
     pub fn watch(&mut self, first: [u32; 2]) {
         self.frame.params.watch_first = first.into();
@@ -263,12 +307,23 @@ impl Sheet {
         self.frame.emptied += 1;
         self.frame.wetted = false;
         self.held = Litres(0.0);
+        self.flying = Litres(0.0);
         self.watched = SheetWatched::default();
     }
 
-    /// The water the sheet was last found to hold.
+    /// The water the sheet was last found to hold, that of it in the air with the rest.
     pub fn held(&self) -> Litres {
         self.held
+    }
+
+    /// Whether water that ran out of the sheet's drains was last found not to have come down.
+    pub fn has_jets(&self) -> bool {
+        self.flying.0 > 0.0
+    }
+
+    /// The water that had run out of the sheet's drains and not yet come down, when last found.
+    pub fn flying(&self) -> Litres {
+        self.flying
     }
 }
 
@@ -299,6 +354,7 @@ impl SheetCarried {
 #[derive(Resource, Clone, ExtractResource)]
 pub struct SheetFrame {
     params: SheetParams,
+    jets: JetsParams,
     /// The floor's height at every corner, and how many floors there have been.
     bed: Arc<[f32]>,
     floors: u32,
@@ -317,6 +373,7 @@ impl Default for SheetFrame {
     fn default() -> Self {
         SheetFrame {
             params: SheetParams::default(),
+            jets: JetsParams::default(),
             bed: Arc::from(Vec::new()),
             floors: 0,
             carried: Arc::from(Vec::new()),
@@ -349,11 +406,31 @@ struct SheetParams {
     watch_first: UVec2,
 }
 
+/// `drains` in `jets.wgsl`.
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+struct JetsParams {
+    drains: [DrainParams; SHEET_DRAINS],
+}
+
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+struct DrainParams {
+    first: UVec2,
+    cells: UVec2,
+    middle: Vec2,
+    reach: f32,
+    far: u32,
+    out_middle: Vec4,
+    out_way: Vec4,
+    out_across: Vec4,
+    out_up: Vec4,
+}
+
 pub struct SheetPlugin;
 
 impl Plugin for SheetPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/sheet.wgsl");
+        embedded_asset!(app, "shaders/jets.wgsl");
         let shader = app.world().resource::<AssetServer>().load::<Shader>(SHADER);
         let buffers =
             gpu::create_buffers(&mut app.world_mut().resource_mut::<Assets<ShaderBuffer>>());
@@ -491,5 +568,6 @@ fn receive_held(
     if asked == Some(sheet.frame.emptied) {
         let cubic_metres: f64 = rows.iter().map(|row| *row as f64).sum();
         sheet.held = Litres((cubic_metres * 1000.0) as f32);
+        sheet.flying = Litres(rows.last().map_or(0.0, |flying| flying * 1000.0));
     }
 }

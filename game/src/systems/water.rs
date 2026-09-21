@@ -26,7 +26,7 @@ use crate::core::fluid::{
     FluidBuffers, GRID_REACH, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, surface_cell,
 };
 use crate::core::math::quat_conjugate;
-use crate::core::sheet::{Sheet, SheetBuffers};
+use crate::core::sheet::{SHEET_JET_INDICES, Sheet, SheetBuffers};
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
@@ -75,6 +75,7 @@ impl Plugin for WaterPlugin {
             (
                 tick.after(SettleVantages),
                 show_flying,
+                show_jets,
                 size_lying,
                 submerge,
             )
@@ -101,7 +102,8 @@ struct WaterUniform {
     ground: Vec4,
     background: Vec4,
     /// x: metres per unit of the water's length; y: a cell of the surface's grid in metres;
-    /// z: 1 where the surface is a sheet's, whose vertices say how deep the water stands.
+    /// z: 1 where the surface is a sheet's, whose vertices say how deep the water stands, and
+    /// 2 where it is a jet's, whose vertices say how thick the jet is.
     units: Vec4,
     /// x: simulated seconds; y: metres per second per unit of the water's velocity; z: a
     /// droplet's radius in metres.
@@ -241,6 +243,10 @@ struct Water([Handle<WaterMaterial>; VANTAGES]);
 #[derive(Resource)]
 struct LyingWater([Handle<WaterMaterial>; VANTAGES]);
 
+/// The material of the jets of water that has run out of the sheet's drains.
+#[derive(Resource)]
+struct JetWater([Handle<WaterMaterial>; VANTAGES]);
+
 #[derive(Resource)]
 struct Spray([Handle<SprayMaterial>; VANTAGES]);
 
@@ -255,6 +261,10 @@ pub struct WaterMesh;
 struct LyingWaterMesh {
     cells: u32,
 }
+
+/// The mesh the jets are drawn through, measured in metres as the sheet's is.
+#[derive(Component)]
+struct JetWaterMesh;
 
 /// A mesh that only says how many vertices are drawn: the vertex shader fetches each one from
 /// the water's buffers by its number, which the vertex carries as its place along x. The
@@ -376,6 +386,37 @@ fn spawn(
     }
     commands.insert_resource(LyingWater(lying));
 
+    let jets = std::array::from_fn(|vantage| {
+        materials.add(WaterMaterial {
+            water: water.clone(),
+            order: ORDER,
+            vertices: sheet.jet_vertices.clone(),
+            indices: sheet.jet_indices.clone(),
+            counters: sheet.jet_counters.clone(),
+            droplets: buffers.surface.droplets.clone(),
+            figure: FigureUniform::default(),
+            mouths: MouthsUniform::default(),
+            through_blue: None,
+            through_orange: None,
+            columns: columns.seen_from(vantage),
+        })
+    });
+    let ribbed = meshes.add(numbered_mesh(SHEET_JET_INDICES));
+    for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&jets) {
+        commands.spawn((
+            JetWaterMesh,
+            Visibility::Hidden,
+            seen,
+            seen.layers(),
+            NotShadowCaster,
+            Mesh3d(ribbed.clone()),
+            MeshMaterial3d(material.clone()),
+            water_bounds(),
+            Transform::default(),
+        ));
+    }
+    commands.insert_resource(JetWater(jets));
+
     let spray = [(); VANTAGES].map(|()| {
         sprays.add(SprayMaterial {
             water: water.clone(),
@@ -409,10 +450,16 @@ fn tick(
     vantages: Res<Vantages>,
     pictures: Res<Pictures>,
     air: Res<Air>,
-    (water, lying, spray): (Res<Water>, Res<LyingWater>, Res<Spray>),
+    (water, lying, jets, spray): (Res<Water>, Res<LyingWater>, Res<JetWater>, Res<Spray>),
     (mut materials, mut sprays): (ResMut<Assets<WaterMaterial>>, ResMut<Assets<SprayMaterial>>),
     mut meshes: Query<(&SeenFrom, &mut Transform), (With<WaterMesh>, Without<LyingWaterMesh>)>,
-    mut lying_meshes: Query<(&SeenFrom, &mut Transform), With<LyingWaterMesh>>,
+    mut lying_meshes: Query<
+        (&SeenFrom, &mut Transform),
+        (
+            Without<WaterMesh>,
+            Or<(With<LyingWaterMesh>, With<JetWaterMesh>)>,
+        ),
+    >,
 ) {
     let resolution = fluid.resolution();
     let metres_per_unit = resolution.length();
@@ -466,16 +513,19 @@ fn tick(
         );
         let shared = WaterMaterial::clone(&material);
         drop(material);
-        if let Some(mut material) = materials.get_mut(&lying.0[k]) {
-            material.order = shared.order;
-            material.mouths = shared.mouths.clone();
-            material.through_blue = shared.through_blue.clone();
-            material.through_orange = shared.through_orange.clone();
-            material.water = WaterUniform {
-                units: Vec4::new(1.0, 0.0, 1.0, 0.0),
-                clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
-                ..shared.water.clone()
-            };
+        // the sheet's water reaches the scene behind it, and a jet's is as thick as it says
+        for (handle, behind) in [(&lying.0[k], 1.0), (&jets.0[k], 2.0)] {
+            if let Some(mut material) = materials.get_mut(handle) {
+                material.order = shared.order;
+                material.mouths = shared.mouths.clone();
+                material.through_blue = shared.through_blue.clone();
+                material.through_orange = shared.through_orange.clone();
+                material.water = WaterUniform {
+                    units: Vec4::new(1.0, 0.0, behind, 0.0),
+                    clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
+                    ..shared.water.clone()
+                };
+            }
         }
         if let Some(mut mist) = sprays.get_mut(&spray.0[k]) {
             let material = &shared;
@@ -500,6 +550,20 @@ fn show_flying(
         Visibility::Inherited
     };
     for mut visibility in &mut flying {
+        if *visibility != shown {
+            *visibility = shown;
+        }
+    }
+}
+
+/// The jets are drawn only while there may be any.
+fn show_jets(sheet: Res<Sheet>, mut jets: Query<&mut Visibility, With<JetWaterMesh>>) {
+    let shown = if sheet.has_jets() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in &mut jets {
         if *visibility != shown {
             *visibility = shown;
         }

@@ -43,8 +43,6 @@ pub const EYE_HEIGHT: Metres = Metres(1.7);
 const HEAD_RADIUS: f64 = 0.25;
 /// Ground speed the legs settle on when thrust along the ground.
 pub const WALK_SPEED: MetresPerSecond = MetresPerSecond(1.5);
-/// Time scale on which the legs bring the body to the speed it wants.
-const LEG_TAU: f64 = 0.25;
 /// Coulomb friction between the feet and the ground, the most the legs can push per unit of the
 /// ground's support.
 const LEG_GRIP: f64 = 0.8;
@@ -306,8 +304,8 @@ pub fn drive(
     hold(body, thrusters, gyros, vessel, dt);
 }
 
-/// Legs: push along the ground until the feet move over it at walking speed in the direction
-/// thrust, within what friction allows; thrust along the ground's normal acts as it is.
+/// Legs: hold the feet to walking speed over the ground in the direction thrust, as feet that do
+/// not slide do, within what friction allows; thrust along the ground's normal acts as it is.
 fn walk(body: &mut Body, thrust: &Vec3d, power: f64, ground: &Ground, dt: f64) {
     let n = ground.normal;
     let along = limited(flatten(thrust, &n).map(|t| t / power.max(1e-9)), 1.0);
@@ -323,7 +321,7 @@ fn walk(body: &mut Body, thrust: &Vec3d, power: f64, ground: &Ground, dt: f64) {
         &n,
     );
     let grip = LEG_GRIP * ground.support.0 * body.inv_m;
-    let push = limited(slip.map(|s| s / LEG_TAU), grip);
+    let push = limited(slip.map(|s| s / dt), grip);
     add_scaled(&mut body.v, &push, dt);
     add_scaled(&mut body.v, &n, dot(thrust, &n) * dt);
 }

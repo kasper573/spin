@@ -315,7 +315,18 @@ fn fragment(in: Fragment) -> Shaded {
         behind = max(counted.x * COLUMN_STEP + counted.y + distance + held, 0.0);
     }
     var film = smoothstep(0.0, FILM * water.units.y, behind);
-    if (in.standing >= 0.0) {
+    if (in.standing >= 0.0 && water.units.z > 1.5) {
+        // a jet is as thick as it says, seen square on, and thinner toward its edge as a
+        // round thing is
+        let toward = normalize(view.world_position - in.world_position);
+        let facing = dot(normalize(in.world_normal), toward);
+        if (facing < 0.0) {
+            // the far side of a jet is behind the water its near side already stands for
+            discard;
+        }
+        behind = in.standing * facing;
+        film = smoothstep(0.0, FILM * SHEET_FILM, behind);
+    } else if (in.standing >= 0.0) {
         // a sheet lies on the floor, so the water behind its surface reaches whatever the scene
         // shows there, and how thin it is is known rather than made out
         behind = 1e9;
