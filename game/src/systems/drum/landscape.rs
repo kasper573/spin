@@ -171,13 +171,16 @@ pub struct Ground {
     pub patches: Vec<Patch>,
 }
 
-/// A patch of ground: which patch round the ring and along it, and its heights, round-major.
+/// A patch of ground: which patch round the ring and along it, its heights, round-major, and
+/// how far past the glass each of its cells has been dug, where it has.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Patch {
     pub round: i64,
     pub along: i64,
     #[serde(with = "codec::f32s")]
     pub heights: Vec<f32>,
+    #[serde(default, with = "codec::f32s")]
+    pub past: Vec<f32>,
 }
 
 /// Sculptable terrain on the inside of the drum floor: a heightfield in the wheel's frame,
@@ -200,6 +203,9 @@ pub struct Landscape {
 /// costs only as much as there are patches.
 struct Sculpted {
     heights: Box<[f32]>,
+    /// How far past the glass the ground at each cell was dug: the ground there is the glass,
+    /// but where between two cells it ends is where the bowl dug past it would have come up.
+    past: Box<[f32]>,
     /// The version of the landscape its heights last changed in.
     changed: u64,
     summary: Summary,
@@ -262,16 +268,14 @@ impl Landscape {
         let max = ring.max_height().0;
         self.base = self.base.min(max);
         for ((round, along), patch) in patches {
-            for (k, height) in patch.heights.iter().enumerate() {
+            for (k, (height, past)) in patch.heights.iter().zip(&patch.past).enumerate() {
                 let (cell, row) = cell_of(round, along, k);
                 if let Some(cell) = carry.onto(cell).filter(|_| row.abs() <= self.grid.rows) {
-                    self.set(cell, row, height.min(max));
+                    self.set(cell, row, height.min(max), past.min(max));
                 }
             }
         }
-        let base = self.base;
-        self.patches
-            .retain(|_, patch| patch.heights.iter().any(|h| *h != base));
+        self.patches.retain(|_, patch| !patch.is_bare(self.base));
         self.relaid();
         carry
     }
@@ -305,6 +309,19 @@ impl Landscape {
             .map_or(self.base, |patch| patch.heights[k])
     }
 
+    /// How far the ground reaches over the glass at a point, as `sample` does, but less than
+    /// nothing where it has been dug past the glass: nothing is there, but where it goes from
+    /// nothing to something is where the ground ends.
+    pub fn reach(&self, at: Place) -> f64 {
+        self.bilinear(at, |cell, row| {
+            let (key, k) = patch_of(cell, row);
+            self.patches
+                .get(&key)
+                .map_or(self.base, |patch| patch.heights[k] - patch.past[k])
+        })
+        .0
+    }
+
     /// Every patch where the ground has been sculpted, by which patch round the ring and along
     /// it it is.
     pub fn patches(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
@@ -316,6 +333,16 @@ impl Landscape {
         self.patches
             .get(&(round, along))
             .map(|patch| &patch.heights[..])
+    }
+
+    /// What of a sculpted patch is worth keeping.
+    pub fn kept(&self, round: i64, along: i64) -> Option<Patch> {
+        self.patches.get(&(round, along)).map(|patch| Patch {
+            round,
+            along,
+            heights: patch.heights.to_vec(),
+            past: patch.past.to_vec(),
+        })
     }
 
     /// Every sculpted patch whose heights changed after the landscape's `version`, or all of
@@ -385,11 +412,7 @@ impl Landscape {
         let mut patches: Vec<Patch> = self
             .patches
             .iter()
-            .map(|(&(round, along), patch)| Patch {
-                round,
-                along,
-                heights: patch.heights.to_vec(),
-            })
+            .filter_map(|(&(round, along), _)| self.kept(round, along))
             .collect();
         patches.sort_by_key(|patch| (patch.round, patch.along));
         Ground {
@@ -419,15 +442,19 @@ impl Landscape {
                 && patch.heights.len() == cells;
             if fits {
                 let heights: Box<[f32]> = patch.heights.iter().map(|h| height(*h)).collect();
-                if heights.iter().any(|h| *h != self.base) {
-                    self.patches.insert(
-                        (patch.round, patch.along),
-                        Sculpted {
-                            heights,
-                            changed: 0,
-                            summary: Summary::default(),
-                        },
-                    );
+                let past: Box<[f32]> = if patch.past.len() == cells {
+                    patch.past.iter().map(|p| height(*p)).collect()
+                } else {
+                    vec![0.0; cells].into_boxed_slice()
+                };
+                let sculpted = Sculpted {
+                    heights,
+                    past,
+                    changed: 0,
+                    summary: Summary::default(),
+                };
+                if !sculpted.is_bare(self.base) {
+                    self.patches.insert((patch.round, patch.along), sculpted);
                 }
             }
         }
@@ -462,10 +489,17 @@ impl Landscape {
                     continue;
                 }
                 let w = (1.0 - q) * (1.0 - q);
-                let before = self.height(cell, row);
-                let after = (before + (amount * w) as f32).clamp(0.0, max);
+                let before = (self.height(cell, row), self.past(cell, row));
+                // raised ground is laid on the glass however far past it the ground was dug
+                let dug = if amount < 0.0 {
+                    before.0 - before.1
+                } else {
+                    before.0
+                };
+                let reach = dug + (amount * w) as f32;
+                let after = (reach.clamp(0.0, max), (-reach).clamp(0.0, max));
                 if after != before {
-                    self.set(cell, row, after);
+                    self.set(cell, row, after.0, after.1);
                     touched.push(patch_of(cell, row).0);
                 }
             }
@@ -479,7 +513,7 @@ impl Landscape {
             if self
                 .patches
                 .get(key)
-                .is_some_and(|patch| patch.heights.iter().all(|h| *h == self.base))
+                .is_some_and(|patch| patch.is_bare(self.base))
             {
                 self.patches.remove(key);
             }
@@ -507,21 +541,7 @@ impl Landscape {
     /// the axis, per metre.
     #[inline]
     pub fn sample(&self, at: Place) -> (f64, f64, f64) {
-        let grid = self.grid;
-        let (i0, fu) = (at.round.cell, at.round.across);
-        let i1 = grid.wrap(i0 as i128 + 1);
-        let v = (at.along / grid.along).clamp(-grid.rows as f64, grid.rows as f64 - 1e-9);
-        let j0 = v.floor() as i64;
-        let fv = v - j0 as f64;
-        let j1 = j0 + 1;
-        let h00 = self.height(i0, j0) as f64;
-        let h10 = self.height(i1, j0) as f64;
-        let h01 = self.height(i0, j1) as f64;
-        let h11 = self.height(i1, j1) as f64;
-        let h = (h00 * (1.0 - fu) + h10 * fu) * (1.0 - fv) + (h01 * (1.0 - fu) + h11 * fu) * fv;
-        let round = ((h10 - h00) * (1.0 - fv) + (h11 - h01) * fv) / grid.arc;
-        let along = ((h01 - h00) * (1.0 - fu) + (h11 - h10) * fu) / grid.along;
-        (h, round, along)
+        self.bilinear(at, |cell, row| self.height(cell, row))
     }
 
     /// How steeply the ground rises anywhere, per metre round the ring or along it.
@@ -596,17 +616,50 @@ impl Landscape {
         }
     }
 
-    fn set(&mut self, cell: i64, row: i64, height: f32) {
+    fn past(&self, cell: i64, row: i64) -> f32 {
+        let (key, k) = patch_of(cell, row);
+        self.patches.get(&key).map_or(0.0, |patch| patch.past[k])
+    }
+
+    fn set(&mut self, cell: i64, row: i64, height: f32, past: f32) {
         let (key, k) = patch_of(cell, row);
         let base = self.base;
-        self.patches
-            .entry(key)
-            .or_insert_with(|| Sculpted {
-                heights: vec![base; (PATCH * PATCH) as usize].into_boxed_slice(),
-                changed: 0,
-                summary: Summary::default(),
-            })
-            .heights[k] = height;
+        let cells = (PATCH * PATCH) as usize;
+        let patch = self.patches.entry(key).or_insert_with(|| Sculpted {
+            heights: vec![base; cells].into_boxed_slice(),
+            past: vec![0.0; cells].into_boxed_slice(),
+            changed: 0,
+            summary: Summary::default(),
+        });
+        patch.heights[k] = height;
+        patch.past[k] = past;
+    }
+
+    /// A value at a point of the ground from the values at the cells about it, weighed by how
+    /// near each is, and how fast it rises round the ring and along the axis, per metre.
+    fn bilinear(&self, at: Place, value: impl Fn(i64, i64) -> f32) -> (f64, f64, f64) {
+        let grid = self.grid;
+        let (i0, fu) = (at.round.cell, at.round.across);
+        let i1 = grid.wrap(i0 as i128 + 1);
+        let v = (at.along / grid.along).clamp(-grid.rows as f64, grid.rows as f64 - 1e-9);
+        let j0 = v.floor() as i64;
+        let fv = v - j0 as f64;
+        let j1 = j0 + 1;
+        let h00 = value(i0, j0) as f64;
+        let h10 = value(i1, j0) as f64;
+        let h01 = value(i0, j1) as f64;
+        let h11 = value(i1, j1) as f64;
+        let h = (h00 * (1.0 - fu) + h10 * fu) * (1.0 - fv) + (h01 * (1.0 - fu) + h11 * fu) * fv;
+        let round = ((h10 - h00) * (1.0 - fv) + (h11 - h01) * fv) / grid.arc;
+        let along = ((h01 - h00) * (1.0 - fu) + (h11 - h10) * fu) / grid.along;
+        (h, round, along)
+    }
+}
+
+impl Sculpted {
+    /// Whether nothing of the patch differs from ground laid at `base` all round.
+    fn is_bare(&self, base: f32) -> bool {
+        self.heights.iter().all(|h| *h == base) && self.past.iter().all(|p| *p == 0.0)
     }
 }
 

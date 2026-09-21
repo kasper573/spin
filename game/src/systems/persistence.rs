@@ -251,11 +251,9 @@ impl Stored {
         });
         let since = if afresh { 0 } else { self.version };
         let mut puts = Vec::new();
-        for ((round, along), heights) in landscape.changed_since(since) {
-            let patch = Patch {
-                round,
-                along,
-                heights: heights.to_vec(),
+        for ((round, along), _) in landscape.changed_since(since) {
+            let Some(patch) = landscape.kept(round, along) else {
+                continue;
             };
             if let Ok(text) = serde_json::to_string(&patch) {
                 puts.push((patch_key(round, along), text));

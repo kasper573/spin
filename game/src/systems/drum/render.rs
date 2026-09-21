@@ -944,7 +944,7 @@ fn terrain_mesh(drum: &Wheel, columns: &[f64], rows: &[f64]) -> Mesh {
                 round,
                 along: y + drum.site.y,
             };
-            landscape.sample(at).0
+            landscape.reach(at)
         };
         let (first, last) = (rows[0], rows[rows.len() - 1]);
         push(0.0, first);
