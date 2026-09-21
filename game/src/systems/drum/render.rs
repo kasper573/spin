@@ -6,6 +6,8 @@
 //! at any size. The meshes are rebuilt when the site moves, when the ring changes size, or
 //! when the landscape changes; the patterns on the glass and the ground are placed from where
 //! the site is in them, which is kept exactly.
+use std::collections::HashMap;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
@@ -60,6 +62,9 @@ pub fn ground_albedo() -> LinearRgba {
 
 /// Ground never touches the glass; it stops this far short of it.
 const GLASS_INSET: f64 = 0.02;
+/// The ground is this thick where it has been dug away and ends, which keeps its rim clear of
+/// the glass under it.
+const GROUND_ENDS: f32 = 0.03;
 const STRUTS: usize = 24;
 /// The grooves bevelled into the glass along its pane grid are this wide.
 const BEVEL: f32 = 0.08;
@@ -953,9 +958,53 @@ fn terrain_mesh(drum: &Wheel, columns: &[f64], rows: &[f64]) -> Mesh {
     let raised = |i: usize, j: usize| raised[i * across + j.clamp(1, across - 2)];
     let mut indices = Vec::with_capacity(columns.len() * (across - 1) * 6);
     grid_indices(&mut indices, columns.len(), across, 0, |i, j| {
-        let seam = j == 1 || j == across - 3;
-        !seam && (raised(i, j) || raised(i + 1, j) || raised(i, j + 1) || raised(i + 1, j + 1))
+        let skirt = j == 0 || j == across - 2;
+        skirt && (raised(i, j) || raised(i + 1, j) || raised(i, j + 1) || raised(i + 1, j + 1))
     });
+    // the ground itself ends along the line its height runs out at, which crosses the cells
+    // it runs out in, rather than along their edges
+    let mut rim = HashMap::new();
+    for i in 0..columns.len() - 1 {
+        for j in 2..across - 3 {
+            let a = (i * across + j) as u32;
+            let b = ((i + 1) * across + j) as u32;
+            let corners = [(a, b), (b, b + 1), (b + 1, a + 1), (a + 1, a)];
+            let standing = corners
+                .iter()
+                .filter(|(corner, _)| heights[*corner as usize][0] >= GROUND_ENDS)
+                .count();
+            if standing == corners.len() {
+                indices.extend_from_slice(&[a, b, b + 1, a, b + 1, a + 1]);
+                continue;
+            }
+            if standing == 0 {
+                continue;
+            }
+            let mut ground = Vec::with_capacity(6);
+            for (corner, next) in corners {
+                let [here, there] = [corner, next].map(|v| heights[v as usize][0]);
+                if here >= GROUND_ENDS {
+                    ground.push(corner);
+                }
+                if (here >= GROUND_ENDS) != (there >= GROUND_ENDS) {
+                    let edge = (corner.min(next), corner.max(next));
+                    ground.push(*rim.entry(edge).or_insert_with(|| {
+                        let t = (GROUND_ENDS - here) / (there - here);
+                        let [from, to] = [corner, next].map(|v| v as usize);
+                        let between = |a: f32, b: f32| a + (b - a) * t;
+                        positions
+                            .push([0, 1, 2].map(|k| between(positions[from][k], positions[to][k])));
+                        uvs.push([0, 1].map(|k| between(uvs[from][k], uvs[to][k])));
+                        heights.push([GROUND_ENDS, 0.0]);
+                        (positions.len() - 1) as u32
+                    }));
+                }
+            }
+            for k in 1..ground.len().saturating_sub(1) {
+                indices.extend_from_slice(&[ground[0], ground[k], ground[k + 1]]);
+            }
+        }
+    }
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
