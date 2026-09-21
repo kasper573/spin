@@ -11,6 +11,8 @@
 const DRAINS: u32 = 2u;
 // how many points round a hoop's rim, and how many hoops there may be in the air
 const RIM: u32 = 16u;
+// the speed (m/s) under which a jet goes into a pool without taking air with it
+const SMOOTH_ENTRY: f32 = 1.0;
 const HOOPS: u32 = 512u;
 const PI: f32 = 3.14159265;
 
@@ -41,6 +43,8 @@ struct Hoop {
     drain: u32,
     // which of all the hoops there have been it is: one and the next are joined in a tube
     born: u32,
+    // how far it has flown, in metres
+    flown: f32,
 }
 
 struct Flights {
@@ -138,7 +142,7 @@ fn sink(@builtin(global_invocation_id) id: vec3<u32>) {
             continue;
         }
         let share = taken / state.x;
-        after[c] = vec4(state.x - taken, state.yz * (1.0 - share), 0.0);
+        after[c] = vec4(state.x - taken, state.yzw * (1.0 - share));
         let volume = taken * sheet.cell.x * sheet.cell.y;
         drained[c] += vec4(volume, volume * run_of(state.x, state.y), volume * run_of(state.x, state.z), 0.0);
     }
@@ -186,6 +190,7 @@ fn bear() {
         hoops[h].alive = 1u;
         hoops[h].drain = d;
         hoops[h].born = flights.born;
+        hoops[h].flown = 0.0;
         flights.born += 1u;
     }
 }
@@ -232,6 +237,7 @@ fn fly(@builtin(global_invocation_id) id: vec3<u32>) {
     let sagged = sine.y;
     let c = 1.0 - sagged;
     let origin = sheet.radius * vec3(w * dt * s - sagged, 0.0, sine_lag(w * dt));
+    hoops[id.x].flown += length(hoops[id.x].run[0].xyz) * dt;
     for (var k = 0u; k < RIM; k++) {
         let p = hoops[id.x].rim[k].xyz;
         let among_stars = hoops[id.x].run[k].xyz + vec3(w * p.z, 0.0, -w * p.x);
@@ -262,6 +268,18 @@ fn cell_at(place: vec2<f32>) -> vec2<u32> {
         u32(clamp(i, 0, count - 1)),
         u32(clamp(i32(floor(place.y)), 0, i32(sheet.used.y) - 1)),
     );
+}
+
+/// How much air a jet plunging into a pool takes under with it, by its water: as Bin measured
+/// of plunging jets, more the faster and the longer the jet, and none below the speed at which
+/// the pool's surface closes smoothly round it.
+fn taken_in(speed: f32, width: f32, flown: f32) -> f32 {
+    if (speed < SMOOTH_ENTRY) {
+        return 0.0;
+    }
+    let gravity = sheet.spin * sheet.spin * sheet.radius;
+    let froude = speed * speed / max(gravity * width, 1e-9);
+    return 0.04 * pow(froude, 0.28) * pow(flown / width, 0.4);
 }
 
 /// The hoops that have come down give the sheet their water, one after another, so that no
@@ -311,6 +329,7 @@ fn land() {
         let along_floor = vec2(dot(run, spinward), run.y);
         let down = max(dot(run, outward), 0.0);
         let each = hoops[h].water / (shares * sheet.cell.x * sheet.cell.y);
+        let air = each * taken_in(length(run), 2.0 * reach, hoops[h].flown);
         for (var j = -cells.y; j <= cells.y; j++) {
             for (var i = -cells.x; i <= cells.x; i++) {
                 let from_middle = vec2<f32>(vec2(i, j)) * sheet.cell;
@@ -319,7 +338,7 @@ fn land() {
                 }
                 let c = slot(cell_at(place.xy + vec2<f32>(vec2(i, j))));
                 let landing = along_floor + down * from_middle / reach;
-                after[c] += vec4(each, each * landing, 0.0);
+                after[c] += vec4(each, each * landing, air);
             }
         }
         hoops[h].alive = 0u;

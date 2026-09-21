@@ -115,6 +115,11 @@ const ROUGHNESS: f32 = 0.024;
 const MANNINGS_GRAVITY: f32 = 9.80665;
 const VISCOSITY: f32 = 1.0e-6;
 const NEVER: f32 = 1e30;
+// how fast the bubbles of the air the water has taken in rise out of it (m/s), how wide they
+// are (m), and how much of the water they are in is air
+const BUBBLE_RISE: f32 = 0.25;
+const BUBBLE: f32 = 0.003;
+const BUBBLES_SHARE: f32 = 0.1;
 // water shallower than this is not drawn
 const DRAWN: f32 = 1e-4;
 const ROUND: u32 = 0u;
@@ -555,6 +560,17 @@ fn stepped(at: vec2<u32>) -> vec4<f32> {
         + (near_along.z - far_along.z) / sheet.cell.y);
     state.z += dt * ((near_round.z - far_round.z) / sheet.cell.x
         + (near_along.y - far_along.y + floor_along) / sheet.cell.y);
+    // the air in the water goes where the water that holds it goes
+    let here = aired(c);
+    let back_round = beside(at, ROUND, -1);
+    let back_along = beside(at, ALONG, -1);
+    let air = vec4(
+        water.x * select(here, aired(slot(back_round.at)), water.x > 0.0 && back_round.there),
+        water.y * select(aired(slot(on_round.at)), here, water.y > 0.0 || !on_round.there),
+        water.z * select(here, aired(slot(back_along.at)), water.z > 0.0 && back_along.there),
+        water.w * select(aired(slot(on_along.at)), here, water.w > 0.0 || !on_along.there),
+    );
+    state.w += dt * ((air.x - air.y) / sheet.cell.x + (air.z - air.w) / sheet.cell.y);
     state.x = max(state.x, 0.0);
     if (state.x <= 0.0) {
         return vec4(0.0);
@@ -564,7 +580,16 @@ fn stepped(at: vec2<u32>) -> vec4<f32> {
     let run = vec2(run_of(state.x, state.y), run_of(state.x, state.z));
     let drag = MANNINGS_GRAVITY * ROUGHNESS * ROUGHNESS * length(run) / pow(depth, 4.0 / 3.0)
         + 3.0 * VISCOSITY / (depth * depth);
-    return vec4(state.x, state.yz / (1.0 + dt * drag), 0.0);
+    // the bubbles all rise as fast, so the cloud of them leaves through the surface at a steady
+    // rate until it is gone, and no more of them fit under the surface than the water is deep
+    let bubbles = BUBBLES_SHARE * state.x / depth;
+    let risen = clamp(state.w - dt * BUBBLE_RISE * bubbles, 0.0, bubbles * depth);
+    return vec4(state.x, state.yz / (1.0 + dt * drag), risen);
+}
+
+/// How much air a cell's water held, by the water.
+fn aired(c: u32) -> f32 {
+    return before[c].w / max(before[c].x, THIN);
 }
 
 /// The first of a step's two halves: a whole step on.
@@ -590,12 +615,15 @@ fn step_twice(@builtin(global_invocation_id) id: vec3<u32>) {
 struct Met {
     level: f32,
     run: vec2<f32>,
+    // how deep the air in the water would stand by itself
+    air: f32,
     wet: bool,
 }
 
 fn met_at(at: vec2<u32>) -> Met {
     var level = 0.0;
     var run = vec2(0.0);
+    var air = 0.0;
     var wet = 0.0;
     for (var j = 0; j < 2; j++) {
         for (var i = 0; i < 2; i++) {
@@ -610,14 +638,15 @@ fn met_at(at: vec2<u32>) -> Met {
             if (depth > DRAWN) {
                 level += floor + depth;
                 run += vec2(run_of(state.x, state.y), run_of(state.x, state.z));
+                air += depth * state.w / state.x;
                 wet += 1.0;
             }
         }
     }
     if (wet == 0.0) {
-        return Met(corner(at), vec2(0.0), false);
+        return Met(corner(at), vec2(0.0), 0.0, false);
     }
-    return Met(max(level / wet, corner(at)), run / wet, true);
+    return Met(max(level / wet, corner(at)), run / wet, air / wet, true);
 }
 
 fn corner_number(at: vec2<u32>) -> u32 {
@@ -648,7 +677,9 @@ fn raise(@builtin(global_invocation_id) id: vec3<u32>) {
     let spinward = vec3(-sin(turn), 0.0, cos(turn));
     let wall = vec3(-2.0 * sheet.radius * half * half, along, sheet.radius * sin(turn));
     var vertex: SurfaceVertex;
-    vertex.position = vec4(wall + inward * met.level, 0.0);
+    // foam: how much of the light the bubbles stand in the way of, each as wide as it is
+    let foam = 1.0 - exp(-1.5 * met.air / BUBBLE);
+    vertex.position = vec4(wall + inward * met.level, foam);
     vertex.normal = vec4(inward, met.level - corner(at));
     vertex.velocity = vec4(spinward * met.run.x + vec3(0.0, met.run.y, 0.0), met.level);
     vertices[corner_number(id.xy)] = vertex;

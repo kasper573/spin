@@ -89,7 +89,7 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> SheetBuffers {
         threads: make(16),
         carried: make((6 + grains) * 4),
         drained: make(cells * 16),
-        hoops: make(HOOPS * (2 * RIM * 16 + 16)),
+        hoops: make(HOOPS * (2 * RIM * 16 + 32)),
         flights: make(4 + 2 * DRAINS * 4),
         jet_vertices: make(JET_INDICES / 6 * 48),
         jet_indices: make(JET_INDICES * 4),
