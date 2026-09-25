@@ -55,3 +55,15 @@ fps. It waits on a same-origin `/blank` page until WebGPU offers an adapter. It 
 on the same profile rather than reloading, because NVIDIA Xid 32 faults Chrome's GPU process on
 its third device; the server port (origin) is kept within a run so storage survives. Probes kill
 their browser in `finally`: a leaked headless Chrome spoils a gate run.
+
+## Software rendering (machines without a GPU)
+
+Mesa's lavapipe (`mesa-vulkan-drivers`; building also needs `libasound2-dev`, `libudev-dev`,
+`pkg-config`) runs the gate with no code change: wgpu picks llvmpipe on its own. Frames are
+stepped by simulated time, so they show the same game, only slowly; timings mean nothing about the
+real GPU. On a 4-core cloud container the trickle scene ran at 218 ms a frame at 320x180 (~4 min
+for its 14 s) and still 151 ms at 32x18, with the empty ring at 110 ms: a fixed floor of bloom
+(~34 ms, its mip chain does not shrink with the view), the transmissive pass's 64 snapshots
+(~27 ms), the idle particle solver's surface and bin passes, the sheet (~7 ms) and Bevy's CPU work.
+No resolution reaches 60 fps there. To look at a scene: set the gate's `WIDTH`/`HEIGHT` to
+320x180, run it as in "One gate scene", restore the consts.
