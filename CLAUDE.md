@@ -54,6 +54,18 @@ The binaries under `src/bin/` are thin: the client only assembles the app, nothi
 - Never use comments as a way to give feedback to the prompter. This means comments should never refer to prompt specific details. Comments should be timeless and not rely on the reader being the person who prompted you to do some work.
 - Don't scatter duplicate comments describing how a specific mechanism works all over the codebase. Keep it in one place, ideally at the implementation of that mechanism. A common source of this type of bad hygiene is re-explaining a mechanism in the workflow, in env files, in call sites, and finally also in the source code implementation of the mechanism.
 
+## Memory
+
+This file is the ruleset maintained by the human. What agents learn — by their own discovery or in
+conversation with the human — lives in `.claude/memory/`, is committed with the repo, and is
+maintained by every agent as it works: add a learning when it is made, rewrite one found wrong but
+still relevant, delete one that no longer holds. Memory never repeats or overrides this file; where
+they disagree, this file wins and the memory is corrected. Agents change this file only when the
+human asks. Agents keep no project knowledge anywhere else (not in their machine-local memory),
+so that every session, on any machine, starts from the same knowledge.
+
+@.claude/memory/index.md
+
 ## Verification
 
 The played game is the only evidence that a change works. `game/tests/play_gate.rs` plays it as a
