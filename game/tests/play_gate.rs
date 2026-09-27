@@ -237,6 +237,9 @@ fn play_in(
             app.world_mut().resource_mut::<Simulation>().avatar_input =
                 player.input(PilotInput::firing(&held));
             if frame.is_multiple_of(KEPT_EVERY) {
+                // what the frames run to settle the water and capture the picture is no frame
+                // the game plays, and whatever of it the GPU has yet to do is not theirs
+                testing::wait_for_gpu(&app);
                 started = Instant::now();
             }
             testing::frame(&mut app, Seconds(1.0 / FPS as f32));
