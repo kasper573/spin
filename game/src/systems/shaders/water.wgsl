@@ -9,9 +9,9 @@
 // been fine enough: a ball of the parcel's water, or the puddle it lies in once it has come
 // down on a wall. What misses is discarded, and what hits takes that surface's depth and is
 // shaded as all the water is.
-#import bevy_pbr::mesh_view_bindings::{view, lights}
+#import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
-#import optics::{rotate, ring_seen, seen_through, scene_depth, fresnel, glint, lamp_glint_at, sunbeam_glints_at, diffuse_light_at, sunlight, sun_shadow, depth_of, saturated, through_water, through_ring_air}
+#import optics::{rotate, ring_seen, seen_through, scene_depth, fresnel, lighting_at, depth_of, saturated, through_water, through_ring_air}
 #import figure::mirrored
 #import ring::{ring_run, ring_up}
 #import ripples::{Carried, carried, waves_carried, noise3}
@@ -415,9 +415,10 @@ fn surface(in: Surfaced) -> vec4<f32> {
     let held = ring_run(site, -v, water.ring.xy).distance;
     let column = min(min(max(scene - depth_here, 0.0) * along, held), select(in.behind, 1e9, submerged));
 
-    // the light falling on the water here, which whatever it scatters is lit by
-    let pixel = in.pixel;
-    let light = diffuse_light_at(in.world_position, n, pixel) / PI;
+    // the light falling on the water here, which whatever it scatters is lit by, and its
+    // glints off the surface
+    let lighting = lighting_at(in.world_position, n, v, roughness, F0, in.pixel);
+    let light = lighting.falling / PI;
     let up = ring_up(site, water.ring.x);
     let reflected = reflect(-v, n);
     // beyond the scene the mirror shows the ring, or from under water the bed, lit by the
@@ -454,12 +455,7 @@ fn surface(in: Surfaced) -> vec4<f32> {
         mirror = through_water(mirror, glow(light), extinction(), dot(reflected, up), column);
     }
 
-    var colour = mix(seen, mirror, f);
-    for (var i = 0u; i < lights.n_directional_lights; i++) {
-        let l = lights.directional_lights[i].direction_to_light;
-        colour += sunlight(i) * glint(n, v, l, roughness, F0) * sun_shadow(i, in.world_position, n, pixel);
-    }
-    colour += lamp_glint_at(in.world_position, n, v, roughness, F0, pixel) + sunbeam_glints_at(in.world_position, n, v, roughness, F0);
+    var colour = mix(seen, mirror, f) + lighting.glinting;
 
     // foam: bubbles ride on the flow like the ripples
     let grain = bubble_grain(run, 24.0, footprint);
@@ -468,7 +464,7 @@ fn surface(in: Surfaced) -> vec4<f32> {
     let foam = smoothstep(0.42, 0.7, lace);
     // bubbles: brighter where the lace is thick, with dark water showing between them
     let bubbles = 0.55 + 0.45 * smoothstep(0.55, 0.95, lace + (grain - 0.5) * 0.6 * in.laced);
-    let foam_colour = vec3(0.7, 0.74, 0.78) / PI * diffuse_light_at(in.world_position, n, pixel) * bubbles;
+    let foam_colour = vec3(0.7, 0.74, 0.78) * light * bubbles;
     colour = mix(colour, foam_colour, foam);
 
     if (submerged) {

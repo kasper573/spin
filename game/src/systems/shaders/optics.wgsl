@@ -494,6 +494,48 @@ fn rooms_beyond_at(world: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return room_beyond(pair, 0u, world, n) + room_beyond(pair, 1u, world, n);
 }
 
+/// The light falling on a smooth surface at a point of the world, as `diffuse_light_at` has
+/// it, and the glints of the suns, the lamps and the sunbeams off it, seen along `v`.
+struct Lighting {
+    falling: vec3<f32>,
+    glinting: vec3<f32>,
+}
+
+/// Both at once, each light found and shaded for once: a sun's shadow is a filtered search of
+/// its shadow map, and the lamps are looked up in the view's clusters.
+fn lighting_at(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>, roughness: f32, f0: f32, pixel: vec2<f32>) -> Lighting {
+    var out = Lighting(bounce() + rooms_beyond_at(world, n), vec3(0.0));
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let l = lights.directional_lights[i].direction_to_light;
+        let ndl = dot(n, l);
+        if (ndl > 0.0) {
+            let sun = sunlight(i) * sun_shadow(i, world, n, pixel);
+            out.falling += sun * ndl;
+            out.glinting += sun * glint(n, v, l, roughness, f0);
+        }
+    }
+    let lamps = lamps_near(world, pixel);
+    for (var i = lamps.x; i < lamps.z; i++) {
+        let lamp = lamp_at(i, lamps, world);
+        out.falling += lamp.light * view.exposure * max(dot(n, lamp.toward), 0.0);
+        out.glinting += lamp.light * view.exposure * glint(n, v, lamp.toward, roughness, f0);
+    }
+    let pair = mouths;
+    if (pair.shape.z < 1.0) {
+        for (var i = 0u; i < lights.n_directional_lights; i++) {
+            let l = lights.directional_lights[i].direction_to_light;
+            for (var k = 0u; k < 2u; k++) {
+                let beam = sunbeam_at(pair, k, world, l);
+                if (beam.w > 0.0) {
+                    out.falling += sunlight(i) * (beam.w * max(dot(n, beam.xyz), 0.0));
+                    out.glinting += sunlight(i) * (beam.w * glint(n, v, beam.xyz, roughness, f0));
+                }
+            }
+        }
+    }
+    return out;
+}
+
 /// The light falling on a matte surface at a point of the world, facing `n`, where the ring
 /// shades it from the suns.
 fn diffuse_light_at(world: vec3<f32>, n: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
