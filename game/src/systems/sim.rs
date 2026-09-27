@@ -1,7 +1,10 @@
 //! The running simulation: the drum and the avatar are stepped on the CPU and the
-//! water follows on the GPU. Real time takes one substep per frame, no longer than a period of
-//! [`SUBSTEP_RATE`], so a fast display gets smooth bodies and a slow frame is split into a few
-//! substeps; beyond that, time stretches rather than the frame. The water steps at its own
+//! water follows on the GPU. The bodies are stepped by a period of [`SUBSTEP_RATE`] whatever the
+//! display does, so that what they do is the same at any frame rate: a frame takes as many whole
+//! substeps as its time holds, up to a few, and carries what is left over to the next; beyond
+//! that, time stretches rather than the frame. The eye is drawn between where it was at the last
+//! two substeps, as far on as the time left over, so that a display faster than the substeps
+//! still sees it move smoothly. The water steps at its own
 //! fixed pace whatever the display does, so it costs the same at any frame rate: the step of
 //! its [`Resolution`](crate::core::fluid::Resolution), which is longer in proportion for
 //! coarser water, whose waves are slower. Each of its steps is taken at the moment the bodies'
@@ -20,7 +23,10 @@ use crate::core::avatar::{self, AvatarInput, Gyros, Thrusters};
 use crate::core::fluid::{
     Bodies, Fluid, FluidFrame, FluidParams, FluidReady, MAX_SUBSTEPS_PER_FRAME,
 };
-use crate::core::math::{Quatd, Vec3d, norm, quat_about_y, quat_from_basis, quat_mul, quat_rotate};
+use crate::core::math::{
+    Quatd, Vec3d, norm, quat_about_y, quat_conjugate, quat_from_basis, quat_from_rotation_vector,
+    quat_mul, quat_rotate, rotation_vector,
+};
 use crate::core::rigid::{self, Body, BodyParams, BodyShape, WaterCoupling};
 use crate::core::sheet::Sheet;
 use crate::core::units::{
@@ -37,8 +43,9 @@ const SPEED_HEADROOM: f32 = 40.0;
 /// How far the eye's pupil reaches from its middle: while the water's surface lies across it the
 /// eye is no more under the water than over it, and sees as it last did.
 const PUPIL: Metres = Metres(0.02);
-/// Shortest substep real time is split into; faster frames are gathered into one.
-const MIN_SUBSTEP: Seconds = Seconds(1.0 / 240.0);
+/// What a frame's time may fall short of a whole number of substeps by and still take them all:
+/// frames that together last a whole number of substeps then take exactly that many.
+const SUBSTEP_SLACK: f64 = 1e-6;
 const MAX_FRAME_TIME: Seconds = Seconds(0.1);
 const RATE_WINDOW: Seconds = Seconds(1.0);
 const AVATAR_SHAPE: usize = 0;
@@ -72,6 +79,33 @@ pub struct SubstepRecord {
     pub bodies: Bodies,
 }
 
+/// How far the eye as drawn is behind the eye as last stepped: the last substep's move and turn
+/// of it, taken back by as much of a substep as the frame being drawn comes before the next one.
+#[derive(Clone, Copy, Default)]
+struct EyeLag {
+    moved: Vec3d,
+    turned: Vec3d,
+    short: f64,
+}
+
+impl EyeLag {
+    fn from_step((from, turned): (Vec3d, Quatd), (to, turning): (Vec3d, Quatd)) -> EyeLag {
+        EyeLag {
+            moved: [0, 1, 2].map(|k| to[k] - from[k]),
+            turned: rotation_vector(&quat_mul(&turning, &quat_conjugate(&turned))),
+            short: 0.0,
+        }
+    }
+
+    fn drawn(&self, (p, q): (Vec3d, Quatd)) -> (Vec3d, Quatd) {
+        let back = quat_from_rotation_vector(&self.turned.map(|c| -c * self.short));
+        (
+            [0, 1, 2].map(|k| p[k] - self.moved[k] * self.short),
+            quat_mul(&back, &q),
+        )
+    }
+}
+
 #[derive(Resource)]
 pub struct Simulation {
     pub drum: Drum,
@@ -92,7 +126,9 @@ pub struct Simulation {
     /// The avatar.
     bodies: Vec<Body>,
     shapes: [BodyShape; 1],
-    accumulator: f32,
+    /// Real time not yet stepped, short of a substep.
+    accumulator: f64,
+    eye_lag: EyeLag,
     /// Simulated time since the water last stepped.
     water_due: f64,
     queued: f32,
@@ -147,6 +183,7 @@ impl Simulation {
             bodies: vec![avatar],
             shapes,
             accumulator: 0.0,
+            eye_lag: EyeLag::default(),
             water_due: 0.0,
             queued: 0.0,
             window: (0.0, 0.0),
@@ -210,7 +247,8 @@ impl Simulation {
     pub fn advance(&mut self, real: Seconds, fluid: &mut Fluid, lying: (&Sheet, &SheetWindow)) {
         let max_dt = SUBSTEP_RATE.period().0;
         self.substeps.clear();
-        let (steps, dt) = if self.queued > 0.0 {
+        let requested = self.queued > 0.0;
+        let (steps, dt) = if requested {
             let steps = ((self.queued / max_dt).round() as usize).min(MAX_SUBSTEPS_PER_FRAME);
             self.queued = (self.queued - steps as f32 * max_dt).max(0.0);
             if self.queued < max_dt * 0.5 {
@@ -218,16 +256,11 @@ impl Simulation {
             }
             (steps, max_dt)
         } else {
-            self.accumulator = (self.accumulator + real.0).min(MAX_FRAME_TIME.0);
-            if self.accumulator < MIN_SUBSTEP.0 {
-                (0, max_dt)
-            } else {
-                let steps =
-                    ((self.accumulator / max_dt).ceil() as usize).clamp(1, MAX_SUBSTEPS_PER_FRAME);
-                let dt = (self.accumulator / steps as f32).min(max_dt);
-                self.accumulator = 0.0;
-                (steps, dt)
-            }
+            self.accumulator = (self.accumulator + real.0 as f64).min(MAX_FRAME_TIME.0 as f64);
+            let whole = ((self.accumulator + SUBSTEP_SLACK) / max_dt as f64) as usize;
+            let steps = whole.min(MAX_SUBSTEPS_PER_FRAME);
+            self.accumulator = (self.accumulator - steps as f64 * max_dt as f64).max(0.0);
+            (steps, max_dt)
         };
         let coupling = if steps > 0 {
             let flying = fluid.take_coupling(steps as f64 * dt as f64);
@@ -236,12 +269,13 @@ impl Simulation {
             None
         };
         self.clamp_speeds();
-        let sunk = lying.1.sunk(&self.drum, lying.0, self.eye().0);
+        let sunk = lying.1.sunk(&self.drum, lying.0, self.stepped_eye().0);
         if sunk.0.abs() > PUPIL.0 {
             self.eye_under = sunk.0 > 0.0;
         }
         let water_step = fluid.step().0 as f64;
         for k in 0..steps {
+            let eye = self.stepped_eye();
             avatar::drive(
                 &mut self.bodies[0],
                 &mut self.thrusters,
@@ -266,6 +300,12 @@ impl Simulation {
                 self.gyros.held = quat_mul(&passage.turn, &self.gyros.held);
                 self.gyros.footing = self.gyros.footing.map(|n| passage.turned(n));
             }
+            let stepped = self.stepped_eye();
+            self.eye_lag = if self.drum.passage(eye.0, stepped.0).is_some() {
+                EyeLag::default()
+            } else {
+                EyeLag::from_step(eye, stepped)
+            };
             self.time.0 += dt;
             self.water_due += dt as f64;
             if self.water_due >= water_step * (1.0 - 1e-6) {
@@ -279,6 +319,12 @@ impl Simulation {
                 });
             }
         }
+        // requested time is drawn as stepped, whatever real time the frame took
+        self.eye_lag.short = if requested || real.0 <= 0.0 {
+            0.0
+        } else {
+            (1.0 - self.accumulator / dt as f64).max(0.0)
+        };
         self.window.0 += real.0;
         self.window.1 += steps as f32 * dt;
         if self.window.0 >= RATE_WINDOW.0 {
@@ -380,13 +426,21 @@ impl Simulation {
         }
         self.gyros.held = quat_mul(&turn, &self.gyros.held);
         self.gyros.footing = self.gyros.footing.map(|n| quat_rotate(&turn, &n));
+        self.eye_lag.moved = self.drum.carried_vector(self.eye_lag.moved, shift);
+        self.eye_lag.turned = quat_rotate(&turn, &self.eye_lag.turned);
         shift
     }
 
-    /// Where the avatar's eye is and how it is turned. The eye goes through a portal on its
-    /// own, ahead of the body it is set in or after it, so it is never anywhere but where it
-    /// looks from.
+    /// Where the avatar's eye is seen from and how it is turned in the frame being drawn: as
+    /// far between where it was at the last two substeps as real time has come since.
     pub fn eye(&self) -> (Vec3d, Quatd) {
+        self.eye_lag.drawn(self.stepped_eye())
+    }
+
+    /// Where the avatar's eye is and how it is turned as last stepped. The eye goes through a
+    /// portal on its own, ahead of the body it is set in or after it, so it is never anywhere
+    /// but where it looks from.
+    fn stepped_eye(&self) -> (Vec3d, Quatd) {
         let hull = self.avatar();
         let eye = avatar::eye(hull);
         match self.drum.passage(hull.p, eye) {
