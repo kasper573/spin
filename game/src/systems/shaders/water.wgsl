@@ -14,7 +14,7 @@
 #import optics::{rotate, ring_seen, seen_through, scene_depth, fresnel, lighting_at, depth_of, saturated, through_water, through_ring_air}
 #import figure::mirrored
 #import ring::{ring_run, ring_up}
-#import ripples::{Carried, carried, waves_carried, noise3}
+#import ripples::{Carried, Clock, carried, waves_carried, noise3}
 #import air::Air
 #import fluid_common::spray_of
 
@@ -382,14 +382,14 @@ fn surface(in: Surfaced) -> vec4<f32> {
     }
 
     // ripples carried on the flow, growing with it and with the churn of foam
-    let t = water.clock.x;
+    let clock = Clock(water.clock.x, water.clock.w);
     let flow = in.wheel_velocity;
     let churn = clamp(length(flow) * 1.5 + in.foam * 2.0, 0.0, 1.0);
-    let run = carried(in.wheel_position, flow, t);
+    let run = carried(in.wheel_position, flow, clock);
     // how wide a pixel is on the water here, for a 60 degree view: at a grazing angle a pixel
     // covers a long stretch of it, so the detail that stretch would average out is left out
     let footprint = distance * 1.15 / view.viewport.w / max(abs(dot(n, v)), 0.02);
-    let waves = waves_carried(run, t, footprint);
+    let waves = waves_carried(run, clock, footprint);
     let slope = waves.slope;
     let amplitude = 1.0 + churn;
     let g = rotate(water.from_water, slope) * amplitude;

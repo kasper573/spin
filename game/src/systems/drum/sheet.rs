@@ -14,7 +14,7 @@ use crate::core::rigid::{Body, BodyShape, WaterCoupling};
 use crate::core::sheet::{SHEET_CELLS, SHEET_MOST_GRAINS, Sheet, SheetCarried, SheetLie};
 use crate::core::sheet::{SHEET_DRAINS, SheetDrain, SheetOutlet};
 use crate::core::sheet::{SHEET_WATCHED, SheetLanding, SheetWater};
-use crate::core::units::{Litres, Metres, MetresPerSecond, Seconds};
+use crate::core::units::{Litres, Metres, MetresPerSecond, Seconds, WorldTime};
 use crate::core::vessel::Vessel;
 use crate::systems::sim::Simulation;
 
@@ -253,7 +253,7 @@ pub fn feed_sheet(
     sim: Res<Simulation>,
     mut sheet: ResMut<Sheet>,
     mut window: ResMut<SheetWindow>,
-    mut fed: Local<Seconds>,
+    mut fed: Local<WorldTime>,
 ) {
     let drum = &sim.drum;
     window.lay(drum, &mut sheet, None);
@@ -268,7 +268,7 @@ pub fn feed_sheet(
     ]);
     sheet.drain(window.drains(drum));
     window.watch(drum, &mut sheet, sim.avatar().p);
-    let run = Seconds((sim.time.0 - fed.0).max(0.0));
+    let run = Seconds(sim.time.since(*fed).0.max(0.0));
     *fed = sim.time;
     sheet.advance(run, drum.spin);
 }

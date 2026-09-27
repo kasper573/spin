@@ -13,7 +13,13 @@ is drawn between the last two substeps (`EyeLag`), `stepped_eye` is where the bo
 Tests' `request` steps whole substeps and draws as stepped; `testing::frame_as_played` takes the
 game's real-time path. `Simulation::stepped` is the world's time the last frame stepped: what
 anything acting on the world per frame (the tools) works over. `tests/over_time.rs` holds the
-frame-rate contracts (same flight, even eye motion, same tool output at 60/144/240 and 10 fps).
+frame-rate contracts (same flight, even eye motion, same tool output at 60/144/240 and 10 fps)
+and the long-lived world (reopened three days old).
+
+The world's clock is `WorldTime` (f64 seconds, saved). Shaders get it `wound()` into
+`SHADER_CLOCK_PERIOD` (2 h) with the period beside it (`Clock` in `ripples.wgsl`): every steady
+motion a shader draws (`cycled`, `drifted`, `circled`, `repeating_noise3`) comes whole in that
+period, so the wind back is seamless and f32 keeps sub-ms steps however old the world is.
 
 ## The sheet (`core/sheet/`, glue in `systems/drum/sheet.rs`)
 

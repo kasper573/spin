@@ -5,9 +5,11 @@ use game::core::avatar::Thruster;
 use game::core::fluid::Fluid;
 use game::core::math::{Vec3d, quat_rotate};
 use game::core::sheet::Sheet;
-use game::core::units::Seconds;
-use game::systems::drum::{CELL, Drum, Ring, Site};
+use game::core::units::{Seconds, WorldTime};
+use game::systems::drum::{CELL, Drum, Ring, SheetWindow, Site};
+use game::systems::persistence;
 use game::systems::player::{PilotInput, Player};
+use game::systems::settings::Settings;
 use game::systems::sim::Simulation;
 use game::systems::testing;
 use game::systems::tools::Toolbelt;
@@ -31,6 +33,10 @@ const FAST_DISPLAY: f64 = 240.0;
 /// How much the eye's move from one frame to the next may change, as a share of its mean move,
 /// while walking on: a hitch would show as whole frames without a move.
 const EVEN_MOVE: f64 = 0.25;
+/// A world saved after it had lived three days, opened again.
+const LONG_LIVED: WorldTime = WorldTime(3.0 * 24.0 * 3600.0);
+/// How far the world's clock may stray from the time its frames step.
+const SAME_TIME_S: f64 = 1e-4;
 /// A machine too slow for the world to keep up with real time: each of its frames lasts longer
 /// than the few substeps a frame may take.
 const SLOW_MACHINE: f64 = 10.0;
@@ -52,8 +58,9 @@ const PUTTING_OUT: [Tool; 2] = [
 const LOOKING_DOWN: f64 = 0.5;
 /// How long a tool is held, in the world's time.
 const HELD: f64 = 2.0;
-/// How long the world is left after a tool is put down for what it put out to be counted.
-const SETTLING: Seconds = Seconds(0.25);
+/// How long the world is left after a tool is put down for what it put out to be counted: the
+/// sheet's count of its water comes back from the GPU, at times over a second late.
+const SETTLING: Seconds = Seconds(2.0);
 /// How far what a tool puts out may differ at two frame rates, as a share of it: a frame's worth
 /// of the slow machine's.
 const SAME_AMOUNT: f64 = 0.02;
@@ -153,6 +160,55 @@ fn a_tool_puts_out_as_much_at_any_frame_rate() {
             RATES[0]
         );
     }
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_world_days_old_keeps_time() {
+    let mut app = testing::headless();
+    testing::watch(&mut app, Seconds(0.5));
+    reopened_after(&mut app, LONG_LIVED);
+    let start = world_time(&app);
+    let frames = RATES[0] as u32;
+    for _ in 0..frames {
+        testing::frame_as_played(&mut app, Seconds((1.0 / RATES[0]) as f32));
+    }
+    let lived = world_time(&app) - start;
+    eprintln!(
+        "a second of frames {} days on moves the world's clock by {lived:.6} s",
+        LONG_LIVED.0 / 86400.0
+    );
+    assert!(
+        (lived - 1.0).abs() < SAME_TIME_S,
+        "a second of frames {} days on moves the world's clock by {lived:.6} s",
+        LONG_LIVED.0 / 86400.0
+    );
+}
+
+/// The world as it was, saved when it had lived `lived` and opened again.
+fn reopened_after(app: &mut App, lived: WorldTime) {
+    let world = app.world_mut();
+    let mut saved = persistence::snapshot(
+        world.resource::<Settings>(),
+        world.resource::<Simulation>(),
+        world.resource::<Fluid>(),
+    );
+    saved.time = lived;
+    world.resource_scope(|world, mut settings: Mut<Settings>| {
+        world.resource_scope(|world, mut sim: Mut<Simulation>| {
+            world.resource_scope(|world, mut fluid: Mut<Fluid>| {
+                world.resource_scope(|world, mut sheet: Mut<Sheet>| {
+                    let mut window = world.resource_mut::<SheetWindow>();
+                    let water = (&mut *fluid, &mut *sheet, &mut *window);
+                    persistence::apply(&saved, &mut settings, &mut sim, water);
+                })
+            })
+        })
+    });
+}
+
+fn world_time(app: &App) -> f64 {
+    app.world().resource::<Simulation>().time.0
 }
 
 struct Tool {

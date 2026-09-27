@@ -12,7 +12,7 @@ use bevy::render::render_resource::ShaderType;
 use bevy::render::storage::ShaderBuffer;
 
 use crate::core::in_place::Tell;
-use crate::core::units::Seconds;
+use crate::core::units::{SHADER_CLOCK_PERIOD, WorldTime};
 use crate::systems::drum::{Drum, DrumSurface, FLAME_BAND, MouthColour, MouthCoords};
 use crate::systems::scene::{SettleVantages, VANTAGES, Vantage, Vantages};
 use crate::systems::sim::{SimSet, Simulation};
@@ -60,6 +60,7 @@ struct MouthsUniform {
     look: Vec4,
     about: Vec4,
     pictures: Vec4,
+    clock: Vec4,
 }
 
 /// The mouths as each vantage has them, told afresh every frame. A material drawn for a vantage
@@ -103,7 +104,7 @@ fn tell_mouths(
 
 impl MouthsUniform {
     /// The drum's mouths as they lie about a vantage at a time.
-    fn of(drum: &Drum, vantage: &Vantage, found: [Mat4; 2], time: Seconds) -> MouthsUniform {
+    fn of(drum: &Drum, vantage: &Vantage, found: [Mat4; 2], time: WorldTime) -> MouthsUniform {
         let mouths = [
             (MouthColour::Blue, found[0]),
             (MouthColour::Orange, found[1]),
@@ -146,7 +147,7 @@ impl MouthsUniform {
                 drum.ring.radius.0,
                 drum.mouths.radius() as f32,
                 drum.mouths.fill() as f32,
-                time.0 % FIRE_REPEATS.0,
+                0.0,
             ),
             look: Vec4::new(
                 FLAME_BAND as f32,
@@ -159,6 +160,7 @@ impl MouthsUniform {
                 Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0)
             },
             pictures: Vec4::ZERO,
+            clock: Vec4::new(time.wound().0, SHADER_CLOCK_PERIOD.0, 0.0, 0.0),
         }
     }
 }
@@ -180,8 +182,3 @@ impl Plugin for PortalPlugin {
         );
     }
 }
-
-/// The fire is drawn from the time, which is kept small enough to be told apart from one frame
-/// to the next however long the world has run: it is wound back this often, which is a whole
-/// number of the runs the fire is carried out in.
-const FIRE_REPEATS: Seconds = Seconds(3600.0);

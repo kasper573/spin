@@ -13,12 +13,40 @@ const PI: f32 = 3.14159265;
 // the ripples lag the flow
 const FLOW_PERIOD: f32 = 2.0;
 const CARRY: f32 = 1.0;
+// how fast the patches the waves come in drift, in cells of their noise a second
+const SWELL_DRIFT: f32 = 0.094;
 // the height of each wave, as a fraction of its length
 const STEEPNESS: f32 = 0.006;
 // each kind of wave comes in patches: how tall it stands where it is faintest and fullest,
 // as a share of that height
 const SWELL_LEAST: f32 = 0.25;
 const SWELL_MOST: f32 = 1.75;
+
+/// The world's time as shaders are told it: how far into a period it is, and the period, after
+/// which it winds back to nought. Whatever moves steadily with it moves a whole number of times
+/// in the period, so that it is never seen to wind back.
+struct Clock {
+    seconds: f32,
+    period: f32,
+}
+
+/// How far through its cycle, as a share of it, something is that goes round about once every
+/// `cycle` seconds: as many whole times in the clock's period as come nearest.
+fn cycled(clock: Clock, cycle: f32) -> f32 {
+    let times = max(round(clock.period / cycle), 1.0);
+    return fract(clock.seconds / clock.period * times);
+}
+
+// noise that drifts with the clock repeats itself this many cells on along each axis, so that a
+// drift of a whole number of repeats in the clock's period comes back where it started
+const REPEAT: f32 = 64.0;
+
+/// How far something drifting at about `rate` cells a second has drifted through noise that
+/// repeats every `REPEAT` cells: as many whole repeats in the clock's period as come nearest.
+fn drifted(clock: Clock, rate: f32) -> f32 {
+    let repeats = round(rate * clock.period / REPEAT);
+    return clock.seconds / clock.period * repeats * REPEAT;
+}
 
 fn hash3(p: vec3<f32>) -> f32 {
     let q = fract(p * vec3(0.1031, 0.1030, 0.0973));
@@ -34,6 +62,29 @@ fn noise3(p: vec3<f32>) -> f32 {
     let b = mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), u.x);
     let c = mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), u.x);
     let d = mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
+}
+
+/// Where noise drifting at `speed` cells a second has drifted to: round a circle so wide that it
+/// turns once in the clock's period, so that it is back where it started when the clock winds
+/// back, and turns too slowly to be seen to.
+fn circled(clock: Clock, speed: f32) -> vec2<f32> {
+    let turn = 2.0 * PI * clock.seconds / clock.period;
+    return speed * clock.period / (2.0 * PI) * vec2(cos(turn), sin(turn));
+}
+
+/// Noise that repeats every `REPEAT` cells along each axis, for what drifts with the clock.
+fn repeating_noise3(p: vec3<f32>) -> f32 {
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    // a power of two of cells, so that the cell and the next wrap by their low bits alone
+    let wrap = vec3(i32(REPEAT) - 1);
+    let i = vec3<f32>(vec3<i32>(floor(p)) & wrap);
+    let j = vec3<f32>((vec3<i32>(floor(p)) + 1) & wrap);
+    let a = mix(hash3(i), hash3(vec3(j.x, i.y, i.z)), u.x);
+    let b = mix(hash3(vec3(i.x, j.y, i.z)), hash3(vec3(j.x, j.y, i.z)), u.x);
+    let c = mix(hash3(vec3(i.x, i.y, j.z)), hash3(vec3(j.x, i.y, j.z)), u.x);
+    let d = mix(hash3(vec3(i.x, j.y, j.z)), hash3(j), u.x);
     return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
 
@@ -57,9 +108,9 @@ struct Carried {
 // how fast the particles of water at rest still jostle, in metres per second
 const JOSTLING: f32 = 0.12;
 
-fn carried(x: vec3<f32>, flow: vec3<f32>, t: f32) -> Carried {
-    let phase_a = fract(t / FLOW_PERIOD);
-    let phase_b = fract(t / FLOW_PERIOD + 0.5);
+fn carried(x: vec3<f32>, flow: vec3<f32>, clock: Clock) -> Carried {
+    let phase_a = cycled(clock, FLOW_PERIOD);
+    let phase_b = fract(phase_a + 0.5);
     // ripples ride a current, not the jostling of the particles the flow is read from, which
     // differs from one to the next and would wring the ripples between them into rings: water
     // moving slower than its ripples run carries them nowhere they were not going
@@ -81,7 +132,7 @@ struct Waves {
 
 /// The waves at a point, leaving out those too short to resolve at a pixel this wide, so that
 /// the far water does not shimmer with aliasing.
-fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
+fn waves(x: vec3<f32>, clock: Clock, footprint: f32) -> Waves {
     let kinds = array<vec4<f32>, 6>(
         vec4(0.71, 0.32, 0.63, 0.11),
         vec4(-0.44, 0.51, 0.74, 0.17),
@@ -101,10 +152,10 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
             continue;
         }
         let k = normalize(wave.xyz) * (2.0 * PI / length);
-        let pace = 2.0 * PI * 0.25 / length;
-        let phase = dot(k, x) - pace * t * (1.0 + 0.3 * f32(i % 2));
+        let cycle = length / (0.25 * (1.0 + 0.3 * f32(i % 2)));
+        let phase = dot(k, x) - 2.0 * PI * cycled(clock, cycle);
         // each kind of wave comes in drifting patches rather than everywhere at once
-        let swell = noise3(x * (0.5 / length) + vec3(f32(i) * 3.1, t * 0.08, -t * 0.05));
+        let swell = noise3(x * (0.5 / length) + vec3(f32(i) * 3.1, circled(clock, SWELL_DRIFT)));
         let height = STEEPNESS * length * resolved * mix(SWELL_LEAST, SWELL_MOST, swell * swell);
         out.slope += k * cos(phase) * height;
         let bend = -sin(phase) * height;
@@ -114,9 +165,9 @@ fn waves(x: vec3<f32>, t: f32, footprint: f32) -> Waves {
 }
 
 /// The two carried runs of the waves, blended.
-fn waves_carried(run: Carried, t: f32, footprint: f32) -> Waves {
-    let a = waves(run.a, t, footprint);
-    let b = waves(run.b, t, footprint);
+fn waves_carried(run: Carried, clock: Clock, footprint: f32) -> Waves {
+    let a = waves(run.a, clock, footprint);
+    let b = waves(run.b, clock, footprint);
     var out: Waves;
     out.slope = a.slope * run.weight_a + b.slope * (1.0 - run.weight_a);
     out.curve = a.curve * run.weight_a + b.curve * (1.0 - run.weight_a);

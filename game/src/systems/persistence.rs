@@ -11,7 +11,7 @@ use crate::core::avatar::Gyros;
 use crate::core::codec;
 use crate::core::fluid::{Fluid, FluidBuffers, Particle, Resolution};
 use crate::core::sheet::{Sheet, SheetBuffers, SheetKept};
-use crate::core::units::{Radians, RadiansPerSecond, Seconds};
+use crate::core::units::{Radians, RadiansPerSecond, Seconds, WorldTime};
 use crate::core::web;
 use crate::systems::drum::{
     Grid, Ground, Landscape, Mouths, Patch, Ring, Round, SheetWindow, Site,
@@ -33,7 +33,7 @@ pub struct Snapshot {
     /// The points of the wall the avatar and the water are measured from.
     pub site: Site,
     pub water_site: Site,
-    pub time: Seconds,
+    pub time: WorldTime,
     /// How much water each particle stands for.
     pub water: Resolution,
     /// Seven floats per particle, in the water's frame: position, velocity, foam.
@@ -119,7 +119,7 @@ pub fn apply(
     let ring = sim.drum.ring;
     sim.drum.site = site_on(snapshot.site, ring);
     sim.drum.water = site_on(snapshot.water_site, ring);
-    sim.time = Seconds(finite(snapshot.time.0));
+    sim.time = WorldTime(finite_f64(snapshot.time.0));
     sim.drum.landscape.load(&snapshot.landscape);
     sim.drum.load_mouths(&snapshot.portals);
     let margin = fluid.resolution().margin().0 as f64;

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::fluid::{Fluid, FluidBuffers, FluidReady, MAX_SUBSTEPS_PER_FRAME, ReadOnce};
 use crate::core::sheet::Sheet;
-use crate::core::units::{Litres, Metres, Radians, RadiansPerSecond, Seconds};
+use crate::core::units::{Litres, Metres, Radians, RadiansPerSecond, Seconds, WorldTime};
 use crate::core::web;
 use crate::systems::aim::Aim;
 use crate::systems::app;
@@ -134,7 +134,7 @@ pub struct ScriptStatus {
     pub lying: f32,
     pub spin: RadiansPerSecond,
     pub angle: Radians,
-    pub time: Seconds,
+    pub time: WorldTime,
     pub fps: f32,
     /// The longest frame of the last second.
     pub worst_frame: Seconds,
@@ -175,7 +175,7 @@ pub struct ScriptStatus {
 #[derive(Resource, Default)]
 struct ScriptedThrust {
     pilot: PilotInput,
-    until: Seconds,
+    until: WorldTime,
 }
 
 pub struct TestingPlugin;
@@ -319,7 +319,7 @@ fn execute(world: &mut World, command: ScriptCommand) {
                         pitch_down, yaw_left, yaw_right,
                     ],
                 },
-                until: Seconds(now.0 + seconds),
+                until: now.after(Seconds(seconds)),
             };
         }
         ScriptCommand::Advance { seconds } => {

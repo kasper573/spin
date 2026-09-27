@@ -29,6 +29,7 @@ use crate::core::fluid::Fluid;
 use crate::core::in_place::{InPlace, InPlacePlugin, InPlaceUniforms, Tell};
 use crate::core::math::Vec3d;
 use crate::core::sheet::{SHEET_CELLS, Sheet, SheetBuffers};
+use crate::core::units::SHADER_CLOCK_PERIOD;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::figure::Figures;
 use crate::systems::portal::{Mouths, Pictures, SolidCopies, SolidMaterial, solid};
@@ -249,10 +250,12 @@ struct TerrainUniform {
     /// A surveyed column's arc round the ring and width along the axis, and the drum's half
     /// width, in metres, and the depth of water each particle surveyed over a column adds.
     grid: Vec4,
-    /// x: seconds; y: metres per unit of a surveyed column's height; z: metres per second per
-    /// unit of its flow; w: how many columns there are round the ring, or 0 when there are too
-    /// many for the water to reach round it.
+    /// x: the world's time as shaders are told it; y: the period that time winds back after.
     clock: Vec4,
+    /// x: metres per unit of a surveyed column's height; y: metres per second per unit of its
+    /// flow; z: how many columns there are round the ring, or 0 when there are too many for the
+    /// water to reach round it.
+    columns: Vec4,
     absorption: Vec4,
     scatter: Vec4,
     /// The air between the eye and the ground; see `systems/air.rs`.
@@ -375,7 +378,8 @@ fn spawn(
             site: Vec4::ZERO,
             origin: Vec4::ZERO,
             grid: Vec4::ONE,
-            clock: Vec4::ZERO,
+            clock: Vec4::new(0.0, SHADER_CLOCK_PERIOD.0, 0.0, 0.0),
+            columns: Vec4::ZERO,
             absorption: water::ABSORPTION.extend(0.0),
             scatter: water::SCATTERING.extend(0.0),
             air: AirUniform::default(),
@@ -609,11 +613,12 @@ fn wet(
             drum.ring.half_width.0,
             (particle / (across * along)) as f32,
         );
-        terrain.clock = Vec4::new(
-            sim.time.0,
+        terrain.clock = Vec4::new(sim.time.wound().0, SHADER_CLOCK_PERIOD.0, 0.0, 0.0);
+        terrain.columns = Vec4::new(
             (resolution.length() / COLUMN_FIXED) as f32,
             (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
             columns.round as f32,
+            0.0,
         );
         if let Some(mut told) = buffers.get_mut(&seen.terrain_told) {
             told.tell(&seen.terrain);

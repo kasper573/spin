@@ -31,7 +31,7 @@ use crate::core::rigid::{self, Body, BodyParams, BodyShape, Ground, WaterCouplin
 use crate::core::sheet::Sheet;
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
-    RadiansPerSecond, RadiansPerSecondSquared, Seconds,
+    RadiansPerSecond, RadiansPerSecondSquared, Seconds, WorldTime,
 };
 use crate::core::vessel::Vessel;
 use crate::systems::drum::{DEFAULT_RING, Drum, GROUND_DEPTH, Ring, SheetWindow, Shift};
@@ -118,7 +118,7 @@ pub struct Simulation {
     pub params: FluidParams,
     pub body_params: BodyParams,
     /// Simulated time since the last reset.
-    pub time: Seconds,
+    pub time: WorldTime,
     /// Fraction of real time the simulation keeps up with (1 = full speed).
     pub rate: f32,
     /// The water's steps of the last frame.
@@ -178,7 +178,7 @@ impl Simulation {
             thrusters,
             params: FluidParams::default(),
             body_params: BodyParams::default(),
-            time: Seconds(0.0),
+            time: WorldTime(0.0),
             rate: 1.0,
             substeps: Vec::new(),
             bodies: vec![avatar],
@@ -308,7 +308,7 @@ impl Simulation {
             } else {
                 EyeLag::from_step(eye, stepped)
             };
-            self.time.0 += dt;
+            self.time = self.time.after(Seconds(dt));
             self.water_due += dt as f64;
             if self.water_due >= water_step * (1.0 - 1e-6) {
                 self.water_due = (self.water_due - water_step).max(0.0);

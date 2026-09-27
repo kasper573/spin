@@ -28,6 +28,7 @@ use crate::core::fluid::{
 use crate::core::in_place::{InPlace, InPlacePlugin, InPlaceUniforms, Tell};
 use crate::core::math::quat_conjugate;
 use crate::core::sheet::{SHEET_JET_INDICES, Sheet, SheetBuffers};
+use crate::core::units::SHADER_CLOCK_PERIOD;
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
@@ -105,8 +106,8 @@ struct WaterUniform {
     /// z: 1 where the surface is a sheet's, whose vertices say how deep the water stands, and
     /// 2 where it is a jet's, whose vertices say how thick the jet is.
     units: Vec4,
-    /// x: simulated seconds; y: metres per second per unit of the water's velocity; z: a
-    /// droplet's radius in metres.
+    /// x: the world's time as shaders are told it; y: metres per second per unit of the water's
+    /// velocity; z: a droplet's radius in metres; w: the period that time winds back after.
     clock: Vec4,
     absorption: Vec4,
     scatter: Vec4,
@@ -368,7 +369,7 @@ fn spawn(
         ground: bed_albedo().to_vec4(),
         background: SPACE.to_linear().to_vec4(),
         units: Vec4::new(1.0, 0.0, 0.0, 0.0),
-        clock: Vec4::new(0.0, 1.0, 0.0, 0.0),
+        clock: Vec4::new(0.0, 1.0, 0.0, SHADER_CLOCK_PERIOD.0),
         absorption: ABSORPTION.extend(0.0),
         scatter: SCATTERING.extend(0.0),
         air: AirUniform::default(),
@@ -584,10 +585,10 @@ fn tick(
             background: SPACE.to_linear().to_vec4(),
             units: Vec4::new(metres_per_unit as f32, surface_cell(resolution).0, 0.0, 0.0),
             clock: Vec4::new(
-                sim.time.0,
+                sim.time.wound().0,
                 (metres_per_unit / resolution.time()) as f32,
                 droplet_radius(resolution) as f32,
-                0.0,
+                SHADER_CLOCK_PERIOD.0,
             ),
             absorption: ABSORPTION.extend(0.0),
             scatter: SCATTERING.extend(0.0),
@@ -596,7 +597,7 @@ fn tick(
         // the sheet's water reaches the scene behind it, and a jet's is as thick as it says
         let on_the_sheet = |behind: f32| WaterUniform {
             units: Vec4::new(1.0, 0.0, behind, 0.0),
-            clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
+            clock: Vec4::new(sim.time.wound().0, 1.0, 0.0, SHADER_CLOCK_PERIOD.0),
             ..flying.clone()
         };
         for (kind, uniform) in [

@@ -9,7 +9,7 @@
 #define_import_path portals
 
 #import bevy_pbr::mesh_view_bindings::view
-#import ripples::{carried, noise3}
+#import ripples::{Clock, carried, cycled, drifted, noise3, repeating_noise3}
 #import ring::sun_reaches
 
 struct Mouth {
@@ -33,7 +33,7 @@ struct Mouth {
 
 struct Mouths {
     mouths: array<Mouth, 2>,
-    // the ring's radius, a mouth's radius, how much of a mouth is filled in, and the time
+    // the ring's radius, a mouth's radius, and how much of a mouth is filled in
     shape: vec4<f32>,
     // how far past the rim the flames reach, as a share of the mouth's radius, how much
     // darker a mouth's bottom is than its top, and how far the ring's caps stand from its middle
@@ -43,6 +43,8 @@ struct Mouths {
     about: vec4<f32>,
     // x: which pair of pictures shows what is seen through the mouths, the first or the other
     pictures: vec4<f32>,
+    // the world's time as shaders are told it, and the period it winds back after
+    clock: vec4<f32>,
 }
 
 #ifdef MOUTHS_ON_A_SOLID
@@ -128,17 +130,19 @@ fn chart(mouth: Mouth, p: vec3<f32>) -> vec2<f32> {
 /// hot, from nothing to one. Its detail is left at its mean where a pixel is too wide to draw
 /// it.
 fn fire(at: vec2<f32>, edge: f32, radius: f32, reach: f32, footprint: f32) -> f32 {
-    let t = mouths.shape.w;
+    let clock = Clock(mouths.clock.x, mouths.clock.y);
     let scale = TONGUE * radius;
     let outward = at / max(length(at), 1e-6);
     let round = vec2(-outward.y, outward.x);
     let flow = (outward * RISE + round * SWIRL + vec2(0.0, DRAFT)) * radius;
-    let run = carried(vec3(at, 0.0), vec3(flow, 0.0), t);
+    let run = carried(vec3(at, 0.0), vec3(flow, 0.0), clock);
     let drawn = 1.0 - smoothstep(0.25 * scale, 0.5 * scale, footprint);
-    let a = noise3(vec3(run.a.xy / scale, t * FLICKER));
-    let b = noise3(vec3(run.b.xy / scale + 17.0, t * FLICKER));
-    let fine_a = noise3(vec3(run.a.xy / scale * 2.7, t * FLICKER * 1.7 + 5.0));
-    let fine_b = noise3(vec3(run.b.xy / scale * 2.7 + 9.0, t * FLICKER * 1.7 + 5.0));
+    let flickered = drifted(clock, FLICKER);
+    let flickered_fine = drifted(clock, FLICKER * 1.7) + 5.0;
+    let a = repeating_noise3(vec3(run.a.xy / scale, flickered));
+    let b = repeating_noise3(vec3(run.b.xy / scale + 17.0, flickered));
+    let fine_a = repeating_noise3(vec3(run.a.xy / scale * 2.7, flickered_fine));
+    let fine_b = repeating_noise3(vec3(run.b.xy / scale * 2.7 + 9.0, flickered_fine));
     let coarse = mix(b, a, run.weight_a);
     let fine = mix(fine_b, fine_a, run.weight_a);
     let lick = mix(0.5, 0.65 * coarse + 0.35 * fine, drawn);
@@ -306,10 +310,10 @@ fn wound_back(at: vec2<f32>, radius: f32, wound: f32) -> vec2<f32> {
 /// It is wound in two runs that overlap, each faded in and out, so that neither is ever seen
 /// to start over, and each is already wound when it fades in, so that it is never seen slack.
 fn vortex(at: vec2<f32>, radius: f32, footprint: f32) -> f32 {
-    let t = mouths.shape.w;
+    let clock = Clock(mouths.clock.x, mouths.clock.y);
     let scale = STREAK * radius;
-    let phase_a = fract(t / WINDING);
-    let phase_b = fract(t / WINDING + 0.5);
+    let phase_a = cycled(clock, WINDING);
+    let phase_b = fract(phase_a + 0.5);
     let a = noise3(vec3(wound_back(at, radius, (1.0 + phase_a) * WINDING) / scale, 3.0));
     let b = noise3(vec3(wound_back(at, radius, (1.0 + phase_b) * WINDING) / scale, 11.0));
     let weight_a = 1.0 - abs(2.0 * phase_a - 1.0);

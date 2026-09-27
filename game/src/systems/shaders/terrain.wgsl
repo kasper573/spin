@@ -14,7 +14,7 @@
 #import bevy_pbr::mesh_view_bindings::fog
 #import optics::through_water
 #endif
-#import ripples::{carried, crossing_length, noise3, waves_carried}
+#import ripples::{Clock, carried, crossing_length, noise3, waves_carried}
 #import air::Air
 #import portals::{mouths, painted, WALL}
 
@@ -32,10 +32,12 @@ struct Terrain {
     // a surveyed column's arc round the ring and width along the axis, the drum's half width,
     // in metres, and the water each particle of a column adds over its footprint
     grid: vec4<f32>,
-    // x: seconds; y: metres per unit of a column's height; z: metres per second per unit of
-    // a column's flow; w: how many columns there are round the ring, or 0 when there are too
-    // many for the water to reach round it
+    // the world's time as shaders are told it, and the period it winds back after
     clock: vec4<f32>,
+    // metres per unit of a column's height; metres per second per unit of a column's flow; how
+    // many columns there are round the ring, or 0 when there are too many for the water to
+    // reach round it
+    columns: vec4<f32>,
     absorption: vec4<f32>,
     scatter: vec4<f32>,
     air: Air,
@@ -131,7 +133,7 @@ struct Column {
 /// in metres, the flow in it, and how high above the glass its water reaches.
 fn column_at(round: i32, along: i32) -> vec4<f32> {
     var r = round;
-    let n = i32(terrain.clock.w);
+    let n = i32(terrain.columns.z);
     if (n > 0) {
         r = short_way_round(r, n);
     }
@@ -152,8 +154,8 @@ fn column_at(round: i32, along: i32) -> vec4<f32> {
             // the water over the column is its particles' volume over the column's footprint
             let thickness = count * terrain.grid.w;
             let flow = vec2(f32(bitcast<i32>(columns[c + 3u])), f32(bitcast<i32>(columns[c + 4u])))
-                * terrain.clock.z / count;
-            return vec4(thickness, flow.x, flow.y, f32(columns[c + 1u]) * terrain.clock.y);
+                * terrain.columns.y / count;
+            return vec4(thickness, flow.x, flow.y, f32(columns[c + 1u]) * terrain.columns.x);
         }
         slot = (slot + 1u) & mask;
     }
@@ -281,12 +283,13 @@ fn sunlight_through(p: vec3<f32>, up: vec3<f32>, l: vec3<f32>, water: Column, fo
     // where the light came through the surface: back up its refracted way
     let down = refract(-l, up, 1.0 / IOR);
     let entry = to_waters_frame(p - down * path);
-    let run = carried(entry, vector_to_waters_frame(water.flow), terrain.clock.x);
+    let clock = Clock(terrain.clock.x, terrain.clock.y);
+    let run = carried(entry, vector_to_waters_frame(water.flow), clock);
     // waves whose caustics have crossed before the light reaches the bed draw no pattern on
     // it, and neither do those too small to resolve: a wave is left out once the footprint
     // reaches half its length
     let crossed = crossing_length(path, 1.0 - 1.0 / IOR);
-    let w = waves_carried(run, terrain.clock.x, max(footprint, 0.5 * crossed));
+    let w = waves_carried(run, clock, max(footprint, 0.5 * crossed));
     // rays bent by the ripples' slopes converge or spread by the time they reach the bed
     let spread = (1.0 - 1.0 / IOR) * path;
     let e1 = vec3(0.0, 1.0, 0.0);
