@@ -390,13 +390,22 @@ impl Measured {
         sorted[((sorted.len() - 1) as f64 * share) as usize]
     }
 
+    /// When the frames that took longest ended, in seconds of the scene.
+    fn worst_at(&self) -> f64 {
+        let worst = (0..self.frame_ms.len())
+            .max_by(|&a, &b| self.frame_ms[a].total_cmp(&self.frame_ms[b]))
+            .unwrap_or(0);
+        ((worst + 1) * KEPT_EVERY as usize) as f64 / FPS as f64
+    }
+
     fn report(&self, scene: &str) -> String {
         format!(
-            "GATE {scene}: empty ring {:.1} ms a frame | frame ms p50 {:.1} p95 {:.1} worst {:.1}, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {}, of which in the air: {} | vertices at most {}, broken {}, stray {}",
+            "GATE {scene}: empty ring {:.1} ms a frame | frame ms p50 {:.1} p95 {:.1} worst {:.1} at {:.1} s, by the second: {}, of which the CPU issuing them: {} | poured {:.1} m3, water by the second: {}, of which in the air: {} | vertices at most {}, broken {}, stray {}",
             self.empty_ring_ms,
             self.percentile(0.5),
             self.percentile(0.95),
             self.percentile(1.0),
+            self.worst_at(),
             by_the_second(&self.frame_ms),
             by_the_second(&self.issuing_ms),
             self.poured_m3,
