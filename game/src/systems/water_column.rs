@@ -22,7 +22,7 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 
-use crate::core::fluid::{FluidBuffers, MAX_INDICES};
+use crate::core::fluid::{Fluid, FluidBuffers, MAX_INDICES};
 use crate::systems::player::PlayerCamera;
 use crate::systems::scene::{SeenFrom, VANTAGES};
 use crate::systems::water::{WaterMesh, numbered_mesh, water_bounds};
@@ -205,9 +205,11 @@ fn size(
 
 /// Each counting camera looks as its vantage's eye does, but cuts nothing off short of the
 /// plane that eye sees past: a face short of it is counted as lying in it, so that water the
-/// plane cuts through is counted from the plane on.
+/// plane cuts through is counted from the plane on. It counts only while there is water in
+/// flight to count: a view costs the frame as much with nothing in it.
 #[allow(clippy::type_complexity)]
 fn follow(
+    fluid: Res<Fluid>,
     player: Query<(&Camera, &Transform, &Projection), With<PlayerCamera>>,
     eyes: Query<
         (&SeenFrom, &Camera, &Transform, &Projection),
@@ -234,7 +236,7 @@ fn follow(
                 .find(|(of, ..)| *of == seen)
                 .map(|(_, camera, transform, projection)| (camera, transform, projection)),
         };
-        let looking = eye.filter(|(eye, ..)| eye.is_active);
+        let looking = eye.filter(|(eye, ..)| eye.is_active && !fluid.is_empty());
         if camera.is_active != looking.is_some() {
             camera.is_active = looking.is_some();
         }
