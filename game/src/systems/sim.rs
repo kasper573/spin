@@ -27,7 +27,7 @@ use crate::core::math::{
     Quatd, Vec3d, norm, quat_about_y, quat_conjugate, quat_from_basis, quat_from_rotation_vector,
     quat_mul, quat_rotate, rotation_vector,
 };
-use crate::core::rigid::{self, Body, BodyParams, BodyShape, WaterCoupling};
+use crate::core::rigid::{self, Body, BodyParams, BodyShape, Ground, WaterCoupling};
 use crate::core::sheet::Sheet;
 use crate::core::units::{
     EARTH_GRAVITY, Hertz, Metres, MetresPerSecond, MetresPerSecondSquared, Radians,
@@ -419,10 +419,15 @@ impl Simulation {
             let q = quat_mul(&turn, &body.q);
             let v = self.drum.carried_vector(body.v, shift);
             let w = self.drum.carried_vector(body.w, shift);
+            let ground = body.ground.map(|ground| Ground {
+                point: self.drum.carried(ground.point, shift),
+                normal: self.drum.carried_vector(ground.normal, shift),
+                ..ground
+            });
             body.place(p, q);
             body.v = v;
             body.w = w;
-            body.ground = None;
+            body.ground = ground;
         }
         self.gyros.held = quat_mul(&turn, &self.gyros.held);
         self.gyros.footing = self.gyros.footing.map(|n| quat_rotate(&turn, &n));

@@ -23,6 +23,12 @@ const FLIGHT: [(Option<Thruster>, f64); 4] = [
 /// walk carries the eye, and turns it by.
 const SAME_PLACE_M: f64 = 0.01;
 const SAME_HEADING_RAD: f64 = 0.01;
+/// A display faster than the bodies are stepped: most of its frames fall between two substeps.
+const FAST_DISPLAY: f64 = 240.0;
+/// How much the eye's move from one frame to the next may change, as a share of its mean move,
+/// while walking on: a hitch would show as whole frames without a move.
+const EVEN_MOVE: f64 = 0.25;
+
 #[test]
 #[ignore = "wants a GPU"]
 fn a_flight_ends_where_it_would_at_any_frame_rate() {
@@ -49,6 +55,55 @@ fn a_flight_ends_where_it_would_at_any_frame_rate() {
             RATES[0]
         );
     }
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_fast_display_sees_the_eye_move_evenly() {
+    let mut app = testing::headless();
+    testing::watch(&mut app, Seconds(0.5));
+    let walk = [Thruster::Forward];
+    let frames = (FLIGHT[1].1 * FAST_DISPLAY).round() as usize;
+    let mut seen = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        let player = *app.world().resource::<Player>();
+        app.world_mut().resource_mut::<Simulation>().avatar_input =
+            player.input(PilotInput::firing(&walk));
+        testing::frame_as_played(&mut app, Seconds((1.0 / FAST_DISPLAY) as f32));
+        let sim = app.world().resource::<Simulation>();
+        seen.push((sim.drum.site, sim.eye().0));
+    }
+    let (first, _) = seen[0];
+    let mut drum = Drum::new(app.world().resource::<Simulation>().drum.ring);
+    let path: Vec<Vec3d> = seen
+        .iter()
+        .map(|&(site, eye)| {
+            drum.site = first;
+            drum.frame_at(site).point_back(eye)
+        })
+        .collect();
+    let moves: Vec<f64> = path
+        .windows(2)
+        .map(|w| {
+            (0..3)
+                .map(|k| (w[1][k] - w[0][k]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .skip(frames / 2)
+        .collect();
+    let mean = moves.iter().sum::<f64>() / moves.len() as f64;
+    let uneven = moves
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs() / mean)
+        .fold(0.0, f64::max);
+    eprintln!(
+        "walking at {FAST_DISPLAY} fps the eye moves {mean:.5} m a frame, changing by up to {uneven:.3} of it"
+    );
+    assert!(
+        uneven < EVEN_MOVE,
+        "walking at {FAST_DISPLAY} fps the eye's move changes by {uneven:.3} of its mean from one frame to the next"
+    );
 }
 
 /// Where a flight ended: the eye and the way it looks, in the frame about the site of the wall
