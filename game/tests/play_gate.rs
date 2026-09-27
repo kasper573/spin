@@ -140,6 +140,8 @@ struct Measured {
     /// What the GPU spent on each of its passes, in milliseconds a frame and in so many runs
     /// of the pass a frame, the most first.
     gpu_ms: Vec<(String, f64, f64)>,
+    /// What the CPU spent recording each of those passes, as the GPU's are kept.
+    cpu_ms: Vec<(String, f64, f64)>,
 }
 
 fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Measured {
@@ -198,6 +200,7 @@ fn play_in(
         water_m3: Vec::new(),
         in_the_air_m3: Vec::new(),
         gpu_ms: Vec::new(),
+        cpu_ms: Vec::new(),
     };
     let mut tool = None;
     let mut button = None;
@@ -256,17 +259,8 @@ fn play_in(
             }
         }
     }
-    measured.gpu_ms = app
-        .world()
-        .resource::<DiagnosticsStore>()
-        .iter()
-        .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
-        .filter_map(|d| {
-            let (ms, runs) = each_frame(d)?;
-            Some((d.path().as_str().to_owned(), ms, runs))
-        })
-        .collect();
-    measured.gpu_ms.sort_by(|a, b| b.1.total_cmp(&a.1));
+    measured.gpu_ms = passes(&app, "elapsed_gpu");
+    measured.cpu_ms = passes(&app, "elapsed_cpu");
     fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
     eprintln!("{}", measured.report(scene));
     measured
@@ -307,6 +301,22 @@ fn by_the_second(kept: &[f64]) -> String {
         .map(|v| format!("{v:.1}"))
         .collect();
     each.join(" ")
+}
+
+/// What each pass cost a frame by the render diagnostic of this name, the most first.
+fn passes(app: &App, diagnostic: &str) -> Vec<(String, f64, f64)> {
+    let mut passes: Vec<_> = app
+        .world()
+        .resource::<DiagnosticsStore>()
+        .iter()
+        .filter(|d| d.path().as_str().ends_with(diagnostic))
+        .filter_map(|d| {
+            let (ms, runs) = each_frame(d)?;
+            Some((d.path().as_str().to_owned(), ms, runs))
+        })
+        .collect();
+    passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+    passes
 }
 
 /// What a pass cost the GPU a frame, in milliseconds. A pass that runs more than once a frame,
@@ -402,6 +412,16 @@ impl Measured {
                 "\n    {:.0} timed runs a frame, of the {TIMED_RUNS_KEPT} the GPU's clock keeps: past that, runs go untimed",
                 self.gpu_ms.iter().map(|(_, _, runs)| runs).sum::<f64>()
             )
+            + &format!(
+                "\n  recorded by the CPU, {:.2} ms a frame in all:",
+                self.cpu_ms.iter().map(|(_, ms, _)| ms).sum::<f64>()
+            )
+            + &self
+                .cpu_ms
+                .iter()
+                .filter(|(_, ms, _)| *ms >= 0.1)
+                .map(|(path, ms, runs)| format!("\n    {ms:6.2} ms in {runs:4.1} runs  {path}"))
+                .collect::<String>()
     }
 
     /// What a player would hold the scene to, beside what the frames show.

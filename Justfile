@@ -11,7 +11,8 @@ test:
     cargo test --release -p game
 
 # The game played as a player plays it, every frame drawn, on this machine's GPU. Each scene
-# leaves its frames, a sheet of them and what it measured in target/playgate/<scene>/. A scene
+# leaves its frames, a sheet of twelve of them from its start to its end and what it measured in
+# target/playgate/<scene>/. A scene
 # that passes has only kept its numbers: whether the game looks and plays right is seen on the
 # sheets, which are there to be looked at.
 #
@@ -33,8 +34,10 @@ gate *scenes: idle
     status=$?
     kill $awake $clocks
     for scene in target/playgate/*/; do
+      frames=$(ls "${scene}" | grep -c '^frame_')
+      every=$(( frames / 12 > 0 ? frames / 12 : 1 ))
       ffmpeg -y -loglevel error -pattern_type glob -i "${scene}frame_*.png" \
-        -vf "select='not(mod(n\,7))',scale=640:360,tile=4x3" -frames:v 1 "${scene}sheet.png"
+        -vf "select='not(mod(n\,${every}))',scale=640:360,tile=4x3" -frames:v 1 "${scene}sheet.png"
     done
     throttled=$(awk -F', ' '$2 > 50 && $1 != "P0"' target/playgate-gpu.csv | wc -l)
     if [ "$throttled" -gt 0 ]; then
