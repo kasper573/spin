@@ -2,6 +2,7 @@ pub mod audio;
 pub mod avatar;
 pub mod codec;
 pub mod fluid;
+pub mod in_place;
 pub mod math;
 pub mod rigid;
 pub mod sheet;

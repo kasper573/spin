@@ -23,13 +23,15 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
     TextureDimension, TextureFormat,
 };
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::{Shader, ShaderRef};
 
 use crate::core::avatar;
 use crate::core::fluid::Fluid;
+use crate::core::in_place::{InPlace, InPlacePlugin, InPlaceUniforms, Tell};
 use crate::core::math::{Quatd, Vec3d};
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::{Drum, Ring, Site, SiteFrame, bed_albedo, slack};
@@ -234,7 +236,7 @@ pub struct ScenePlugin;
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            MaterialPlugin::<StarsMaterial>::default(),
+            InPlacePlugin::<StarsMaterial>::default(),
             AutoExposurePlugin,
         ))
         .init_resource::<Viewpoint>()
@@ -321,15 +323,20 @@ pub fn locate(
 }
 
 /// The stars and the sun turn the other way from the drum.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn turn_sky(
     sim: Res<Simulation>,
     air: Res<Air>,
     vantages: Res<Vantages>,
     mut sky: ResMut<Sky>,
-    mut materials: ResMut<Assets<StarsMaterial>>,
+    materials: Res<Assets<InPlace<StarsMaterial>>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut stars: Query<
-        (&SeenFrom, &MeshMaterial3d<StarsMaterial>, &mut Transform),
+        (
+            &SeenFrom,
+            &MeshMaterial3d<InPlace<StarsMaterial>>,
+            &mut Transform,
+        ),
         (With<StarSphere>, Without<SunLight>),
     >,
     mut suns: Query<(&SeenFrom, &SunLight, &mut Transform), Without<StarSphere>>,
@@ -343,14 +350,20 @@ fn turn_sky(
             continue;
         };
         transform.rotation = vantage.sky.rotation;
-        if let Some(mut material) = materials.get_mut(&material.0) {
-            material.air = air.uniform(sim.drum.spin);
-            let to_stars = vantage.sky.rotation.inverse();
-            material.to_stars = Vec4::new(to_stars.x, to_stars.y, to_stars.z, to_stars.w);
-            let [x, y, z] = vantage.viewpoint.origin;
-            let along = y + vantage.frame.site.y;
-            material.origin = Vec4::new(x as f32, along as f32, z as f32, 0.0);
-            material.ring = Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0);
+        let to_stars = vantage.sky.rotation.inverse();
+        let [x, y, z] = vantage.viewpoint.origin;
+        let along = y + vantage.frame.site.y;
+        let told = SkyUniform {
+            to_stars: Vec4::new(to_stars.x, to_stars.y, to_stars.z, to_stars.w),
+            origin: Vec4::new(x as f32, along as f32, z as f32, 0.0),
+            ring: Vec4::new(ring.radius.0, ring.half_width.0, 0.0, 0.0),
+            air: air.uniform(sim.drum.spin),
+            ..SkyUniform::default()
+        };
+        if let Some(material) = materials.get(&material.0)
+            && let Some(mut buffer) = buffers.get_mut(&material.sky)
+        {
+            buffer.tell(&told);
         }
     }
     for (seen, SunLight(direction), mut transform) in &mut suns {
@@ -456,25 +469,44 @@ struct SunLight(Vec3);
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct StarsMaterial {
-    #[uniform(0)]
+    /// The sky as it is seen from the vantage, as a `SkyUniform` told afresh every frame.
+    #[storage(0, read_only)]
+    #[dependency]
+    sky: Handle<ShaderBuffer>,
+}
+
+#[derive(ShaderType, Clone)]
+struct SkyUniform {
     background: LinearRgba,
-    #[uniform(0)]
     sun: Vec4,
     /// Turns a direction of the ring's frame into one among the stars.
-    #[uniform(0)]
     to_stars: Vec4,
     /// Where the viewpoint lies in the ring's frame, in metres, and the ring's radius and half
     /// width: space is seen through whatever of the ring's air stands between.
-    #[uniform(0)]
     origin: Vec4,
-    #[uniform(0)]
     ring: Vec4,
     /// The air itself; see `systems/air.rs`.
-    #[uniform(0)]
     air: AirUniform,
 }
 
-impl Material for StarsMaterial {
+impl Default for SkyUniform {
+    fn default() -> Self {
+        Self {
+            background: SPACE.to_linear(),
+            sun: SUN_DIRECTION.extend(0.0),
+            to_stars: Vec4::W,
+            origin: Vec4::ZERO,
+            ring: Vec4::ZERO,
+            air: AirUniform::default(),
+        }
+    }
+}
+
+impl InPlaceUniforms for StarsMaterial {
+    const UNIFORMS: &'static [u32] = &[0];
+}
+
+impl Material for InPlace<StarsMaterial> {
     fn vertex_shader() -> ShaderRef {
         "embedded://game/systems/shaders/stars.wgsl".into()
     }
@@ -501,7 +533,8 @@ impl Material for StarsMaterial {
 fn spawn(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut stars: ResMut<Assets<StarsMaterial>>,
+    mut stars: ResMut<Assets<InPlace<StarsMaterial>>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut images: ResMut<Assets<Image>>,
     mut curves: ResMut<Assets<AutoExposureCompensationCurve>>,
 ) {
@@ -565,14 +598,9 @@ fn spawn(
             NotShadowCaster,
             NotShadowReceiver,
             Mesh3d(sphere.clone()),
-            MeshMaterial3d(stars.add(StarsMaterial {
-                background: SPACE.to_linear(),
-                sun: SUN_DIRECTION.extend(0.0),
-                to_stars: Vec4::W,
-                origin: Vec4::ZERO,
-                ring: Vec4::ZERO,
-                air: AirUniform::default(),
-            })),
+            MeshMaterial3d(stars.add(InPlace(StarsMaterial {
+                sky: buffers.add(ShaderBuffer::uniform(&SkyUniform::default())),
+            }))),
         ));
     }
 }

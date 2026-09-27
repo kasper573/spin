@@ -7,7 +7,6 @@
 //!
 //! A mouth seen through a mouth shows the picture of the frame before, since a picture cannot
 //! be drawn into while it is read, so each camera has two pictures and draws into them in turn.
-use bevy::anti_alias::smaa::Smaa;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget, SubCameraView, Viewport};
 use bevy::core_pipeline::prepass::DepthPrepass;
@@ -27,25 +26,45 @@ use crate::systems::scene::{
 use crate::systems::sim::Simulation;
 
 /// The pictures of what lies beyond each mouth, and where in them each vantage finds what a
-/// point of a mouth shows.
+/// point of a mouth shows. Each eye draws into its two pictures in turn, and every material
+/// that shows a mouth holds all four and is told which pair to read, so that it is never made
+/// anew as the eyes turn from one to the other.
 #[derive(Resource)]
 pub struct Pictures {
-    /// The pictures drawn this frame, and those drawn the frame before.
-    fresh: [Handle<Image>; 2],
-    stale: [Handle<Image>; 2],
+    /// The pictures, a pair of them, one for each mouth, for either turn.
+    pairs: [[Handle<Image>; 2]; 2],
+    /// Which pair the eyes draw into this frame.
+    drawn: usize,
     found: [[Mat4; 2]; VANTAGES],
 }
 
+impl FromWorld for Pictures {
+    fn from_world(world: &mut World) -> Self {
+        let mut images = world.resource_mut::<Assets<Image>>();
+        Pictures {
+            pairs: [(); 2].map(|()| [(); 2].map(|()| picture(&mut images))),
+            drawn: 0,
+            found: [[Mat4::IDENTITY; 2]; VANTAGES],
+        }
+    }
+}
+
 impl Pictures {
-    /// The pictures a vantage reads: the viewer's own reads this frame's, which are drawn
-    /// before it is; one beyond a mouth reads the last frame's.
-    pub fn read_from(&self, vantage: usize) -> [Option<Handle<Image>>; 2] {
-        let pictures = if vantage == 0 {
-            &self.fresh
+    /// Both pairs of pictures, as a material holds them: the first pair's blue and orange,
+    /// then the other's.
+    pub fn held(&self) -> [Handle<Image>; 4] {
+        let [[blue, orange], [other_blue, other_orange]] = self.pairs.clone();
+        [blue, orange, other_blue, other_orange]
+    }
+
+    /// The pair a vantage reads: the viewer's own reads this frame's, which are drawn before it
+    /// is; one beyond a mouth reads the last frame's.
+    pub fn read_from(&self, vantage: usize) -> usize {
+        if vantage == 0 {
+            self.drawn
         } else {
-            &self.stale
-        };
-        pictures.clone().map(Some)
+            1 - self.drawn
+        }
     }
 
     /// For each mouth, what takes a point drawn for a vantage to where the mouth's picture
@@ -59,10 +78,12 @@ pub struct PortalEyesPlugin;
 
 impl Plugin for PortalEyesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn).add_systems(
-            Update,
-            (size, lean_in, look_through).chain().in_set(SettleVantages),
-        );
+        app.init_resource::<Pictures>()
+            .add_systems(Startup, spawn)
+            .add_systems(
+                Update,
+                (size, lean_in, look_through).chain().in_set(SettleVantages),
+            );
     }
 }
 
@@ -97,12 +118,7 @@ fn picture(images: &mut Assets<Image>) -> Handle<Image> {
     ))
 }
 
-fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let pictures = Pictures {
-        fresh: [(); 2].map(|()| picture(&mut images)),
-        stale: [(); 2].map(|()| picture(&mut images)),
-        found: [[Mat4::IDENTITY; 2]; VANTAGES],
-    };
+fn spawn(mut commands: Commands, pictures: Res<Pictures>) {
     for (i, colour) in MouthColour::BOTH.into_iter().enumerate() {
         commands.spawn((
             PortalEye(colour),
@@ -116,7 +132,7 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 ..default()
             },
             RenderTarget::Image(ImageRenderTarget {
-                handle: pictures.fresh[i].clone(),
+                handle: pictures.pairs[pictures.drawn][i].clone(),
                 scale_factor: 1.0,
             }),
             Hdr,
@@ -128,7 +144,6 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
             (
                 Msaa::Off,
-                Smaa::default(),
                 DepthPrepass,
                 ShadowFilteringMethod::Gaussian,
                 // every view carries a fog, clear unless its eye is under water, so that what
@@ -141,7 +156,6 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             ),
         ));
     }
-    commands.insert_resource(pictures);
 }
 
 /// The pictures are as large as the view they are shown in.
@@ -153,7 +167,7 @@ fn size(
     let Some(wanted) = player.iter().find_map(Camera::physical_target_size) else {
         return;
     };
-    for handle in pictures.fresh.iter().chain(&pictures.stale) {
+    for handle in pictures.pairs.iter().flatten() {
         if images
             .get(handle)
             .is_some_and(|image| image.size() != wanted)
@@ -229,7 +243,7 @@ fn look_through(
     };
     let shown = shown_in.physical_target_size();
     let pictures = &mut *pictures;
-    std::mem::swap(&mut pictures.fresh, &mut pictures.stale);
+    pictures.drawn = 1 - pictures.drawn;
     let drum = &sim.drum;
     let (eye, attitude) = sim.eye();
     let mut sights = [None; 2];
@@ -271,7 +285,7 @@ fn look_through(
             continue;
         };
         *target = RenderTarget::Image(ImageRenderTarget {
-            handle: pictures.fresh[i].clone(),
+            handle: pictures.pairs[pictures.drawn][i].clone(),
             scale_factor: 1.0,
         });
         let window = drum

@@ -16,7 +16,7 @@ use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
@@ -26,11 +26,12 @@ use super::landscape::{Landscape, PATCH};
 use super::sheet::{SheetWindow, feed_sheet};
 use super::{DrumFrame, DrumUniform, GLASS_THICKNESS, PANE, Place, Ring, Round, Site, TILE};
 use crate::core::fluid::Fluid;
+use crate::core::in_place::{InPlace, InPlacePlugin, InPlaceUniforms, Tell};
 use crate::core::math::Vec3d;
 use crate::core::sheet::{SHEET_CELLS, Sheet, SheetBuffers};
 use crate::systems::air::{Air, AirUniform};
-use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
-use crate::systems::portal::{MouthsUniform, Pictures, SolidCopies, SolidMaterial, solid};
+use crate::systems::figure::Figures;
+use crate::systems::portal::{Mouths, Pictures, SolidCopies, SolidMaterial, solid};
 use crate::systems::scene::{SPACE, SeenFrom, SettleVantages, VANTAGES, Vantages};
 use crate::systems::sim::{SimSet, Simulation};
 use crate::systems::water;
@@ -91,8 +92,8 @@ impl Plugin for DrumPlugin {
     fn build(&self, app: &mut App) {
         super::gpu::install(app);
         app.add_plugins((
-            MaterialPlugin::<GlassMaterial>::default(),
-            MaterialPlugin::<TerrainMaterial>::default(),
+            InPlacePlugin::<GlassMaterial>::default(),
+            InPlacePlugin::<TerrainMaterial>::default(),
         ))
         .init_resource::<SheetWindow>()
         .add_systems(Startup, spawn)
@@ -102,8 +103,7 @@ impl Plugin for DrumPlugin {
                 .chain()
                 .in_set(SimSet::Observe)
                 .after(SettleVantages),
-        )
-        .add_systems(PostUpdate, mirror.after(FigureGathered));
+        );
     }
 }
 
@@ -125,47 +125,61 @@ pub fn slack(ring: Ring, standoff: f64) -> f64 {
 /// The glass panes: what they let through, and what they mirror; see `glass.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct GlassMaterial {
+    /// What the glass is like and where it is seen from, as a `GlassUniform` told afresh every
+    /// frame.
+    #[storage(0, read_only)]
+    #[dependency]
+    glass: Handle<ShaderBuffer>,
+    /// The viewer's own figure, for the glass to mirror; see `systems/figure.rs`.
+    #[storage(10, read_only)]
+    #[dependency]
+    figure: Handle<ShaderBuffer>,
+    /// The portals let into the caps, and what is seen through them; see `systems/portal`.
+    #[storage(11, read_only)]
+    #[dependency]
+    mouths: Handle<ShaderBuffer>,
+    #[texture(12)]
+    #[sampler(14)]
+    #[dependency]
+    through_blue: Handle<Image>,
+    #[texture(13)]
+    #[dependency]
+    through_orange: Handle<Image>,
+    #[texture(16)]
+    #[dependency]
+    through_blue_other: Handle<Image>,
+    #[texture(17)]
+    #[dependency]
+    through_orange_other: Handle<Image>,
+}
+
+#[derive(ShaderType, Clone)]
+struct GlassUniform {
     /// How much of each colour a pane lets through.
-    #[uniform(0)]
     tint: LinearRgba,
     /// Turns a direction of the drum's frame into one among the stars.
-    #[uniform(0)]
     to_stars: Vec4,
-    #[uniform(0)]
     background: LinearRgba,
     /// The pane size round the wall and along it, the groove width and the glass thickness.
-    #[uniform(0)]
     panes: Vec4,
     /// Where the viewpoint lies in the ring's frame, in metres: round the ring from the site,
     /// and along the axis from the ring's middle.
-    #[uniform(0)]
     origin: Vec4,
     /// The ring's radius and half width, in metres; whether the eye is inside the drum,
     /// where what the screen shows can be mirrored; and the refractive index of what the
     /// eye is in, air or water.
-    #[uniform(0)]
     ring: Vec4,
     /// The ground's colour as seen from across the ring.
-    #[uniform(0)]
     ground: LinearRgba,
     /// The air between the eye and the glass; see `systems/air.rs`.
-    #[uniform(0)]
     air: AirUniform,
-    /// The viewer's own figure, for the glass to mirror; see `systems/figure.rs`.
-    #[uniform(10)]
-    figure: FigureUniform,
-    /// The portals let into the caps; see `systems/portal`.
-    #[uniform(11)]
-    mouths: MouthsUniform,
-    /// What is seen through each portal, for where it is open.
-    #[texture(12)]
-    #[sampler(14)]
-    through_blue: Option<Handle<Image>>,
-    #[texture(13)]
-    through_orange: Option<Handle<Image>>,
 }
 
-impl Material for GlassMaterial {
+impl InPlaceUniforms for GlassMaterial {
+    const UNIFORMS: &'static [u32] = &[0, 10, 11];
+}
+
+impl Material for InPlace<GlassMaterial> {
     fn fragment_shader() -> ShaderRef {
         "embedded://game/systems/shaders/glass.wgsl".into()
     }
@@ -189,63 +203,73 @@ impl Material for GlassMaterial {
 /// `terrain.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct TerrainMaterial {
-    #[uniform(0)]
+    /// What the ground is like and where it is seen from, as a `TerrainUniform` told afresh
+    /// every frame.
+    #[storage(0, read_only)]
+    #[dependency]
+    terrain: Handle<ShaderBuffer>,
+    #[storage(1, read_only)]
+    #[dependency]
+    columns: Handle<ShaderBuffer>,
+    /// The corners of the sheet's surface, which say how deep it lies at each.
+    #[storage(2, read_only)]
+    #[dependency]
+    lying_corners: Handle<ShaderBuffer>,
+    /// The portals let into the ground, and what is seen through them; see `systems/portal`.
+    #[storage(11, read_only)]
+    #[dependency]
+    mouths: Handle<ShaderBuffer>,
+    #[texture(12)]
+    #[sampler(14)]
+    #[dependency]
+    through_blue: Handle<Image>,
+    #[texture(13)]
+    #[dependency]
+    through_orange: Handle<Image>,
+    #[texture(16)]
+    #[dependency]
+    through_blue_other: Handle<Image>,
+    #[texture(17)]
+    #[dependency]
+    through_orange_other: Handle<Image>,
+}
+
+#[derive(ShaderType, Clone)]
+struct TerrainUniform {
     dirt: LinearRgba,
-    #[uniform(0)]
     grass: LinearRgba,
-    #[uniform(0)]
     grass_dark: LinearRgba,
-    #[uniform(0)]
     bed: LinearRgba,
     /// The site everything is drawn about, from the water's: how far round the ring and along
     /// the axis, in metres; the glass radius; and the mask of the survey's table.
-    #[uniform(0)]
     site: Vec4,
     /// Where the point everything is drawn about lies in the site's frame, in metres, and the
     /// refractive index of what the eye is in, air or water.
-    #[uniform(0)]
     origin: Vec4,
     /// A surveyed column's arc round the ring and width along the axis, and the drum's half
     /// width, in metres, and the depth of water each particle surveyed over a column adds.
-    #[uniform(0)]
     grid: Vec4,
     /// x: seconds; y: metres per unit of a surveyed column's height; z: metres per second per
     /// unit of its flow; w: how many columns there are round the ring, or 0 when there are too
     /// many for the water to reach round it.
-    #[uniform(0)]
     clock: Vec4,
-    #[uniform(0)]
     absorption: Vec4,
-    #[uniform(0)]
     scatter: Vec4,
     /// The air between the eye and the ground; see `systems/air.rs`.
-    #[uniform(0)]
     air: AirUniform,
     /// The sheet of water lying on the floor: where its first corner lies from the water's site,
     /// round the ring and along the axis, and a cell's arc and width, in metres; then how many
     /// cells it has each way, how many corners a row of its vertices holds, and whether its
     /// cells close on themselves round the ring.
-    #[uniform(0)]
     lying: Vec4,
-    #[uniform(0)]
     lying_cells: Vec4,
-    #[storage(1, read_only)]
-    columns: Handle<ShaderBuffer>,
-    /// The corners of the sheet's surface, which say how deep it lies at each.
-    #[storage(2, read_only)]
-    lying_corners: Handle<ShaderBuffer>,
-    /// The portals let into the ground; see `systems/portal`.
-    #[uniform(11)]
-    mouths: MouthsUniform,
-    /// What is seen through each portal, for where it is open.
-    #[texture(12)]
-    #[sampler(14)]
-    through_blue: Option<Handle<Image>>,
-    #[texture(13)]
-    through_orange: Option<Handle<Image>>,
 }
 
-impl Material for TerrainMaterial {
+impl InPlaceUniforms for TerrainMaterial {
+    const UNIFORMS: &'static [u32] = &[0, 11];
+}
+
+impl Material for InPlace<TerrainMaterial> {
     fn fragment_shader() -> ShaderRef {
         "embedded://game/systems/shaders/terrain.wgsl".into()
     }
@@ -308,22 +332,32 @@ struct WheelMaterials {
     seen: [SeenMaterials; VANTAGES],
 }
 
+/// A vantage's glass and ground, and what each is told: the uniforms as they were last told,
+/// and the buffers they are told in.
 struct SeenMaterials {
-    glass: Handle<GlassMaterial>,
-    terrain: Handle<TerrainMaterial>,
+    glass: GlassUniform,
+    glass_told: Handle<ShaderBuffer>,
+    terrain: TerrainUniform,
+    terrain_told: Handle<ShaderBuffer>,
+    glass_material: Handle<InPlace<GlassMaterial>>,
+    terrain_material: Handle<InPlace<TerrainMaterial>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     mut commands: Commands,
     frame: Res<DrumFrame>,
     sheet: Res<SheetBuffers>,
-    mut glass: ResMut<Assets<GlassMaterial>>,
+    (mouths, pictures, figures): (Res<Mouths>, Res<Pictures>, Res<Figures>),
+    mut glass: ResMut<Assets<InPlace<GlassMaterial>>>,
     mut standard: ResMut<Assets<SolidMaterial>>,
     mut copies: ResMut<SolidCopies>,
-    mut terrain: ResMut<Assets<TerrainMaterial>>,
+    mut terrain: ResMut<Assets<InPlace<TerrainMaterial>>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
-    let seen = [(); VANTAGES].map(|()| SeenMaterials {
-        glass: glass.add(GlassMaterial {
+    let [blue, orange, other_blue, other_orange] = pictures.held();
+    let seen = std::array::from_fn(|vantage| {
+        let told_glass = GlassUniform {
             tint: LinearRgba::new(0.9, 0.96, 0.98, 1.0),
             to_stars: Vec4::new(0.0, 0.0, 0.0, 1.0),
             background: SPACE.to_linear(),
@@ -332,12 +366,8 @@ fn spawn(
             ring: Vec4::new(0.0, 0.0, 1.0, 1.0),
             ground: ground_albedo(),
             air: AirUniform::default(),
-            figure: FigureUniform::default(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
-        }),
-        terrain: terrain.add(TerrainMaterial {
+        };
+        let told_terrain = TerrainUniform {
             dirt: DIRT.into(),
             grass: GRASS.into(),
             grass_dark: GRASS_DARK.into(),
@@ -351,12 +381,34 @@ fn spawn(
             air: AirUniform::default(),
             lying: Vec4::ZERO,
             lying_cells: Vec4::ZERO,
-            columns: frame.columns.clone(),
-            lying_corners: sheet.vertices.clone(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
-        }),
+        };
+        let glass_told = buffers.add(ShaderBuffer::uniform(&told_glass));
+        let terrain_told = buffers.add(ShaderBuffer::uniform(&told_terrain));
+        SeenMaterials {
+            glass_material: glass.add(InPlace(GlassMaterial {
+                glass: glass_told.clone(),
+                figure: figures.seen_from(vantage),
+                mouths: mouths.seen_from(vantage),
+                through_blue: blue.clone(),
+                through_orange: orange.clone(),
+                through_blue_other: other_blue.clone(),
+                through_orange_other: other_orange.clone(),
+            })),
+            terrain_material: terrain.add(InPlace(TerrainMaterial {
+                terrain: terrain_told.clone(),
+                columns: frame.columns.clone(),
+                lying_corners: sheet.vertices.clone(),
+                mouths: mouths.seen_from(vantage),
+                through_blue: blue.clone(),
+                through_orange: orange.clone(),
+                through_blue_other: other_blue.clone(),
+                through_orange_other: other_orange.clone(),
+            })),
+            glass: told_glass,
+            glass_told,
+            terrain: told_terrain,
+            terrain_told,
+        }
     });
     let metal = standard.add(solid(StandardMaterial {
         base_color: Color::srgb(0.16, 0.17, 0.2),
@@ -378,10 +430,9 @@ fn rebuild(
     mut commands: Commands,
     sim: Res<Simulation>,
     vantages: Res<Vantages>,
-    materials: Res<WheelMaterials>,
+    mut materials: ResMut<WheelMaterials>,
     mut built: ResMut<Built>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut glass: ResMut<Assets<GlassMaterial>>,
     structures: Query<(Entity, &SeenFrom), With<Structure>>,
     terrains: Query<(Entity, &SeenFrom), With<Terrain>>,
 ) {
@@ -403,14 +454,12 @@ fn rebuild(
                 };
                 let columns = columns(ring, standoff);
                 let spans = spans(&wheel, standoff);
-                if let Some(mut material) = glass.get_mut(&materials.seen[k].glass) {
-                    material.panes = Vec4::new(
-                        pane_round(ring) as f32,
-                        PANE as f32,
-                        BEVEL,
-                        GLASS_THICKNESS as f32,
-                    );
-                }
+                materials.seen[k].glass.panes = Vec4::new(
+                    pane_round(ring) as f32,
+                    PANE as f32,
+                    BEVEL,
+                    GLASS_THICKNESS as f32,
+                );
                 let mut structure = |mesh: Mesh| {
                     (
                         Structure,
@@ -425,7 +474,7 @@ fn rebuild(
                 let glass_wall = glass_mesh(&wheel, &columns, &spans, &depths(ring, standoff));
                 commands.spawn((
                     structure(glass_wall),
-                    MeshMaterial3d(materials.seen[k].glass.clone()),
+                    MeshMaterial3d(materials.seen[k].glass_material.clone()),
                     NotShadowCaster,
                 ));
                 for side in [-1.0, 1.0] {
@@ -460,7 +509,7 @@ fn rebuild(
                     seen.layers(),
                     Placed([0.0; 3]),
                     Mesh3d(meshes.add(terrain_mesh(&wheel, &columns, &rows))),
-                    MeshMaterial3d(materials.seen[k].terrain.clone()),
+                    MeshMaterial3d(materials.seen[k].terrain_material.clone()),
                     NoFrustumCulling,
                     Transform::default(),
                 ));
@@ -482,71 +531,59 @@ fn place(vantages: Res<Vantages>, mut placed: Query<(&Placed, &SeenFrom, &mut Tr
 fn light(
     sim: Res<Simulation>,
     vantages: Res<Vantages>,
-    pictures: Res<Pictures>,
     air: Res<Air>,
-    materials: Res<WheelMaterials>,
-    mut glass: ResMut<Assets<GlassMaterial>>,
+    mut materials: ResMut<WheelMaterials>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
-    for (k, (vantage, seen)) in vantages.0.iter().zip(&materials.seen).enumerate() {
-        let (Some(vantage), Some(mut material)) = (vantage, glass.get_mut(&seen.glass)) else {
+    for (vantage, seen) in vantages.0.iter().zip(&mut materials.seen) {
+        let Some(vantage) = vantage else {
             continue;
         };
-        material.air = air.uniform(sim.drum.spin);
-        material.mouths = MouthsUniform::of(&sim.drum, vantage, pictures.found_from(k), sim.time);
-        [material.through_blue, material.through_orange] = pictures.read_from(k);
+        let glass = &mut seen.glass;
+        glass.air = air.uniform(sim.drum.spin);
         let stars = vantage.sky.rotation.inverse();
-        material.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
+        glass.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
         let [x, y, z] = vantage.viewpoint.origin;
-        material.origin = Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0);
+        glass.origin = Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0);
         let ring = sim.drum.ring;
         let medium = if vantage.submerged { WATER_IOR } else { 1.0 };
-        material.ring = Vec4::new(
+        glass.ring = Vec4::new(
             ring.radius.0,
             ring.half_width.0,
             if vantage.enclosed { 1.0 } else { 0.0 },
             medium,
         );
-    }
-}
-
-fn mirror(
-    figure: Res<Figure>,
-    materials: Res<WheelMaterials>,
-    mut glass: ResMut<Assets<GlassMaterial>>,
-) {
-    if let Some(mut material) = glass.get_mut(&materials.seen[0].glass) {
-        material.figure = figure.0.clone();
+        if let Some(mut told) = buffers.get_mut(&seen.glass_told) {
+            told.tell(&seen.glass);
+        }
     }
 }
 
 /// The ground is told where each vantage's site lies on the ring and where its viewpoint lies
 /// about the site, so it can look up the water surveyed over each of its points.
-#[allow(clippy::too_many_arguments)]
 fn wet(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     sheet: Res<Sheet>,
     vantages: Res<Vantages>,
-    pictures: Res<Pictures>,
     air: Res<Air>,
-    materials: Res<WheelMaterials>,
-    mut terrain: ResMut<Assets<TerrainMaterial>>,
+    mut materials: ResMut<WheelMaterials>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     let drum = &sim.drum;
     let resolution = fluid.resolution();
     let columns = Columns::of(drum.ring, resolution);
     let (across, along) = (columns.arc(resolution), resolution.length());
     let particle = resolution.length().powi(3);
-    for (k, (vantage, seen)) in vantages.0.iter().zip(&materials.seen).enumerate() {
-        let (Some(vantage), Some(mut material)) = (vantage, terrain.get_mut(&seen.terrain)) else {
+    for (vantage, seen) in vantages.0.iter().zip(&mut materials.seen) {
+        let Some(vantage) = vantage else {
             continue;
         };
-        material.air = air.uniform(drum.spin);
-        material.mouths = MouthsUniform::of(drum, vantage, pictures.found_from(k), sim.time);
-        [material.through_blue, material.through_orange] = pictures.read_from(k);
+        let terrain = &mut seen.terrain;
+        terrain.air = air.uniform(drum.spin);
         let site = vantage.frame.site;
         let arc = drum.water.round.arc_to(site.round, drum.landscape.grid());
-        material.site = Vec4::new(
+        terrain.site = Vec4::new(
             arc as f32,
             (site.y - drum.water.y) as f32,
             drum.ring.radius.0,
@@ -554,30 +591,33 @@ fn wet(
         );
         let [x, y, z] = vantage.viewpoint.origin;
         let medium = if vantage.submerged { WATER_IOR } else { 1.0 };
-        material.origin = Vec4::new(x as f32, y as f32, z as f32, medium);
-        material.lying_cells = Vec4::ZERO;
+        terrain.origin = Vec4::new(x as f32, y as f32, z as f32, medium);
+        terrain.lying_cells = Vec4::ZERO;
         if let Some(lie) = sheet.lie().filter(|_| !sheet.is_empty()) {
             let [round, along] = sheet.origin();
-            material.lying = Vec4::new(round.0, along.0, lie.cell[0].0, lie.cell[1].0);
-            material.lying_cells = Vec4::new(
+            terrain.lying = Vec4::new(round.0, along.0, lie.cell[0].0, lie.cell[1].0);
+            terrain.lying_cells = Vec4::new(
                 lie.cells[0] as f32,
                 lie.cells[1] as f32,
                 (SHEET_CELLS[0] + 1) as f32,
                 f32::from(u8::from(lie.closed)),
             );
         }
-        material.grid = Vec4::new(
+        terrain.grid = Vec4::new(
             across as f32,
             along as f32,
             drum.ring.half_width.0,
             (particle / (across * along)) as f32,
         );
-        material.clock = Vec4::new(
+        terrain.clock = Vec4::new(
             sim.time.0,
             (resolution.length() / COLUMN_FIXED) as f32,
             (resolution.length() / resolution.time() / COLUMN_FIXED) as f32,
             columns.round as f32,
         );
+        if let Some(mut told) = buffers.get_mut(&seen.terrain_told) {
+            told.tell(&seen.terrain);
+        }
     }
 }
 

@@ -41,6 +41,8 @@ struct Mouths {
     // where the point everything is drawn about lies in the ring's frame, whose middle is the
     // middle of the drum's axis
     about: vec4<f32>,
+    // x: which pair of pictures shows what is seen through the mouths, the first or the other
+    pictures: vec4<f32>,
 }
 
 #ifdef MOUTHS_ON_A_SOLID
@@ -49,11 +51,15 @@ struct Mouths {
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var through_blue: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var through_orange: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var through_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var through_blue_other: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var through_orange_other: texture_2d<f32>;
 #else
 @group(#{MATERIAL_BIND_GROUP}) @binding(11) var<uniform> mouths: Mouths;
 @group(#{MATERIAL_BIND_GROUP}) @binding(12) var through_blue: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(13) var through_orange: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(14) var through_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(16) var through_blue_other: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(17) var through_orange_other: texture_2d<f32>;
 #endif
 
 const WALL: f32 = 1.0;
@@ -275,6 +281,11 @@ fn sunbeam_run(pair: Mouths, k: u32, at: vec3<f32>, dir: vec3<f32>, distance: f3
 fn beyond(i: u32, p: vec3<f32>) -> vec3<f32> {
     let clip = mouths.mouths[i].found * vec4(p, 1.0);
     let uv = clip.xy / max(clip.w, 1e-6) * vec2(0.5, -0.5) + 0.5;
+    if (mouths.pictures.x > 0.5) {
+        let blue = textureSampleLevel(through_blue_other, through_sampler, uv, 0.0).rgb;
+        let orange = textureSampleLevel(through_orange_other, through_sampler, uv, 0.0).rgb;
+        return select(orange, blue, i == 0u);
+    }
     let blue = textureSampleLevel(through_blue, through_sampler, uv, 0.0).rgb;
     let orange = textureSampleLevel(through_orange, through_sampler, uv, 0.0).rgb;
     return select(orange, blue, i == 0u);

@@ -65,14 +65,24 @@ density-settle sweeps, analytic vessel walls, Akinci body samples. One global pa
 
 ## Portals (`systems/portal/`)
 
-`VANTAGES = 3` (scene.rs). Each mouth = an eye camera (4x MSAA HDR, own lights, shadow maps,
-transmission copies) into `Pictures.fresh[i]`, swapped with `stale` every frame (`eyes.rs
-read_from`, which also forces every water material to rebind textures each frame), plus a
-water-column camera (`systems/water_column.rs`). Eyes are windowed with `Camera::viewport` +
-`sub_camera_view` (`window_on`). `SEEN_THROUGH_LAYERS = 64` on the player camera and the eyes: Bevy
+`VANTAGES = 3` (scene.rs). Each mouth = an eye camera (HDR, no MSAA or SMAA, own lights, shadow
+maps, transmission copies) drawing into one of two pairs of pictures in turn (`Pictures.drawn`);
+every material that shows mouths holds all four, and the vantage's `Mouths` buffer says which pair
+to read (`pictures.x`). Plus a water-column camera (`systems/water_column.rs`). Eyes are windowed
+with `Camera::viewport` + `sub_camera_view` (`window_on`). `SEEN_THROUGH_LAYERS = 64` on the player camera and the eyes: Bevy
 splits depth-sorted see-through items by count into that many snapshots, and the water meshes' sort
 centres are meaningless (vertex numbers in position.x), so fewer steps let the cap glass overdraw
 the lying water.
+
+## Per-frame values
+
+What a material is told every frame (where it is seen from, the mouths, the figure, the time) is
+written into a `ShaderBuffer` with `Tell::tell`, never set on the material: an `InPlace<M>`
+material (`core/in_place.rs`) binds those buffers as uniforms, so no material is re-prepared per
+frame. Per vantage: `Mouths` (portal/mod.rs), `Figures` (figure.rs), `Told` (water.rs, per kind of
+water), the glass's and ground's uniforms in `WheelMaterials` (drum/render.rs), the sky's in the
+stars material (scene.rs). Every image and buffer handle such a material binds is marked
+`#[dependency]`, so that it is re-prepared when one is made anew.
 
 ## Rules
 

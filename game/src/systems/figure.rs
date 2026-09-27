@@ -6,6 +6,9 @@
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::render::storage::ShaderBuffer;
+
+use crate::core::in_place::Tell;
 
 /// The most parts the mirrors are told of; any more go unmirrored.
 pub const MOST_PARTS: usize = 32;
@@ -104,8 +107,7 @@ pub struct PartUniform {
     outline: [Vec4; MOST_CORNERS / 2],
 }
 
-/// The figure as the shaders take it. A material that mirrors it keeps it at binding 10,
-/// which is where `figure.wgsl` reads it from.
+/// The figure as the shaders take it.
 #[derive(ShaderType, Clone, Debug, Default)]
 pub struct FigureUniform {
     parts: [PartUniform; MOST_PARTS],
@@ -119,17 +121,60 @@ pub struct FigureUniform {
 #[derive(SystemSet, Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct FigureGathered;
 
+/// The figure each vantage mirrors, told afresh every frame: the viewer's own sees it, and the
+/// vantages beyond the mouths, whose mirrors are never marched, see none. A material that
+/// mirrors it holds its vantage's at binding 10, which is where `figure.wgsl` reads it from.
+#[derive(Resource)]
+pub struct Figures {
+    own: Handle<ShaderBuffer>,
+    none: Handle<ShaderBuffer>,
+}
+
+impl Figures {
+    pub fn seen_from(&self, vantage: usize) -> Handle<ShaderBuffer> {
+        if vantage == 0 {
+            self.own.clone()
+        } else {
+            self.none()
+        }
+    }
+
+    /// A figure of no parts, for a mirror that shows none.
+    pub fn none(&self) -> Handle<ShaderBuffer> {
+        self.none.clone()
+    }
+}
+
+impl FromWorld for Figures {
+    fn from_world(world: &mut World) -> Self {
+        let mut buffers = world.resource_mut::<Assets<ShaderBuffer>>();
+        Figures {
+            own: buffers.add(ShaderBuffer::uniform(&FigureUniform::default())),
+            none: buffers.add(ShaderBuffer::uniform(&FigureUniform::default())),
+        }
+    }
+}
+
 pub struct FigurePlugin;
 
 impl Plugin for FigurePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Figure>().add_systems(
-            PostUpdate,
-            gather
-                .in_set(FigureGathered)
-                .after(TransformSystems::Propagate)
-                .after(VisibilitySystems::VisibilityPropagate),
-        );
+        app.init_resource::<Figure>()
+            .init_resource::<Figures>()
+            .add_systems(
+                PostUpdate,
+                (gather, tell)
+                    .chain()
+                    .in_set(FigureGathered)
+                    .after(TransformSystems::Propagate)
+                    .after(VisibilitySystems::VisibilityPropagate),
+            );
+    }
+}
+
+fn tell(figure: Res<Figure>, figures: Res<Figures>, mut buffers: ResMut<Assets<ShaderBuffer>>) {
+    if let Some(mut buffer) = buffers.get_mut(&figures.own) {
+        buffer.tell(&figure.0);
     }
 }
 

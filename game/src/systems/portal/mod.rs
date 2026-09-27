@@ -9,10 +9,13 @@ mod solids;
 
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::render::storage::ShaderBuffer;
 
+use crate::core::in_place::Tell;
 use crate::core::units::Seconds;
 use crate::systems::drum::{Drum, DrumSurface, FLAME_BAND, MouthColour, MouthCoords};
-use crate::systems::scene::Vantage;
+use crate::systems::scene::{SettleVantages, VANTAGES, Vantage, Vantages};
+use crate::systems::sim::{SimSet, Simulation};
 
 pub use eyes::Pictures;
 pub use solids::{SolidCopies, SolidMaterial, solid};
@@ -48,19 +51,59 @@ pub struct MouthUniform {
     found: Mat4,
 }
 
-/// The pair of mouths as the shaders take them. A material that draws them keeps them at
-/// binding 11, which is where `portals.wgsl` reads them from.
+/// The pair of mouths as the shaders take them, and which pair of pictures shows what is seen
+/// through them.
 #[derive(ShaderType, Clone, Debug, Default)]
-pub struct MouthsUniform {
+struct MouthsUniform {
     mouths: [MouthUniform; 2],
     shape: Vec4,
     look: Vec4,
     about: Vec4,
+    pictures: Vec4,
+}
+
+/// The mouths as each vantage has them, told afresh every frame. A material drawn for a vantage
+/// that draws them holds its buffer at binding 11, where `portals.wgsl` reads them from, and
+/// the pictures at 12, 13, 16 and 17 as `Pictures::held` gives them.
+#[derive(Resource)]
+pub struct Mouths([Handle<ShaderBuffer>; VANTAGES]);
+
+impl Mouths {
+    pub fn seen_from(&self, vantage: usize) -> Handle<ShaderBuffer> {
+        self.0[vantage].clone()
+    }
+}
+
+impl FromWorld for Mouths {
+    fn from_world(world: &mut World) -> Self {
+        let mut buffers = world.resource_mut::<Assets<ShaderBuffer>>();
+        Mouths(
+            [(); VANTAGES].map(|()| buffers.add(ShaderBuffer::uniform(&MouthsUniform::default()))),
+        )
+    }
+}
+
+fn tell_mouths(
+    sim: Res<Simulation>,
+    vantages: Res<Vantages>,
+    pictures: Res<Pictures>,
+    mouths: Res<Mouths>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
+) {
+    for (k, vantage) in vantages.0.iter().enumerate() {
+        if let Some(vantage) = vantage
+            && let Some(mut buffer) = buffers.get_mut(&mouths.0[k])
+        {
+            let mut told = MouthsUniform::of(&sim.drum, vantage, pictures.found_from(k), sim.time);
+            told.pictures.x = pictures.read_from(k) as f32;
+            buffer.tell(&told);
+        }
+    }
 }
 
 impl MouthsUniform {
     /// The drum's mouths as they lie about a vantage at a time.
-    pub fn of(drum: &Drum, vantage: &Vantage, found: [Mat4; 2], time: Seconds) -> MouthsUniform {
+    fn of(drum: &Drum, vantage: &Vantage, found: [Mat4; 2], time: Seconds) -> MouthsUniform {
         let mouths = [
             (MouthColour::Blue, found[0]),
             (MouthColour::Orange, found[1]),
@@ -115,6 +158,7 @@ impl MouthsUniform {
                 let [x, y, z] = vantage.viewpoint.origin;
                 Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0)
             },
+            pictures: Vec4::ZERO,
         }
     }
 }
@@ -128,7 +172,12 @@ impl Plugin for PortalPlugin {
             echoes::EchoPlugin,
             lights::RimLightPlugin,
             solids::SolidsPlugin,
-        ));
+        ))
+        .init_resource::<Mouths>()
+        .add_systems(
+            Update,
+            tell_mouths.after(SettleVantages).in_set(SimSet::Observe),
+        );
     }
 }
 

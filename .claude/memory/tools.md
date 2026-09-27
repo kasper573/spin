@@ -12,29 +12,41 @@ consts after. To debug the sheet, temporarily print the `held` rows.
 
 ## Nsight Systems
 
-No root needed (`kernel.perf_event_paranoid=1`, `kptr_restrict=0` set by the human). Binary:
+No root needed for GPU traces. CPU sampling needs `kernel.perf_event_paranoid=1` and
+`kptr_restrict=0`, which the human once set but which read 4 after a reboot. Binary:
 `~/.local/opt/nsight-systems/opt/nvidia/nsight-systems/2026.3.2/target-linux-x64/nsys`.
 
 - GPU: from `game/`: `nsys profile --trace=vulkan --sample=none --cpuctxsw=none -o <out> <test
-  binary> --ignored --test-threads=1 <scene>`, then `nsys stats --force-export=true` → sqlite:
-  `VULKAN_WORKLOAD` = true GPU time per command buffer. wgpu labels don't reach it: attribute by
-  order within a frame (water-column cameras, portal eyes, player).
-- CPU: build with `RUSTFLAGS="-C force-frame-pointers=yes" CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`,
+  binary> --ignored --test-threads=1 <scene>`, then `nsys export --type sqlite`: `VULKAN_WORKLOAD`
+  = true GPU time per command buffer, mapped to its `vkQueueSubmit` by `correlationId`.
+- GPU time per pass: run with `WGPU_DEBUG=1` (the headless device takes wgpu's flags from the
+  environment) and `--trace=vulkan,vulkan-annotations`: `VULKAN_WORKLOAD` rows named
+  `vkCmdBeginDebugUtilsLabelEXT` then carry each labelled pass's GPU time in `textId`
+  (`main_transmissive_pass_3d`, `sheet`, `shadow_directional_light_0_cascade_N`, …). The
+  transmission snapshots' texture copies sit outside the labels. Bevy's own pass timers miss
+  about half of a view's GPU time: use these.
+- Under nsys every pipeline compiles cold (~25 s in all, the driver's shader cache is not used),
+  so a trace's first seconds say nothing about hitches in the gate.
+- CPU spans without sampling: a `tracing` layer set as `LogPlugin.custom_layer` in
+  `build_headless`, built with `--features bevy/trace,bevy/debug`, summing each span's time by
+  thread.
+- CPU sampling: build with `RUSTFLAGS="-C force-frame-pointers=yes" CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`,
   run with `DEBUGINFOD_URLS=` empty (otherwise it hangs), `--trace=none --sample=process-tree
   --backtrace=fp`, `nsys export --type sqlite`, aggregate `SAMPLING_CALLCHAINS` x
   `COMPOSITE_EVENTS` in python under `testing::frame`. Systems are inlined into `FnMut::call_mut`:
   name them by reading Bevy's source for the callee.
-- `bevy/trace_chrome` works but writes ~15 GB per scene. Bevy's pass timers miss about half of a
-  view's GPU time.
+- `bevy/trace_chrome` works but writes ~15 GB per scene.
 - Web-research subagents have reported wrong claims: treat them as leads only.
 
-## Where frame time goes (portals, 4.6 views/frame)
+## Where frame time goes
 
-The CPU issuing work (~15 ms) is the wall, not the GPU (~12 ms). Bevy 0.19 per view: an encoder
-per render system (13.7%), submit 9.6%, material re-prepare 7.7% (water/lying/jet/spray materials
-are `get_mut`-ed per vantage each frame in `water.rs show`), bind groups 6.4%. Each water-column
-camera ~1 ms CPU, each eye ~4 ms. The water meshes' fixed 2.75M-vertex draws cost nothing
-measurable. The view count is the lever.
+With pipelined rendering the main thread and the render thread overlap, and `queue_submit` on the
+render thread blocks once the GPU falls behind: a long `queue_submit` means GPU-bound. The portal
+scene is GPU-bound (~24 ms of GPU a frame at 4K): the player's transmissive pass (the water) is
+the largest single pass, then each portal eye's passes. Each see-through item a view draws costs a
+copy of the whole 4K view texture first (Bevy's transmission snapshots), eyes included, though
+they draw only a window of it. wgpu makes a staging buffer per `write_buffer`: ~400
+`vkCreateBuffer` a frame.
 
 ## DLSS (parked)
 

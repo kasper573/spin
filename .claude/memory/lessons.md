@@ -14,6 +14,21 @@
 - A shrinking ring keeps only ground within half its round of the (drifting ghost) eye, by design.
 - What an every-frame jump check still flags after the cures is real: the pour starting (muzzle
   glow) and the eye truly crossing the surface.
+- Bevy never re-prepares a material when an image or buffer it binds is made anew on the GPU (a
+  resize, a new size of data): it binds the old one until the material itself changes. Materials
+  changed every frame hid this; `InPlacePlugin` re-prepares one when a `#[dependency]` of it is
+  made anew. Look at the portal pictures after any change to how materials bind: stale ones
+  showed solid black mouths while every number looked fine.
+- Values a fragment shader reads again and again belong in `var<uniform>`: moving the water's
+  from uniform to `var<storage, read>` took its pass from 7.8 to 17.5 ms on the RTX 3090.
+- The first run after a shader change compiles its pipelines cold, mid-scene (a flood frame run
+  of 879 ms): run a scene again before calling its worst frames a regression. The first-play
+  hitch itself is a real defect of synchronous pipeline compilation.
+- The same build does not play a random scene the same way twice: random_8 parted from itself
+  about 10 s in (the eye under water in one run, above it in another), so pixel diffs of a scene
+  compare different games from where it parts. Find where first, then compare only before it.
+- The gate's settle and capture frames between timed runs still draw (without the player's view)
+  and their GPU work can queue behind; the gate waits for the GPU before each timed run.
 
 ## Tried and refuted (don't retry without new evidence)
 

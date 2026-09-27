@@ -3,22 +3,22 @@
 //! of. A material holds the mouths as the vantage it is drawn for has them, so whatever is
 //! echoed for another vantage is drawn in a copy of its material made for that one.
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
-use bevy::platform::collections::HashMap;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
-use crate::core::units::Seconds;
-use crate::systems::portal::MouthsUniform;
-use crate::systems::scene::{SettleVantages, VANTAGES, Vantages};
-use crate::systems::sim::Simulation;
+use crate::core::in_place::{InPlace, InPlaceUniforms};
+use crate::systems::portal::Mouths;
+use crate::systems::scene::VANTAGES;
 
-pub type SolidMaterial = ExtendedMaterial<StandardMaterial, LitThroughPortals>;
+pub type SolidMaterial = ExtendedMaterial<StandardMaterial, InPlace<LitThroughPortals>>;
 
 pub fn solid(base: StandardMaterial) -> SolidMaterial {
     SolidMaterial {
         base,
-        extension: LitThroughPortals::default(),
+        extension: InPlace::default(),
     }
 }
 
@@ -27,16 +27,24 @@ pub fn solid(base: StandardMaterial) -> SolidMaterial {
 /// the pictures are left out.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 pub struct LitThroughPortals {
-    #[uniform(100)]
-    mouths: MouthsUniform,
+    #[storage(100, read_only)]
+    mouths: Handle<ShaderBuffer>,
     #[texture(101)]
     #[sampler(103)]
     through_blue: Option<Handle<Image>>,
     #[texture(102)]
     through_orange: Option<Handle<Image>>,
+    #[texture(104)]
+    through_blue_other: Option<Handle<Image>>,
+    #[texture(105)]
+    through_orange_other: Option<Handle<Image>>,
 }
 
-impl MaterialExtension for LitThroughPortals {
+impl InPlaceUniforms for LitThroughPortals {
+    const UNIFORMS: &'static [u32] = &[100];
+}
+
+impl MaterialExtension for InPlace<LitThroughPortals> {
     fn fragment_shader() -> ShaderRef {
         "embedded://game/systems/shaders/solid.wgsl".into()
     }
@@ -60,12 +68,7 @@ impl Plugin for SolidsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SolidMaterial>::default())
             .init_resource::<SolidCopies>()
-            .add_systems(
-                Update,
-                light
-                    .after(SettleVantages)
-                    .in_set(crate::systems::sim::SimSet::Observe),
-            );
+            .add_systems(PostUpdate, light);
     }
 }
 
@@ -73,7 +76,6 @@ impl Plugin for SolidsPlugin {
 #[derive(Resource, Default)]
 pub struct SolidCopies {
     of: HashMap<AssetId<SolidMaterial>, [Handle<SolidMaterial>; VANTAGES - 1]>,
-    lit: bool,
 }
 
 impl SolidCopies {
@@ -93,47 +95,56 @@ impl SolidCopies {
         });
         copies[vantage - 1].clone()
     }
+
+    fn is_copy(&self, id: AssetId<SolidMaterial>) -> bool {
+        self.of.values().flatten().any(|copy| copy.id() == id)
+    }
 }
 
-/// Keep every solid material's copies like it, and while a pair of portals is open, tell each
-/// the mouths as its vantage has them.
+/// Give every solid material the mouths of the vantage it is drawn for, and make its copies
+/// anew whenever it changes.
 fn light(
-    sim: Res<Simulation>,
-    vantages: Res<Vantages>,
-    mut copies: ResMut<SolidCopies>,
+    mouths: Res<Mouths>,
+    copies: Res<SolidCopies>,
+    mut changes: MessageReader<AssetEvent<SolidMaterial>>,
     mut materials: ResMut<Assets<SolidMaterial>>,
 ) {
-    let open = sim.drum.mouths.passable() > 0.0;
-    let mouths: [Option<MouthsUniform>; VANTAGES] = std::array::from_fn(|k| {
-        let vantage = vantages.0[k].as_ref()?;
-        (open || copies.lit)
-            .then(|| MouthsUniform::of(&sim.drum, vantage, [Mat4::ZERO; 2], Seconds(0.0)))
-    });
-    copies.lit = open;
-    let originals: Vec<_> = materials
-        .ids()
-        .filter(|id| !copies.of.values().flatten().any(|copy| copy.id() == *id))
+    let changed: HashSet<AssetId<SolidMaterial>> = changes
+        .read()
+        .filter_map(|change| match change {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
+            _ => None,
+        })
         .collect();
+    let originals: Vec<_> = materials.ids().filter(|id| !copies.is_copy(*id)).collect();
     for id in originals {
-        let Some(original) = materials.get(id).cloned() else {
-            continue;
-        };
-        if let Some(mouths) = &mouths[0]
-            && let Some(mut material) = materials.get_mut(id)
-        {
-            material.extension.mouths = mouths.clone();
-        }
+        hold_mouths(&mut materials, id, mouths.seen_from(0));
         let Some(made) = copies.of.get(&id) else {
             continue;
         };
+        let base = changed
+            .contains(&id)
+            .then(|| materials.get(id).map(|original| original.base.clone()))
+            .flatten();
         for (k, copy) in made.iter().enumerate() {
-            let Some(mut material) = materials.get_mut(copy) else {
-                continue;
-            };
-            material.base = original.base.clone();
-            if let Some(mouths) = &mouths[k + 1] {
-                material.extension.mouths = mouths.clone();
+            if let Some(base) = &base
+                && let Some(mut material) = materials.get_mut(copy)
+            {
+                material.base = base.clone();
             }
+            hold_mouths(&mut materials, copy.id(), mouths.seen_from(k + 1));
         }
+    }
+}
+
+fn hold_mouths(
+    materials: &mut Assets<SolidMaterial>,
+    id: AssetId<SolidMaterial>,
+    mouths: Handle<ShaderBuffer>,
+) {
+    if let Some(mut material) = materials.get_mut(id)
+        && material.extension.mouths != mouths
+    {
+        material.extension.mouths = mouths;
     }
 }

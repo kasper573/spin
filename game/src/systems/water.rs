@@ -25,14 +25,15 @@ use crate::core::fluid::{Fluid, Resolution};
 use crate::core::fluid::{
     FluidBuffers, GRID_REACH, MAX_DROPLETS, MAX_INDICES, MAX_MOTES, surface_cell,
 };
+use crate::core::in_place::{InPlace, InPlacePlugin, InPlaceUniforms, Tell};
 use crate::core::math::quat_conjugate;
 use crate::core::sheet::{SHEET_JET_INDICES, Sheet, SheetBuffers};
 use crate::core::vessel::Vessel;
 use crate::systems::air::{Air, AirUniform};
 use crate::systems::drum::bed_albedo;
-use crate::systems::figure::{Figure, FigureGathered, FigureUniform};
+use crate::systems::figure::Figures;
 use crate::systems::player::PlayerCamera;
-use crate::systems::portal::{MouthsUniform, Pictures};
+use crate::systems::portal::{Mouths, Pictures};
 use crate::systems::scene::{
     self, SPACE, SeenFrom, SettleVantages, Sky, VANTAGES, Vantage, Vantages,
 };
@@ -65,8 +66,8 @@ pub struct WaterPlugin;
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            MaterialPlugin::<WaterMaterial>::default(),
-            MaterialPlugin::<SprayMaterial>::default(),
+            InPlacePlugin::<WaterMaterial>::default(),
+            InPlacePlugin::<SprayMaterial>::default(),
             WaterColumnPlugin,
         ))
         .add_systems(Startup, spawn.after(MakeWaterColumns))
@@ -80,8 +81,7 @@ impl Plugin for WaterPlugin {
                 submerge,
             )
                 .in_set(SimSet::Observe),
-        )
-        .add_systems(PostUpdate, mirror.after(FigureGathered));
+        );
     }
 }
 
@@ -116,8 +116,11 @@ struct WaterUniform {
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct WaterMaterial {
-    #[uniform(0)]
-    water: WaterUniform,
+    /// What the water is like and where it is drawn, as a `WaterUniform` told afresh every
+    /// frame.
+    #[storage(0, read_only)]
+    #[dependency]
+    water: Handle<ShaderBuffer>,
     /// Where the water is drawn among what else lets the scene through: the glass and the
     /// water each show what was drawn before them, so what lies beyond the other must be
     /// drawn first: the water when the eye is outside the drum, the glass when it is inside.
@@ -125,31 +128,50 @@ struct WaterMaterial {
     /// it last.
     order: f32,
     #[storage(1, read_only)]
+    #[dependency]
     vertices: Handle<ShaderBuffer>,
     #[storage(2, read_only)]
+    #[dependency]
     indices: Handle<ShaderBuffer>,
     #[storage(3, read_only)]
+    #[dependency]
     counters: Handle<ShaderBuffer>,
     #[storage(4, read_only)]
+    #[dependency]
     droplets: Handle<ShaderBuffer>,
     /// The viewer's own figure, for the water to mirror; see `systems/figure.rs`.
-    #[uniform(10)]
-    figure: FigureUniform,
-    /// The portals, for the water to mirror; see `systems/portal`.
-    #[uniform(11)]
-    mouths: MouthsUniform,
-    /// What is seen through each portal, for where it is open.
+    #[storage(10, read_only)]
+    #[dependency]
+    figure: Handle<ShaderBuffer>,
+    /// The portals, for the water to mirror, and what is seen through them; see
+    /// `systems/portal`.
+    #[storage(11, read_only)]
+    #[dependency]
+    mouths: Handle<ShaderBuffer>,
     #[texture(12)]
     #[sampler(14)]
-    through_blue: Option<Handle<Image>>,
+    #[dependency]
+    through_blue: Handle<Image>,
     #[texture(13)]
-    through_orange: Option<Handle<Image>>,
+    #[dependency]
+    through_orange: Handle<Image>,
+    #[texture(16)]
+    #[dependency]
+    through_blue_other: Handle<Image>,
+    #[texture(17)]
+    #[dependency]
+    through_orange_other: Handle<Image>,
     /// How much water each line of sight crosses; see `water_column.rs`.
     #[texture(15)]
+    #[dependency]
     columns: Handle<Image>,
 }
 
-impl Material for WaterMaterial {
+impl InPlaceUniforms for WaterMaterial {
+    const UNIFORMS: &'static [u32] = &[0, 10, 11];
+}
+
+impl Material for InPlace<WaterMaterial> {
     fn vertex_shader() -> ShaderRef {
         SHADER.into()
     }
@@ -185,21 +207,36 @@ impl Material for WaterMaterial {
 /// place among them.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 struct SprayMaterial {
-    #[uniform(0)]
-    water: WaterUniform,
+    #[storage(0, read_only)]
+    #[dependency]
+    water: Handle<ShaderBuffer>,
     order: f32,
     #[storage(1, read_only)]
+    #[dependency]
     motes: Handle<ShaderBuffer>,
-    #[uniform(11)]
-    mouths: MouthsUniform,
+    #[storage(11, read_only)]
+    #[dependency]
+    mouths: Handle<ShaderBuffer>,
     #[texture(12)]
     #[sampler(14)]
-    through_blue: Option<Handle<Image>>,
+    #[dependency]
+    through_blue: Handle<Image>,
     #[texture(13)]
-    through_orange: Option<Handle<Image>>,
+    #[dependency]
+    through_orange: Handle<Image>,
+    #[texture(16)]
+    #[dependency]
+    through_blue_other: Handle<Image>,
+    #[texture(17)]
+    #[dependency]
+    through_orange_other: Handle<Image>,
 }
 
-impl Material for SprayMaterial {
+impl InPlaceUniforms for SprayMaterial {
+    const UNIFORMS: &'static [u32] = &[0, 11];
+}
+
+impl Material for InPlace<SprayMaterial> {
     fn vertex_shader() -> ShaderRef {
         SPRAY_SHADER.into()
     }
@@ -239,17 +276,26 @@ impl Material for SprayMaterial {
 /// The water's material as each vantage sees it, the material of the sheet of it lying on the
 /// floor, and its spray's.
 #[derive(Resource)]
-struct Water([Handle<WaterMaterial>; VANTAGES]);
+struct Water([Handle<InPlace<WaterMaterial>>; VANTAGES]);
 
 #[derive(Resource)]
-struct LyingWater([Handle<WaterMaterial>; VANTAGES]);
+struct LyingWater([Handle<InPlace<WaterMaterial>>; VANTAGES]);
 
 /// The material of the jets of water that has run out of the sheet's drains.
 #[derive(Resource)]
-struct JetWater([Handle<WaterMaterial>; VANTAGES]);
+struct JetWater([Handle<InPlace<WaterMaterial>>; VANTAGES]);
 
 #[derive(Resource)]
-struct Spray([Handle<SprayMaterial>; VANTAGES]);
+struct Spray([Handle<InPlace<SprayMaterial>>; VANTAGES]);
+
+/// What each vantage's water is told every frame, as a `WaterUniform`: the parcels in flight
+/// and their spray, the sheet on the floor, and the jets out of its drains.
+#[derive(Resource)]
+struct Told([[Handle<ShaderBuffer>; 3]; VANTAGES]);
+
+const FLYING: usize = 0;
+const LYING: usize = 1;
+const JETS: usize = 2;
 
 /// The mesh the water is drawn through, turned with the drum.
 #[derive(Component)]
@@ -302,13 +348,16 @@ pub fn water_bounds() -> (Aabb, NoAutoAabb) {
 /// the scene that lets it through.
 const ORDER: f32 = 1.0e6;
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     mut commands: Commands,
     buffers: Res<FluidBuffers>,
     sheet: Res<SheetBuffers>,
+    (mouths, pictures, figures): (Res<Mouths>, Res<Pictures>, Res<Figures>),
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<WaterMaterial>>,
-    mut sprays: ResMut<Assets<SprayMaterial>>,
+    mut materials: ResMut<Assets<InPlace<WaterMaterial>>>,
+    mut sprays: ResMut<Assets<InPlace<SprayMaterial>>>,
+    mut told: ResMut<Assets<ShaderBuffer>>,
     columns: Res<WaterColumns>,
 ) {
     let water = WaterUniform {
@@ -324,20 +373,43 @@ fn spawn(
         scatter: SCATTERING.extend(0.0),
         air: AirUniform::default(),
     };
-    let seen = std::array::from_fn(|vantage| {
-        materials.add(WaterMaterial {
-            water: water.clone(),
+    let told: [[Handle<ShaderBuffer>; 3]; VANTAGES] =
+        [(); VANTAGES].map(|()| [(); 3].map(|()| told.add(ShaderBuffer::uniform(&water))));
+    let [blue, orange, other_blue, other_orange] = pictures.held();
+    let material = |vantage: usize,
+                    kind: usize,
+                    (vertices, indices, counters): (
+        &Handle<ShaderBuffer>,
+        &Handle<ShaderBuffer>,
+        &Handle<ShaderBuffer>,
+    )| {
+        InPlace(WaterMaterial {
+            water: told[vantage][kind].clone(),
             order: ORDER,
-            vertices: buffers.surface.polished.clone(),
-            indices: buffers.surface.indices.clone(),
-            counters: buffers.surface.counters.clone(),
+            vertices: vertices.clone(),
+            indices: indices.clone(),
+            counters: counters.clone(),
             droplets: buffers.surface.droplets.clone(),
-            figure: FigureUniform::default(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
+            figure: if kind == FLYING {
+                figures.seen_from(vantage)
+            } else {
+                figures.none()
+            },
+            mouths: mouths.seen_from(vantage),
+            through_blue: blue.clone(),
+            through_orange: orange.clone(),
+            through_blue_other: other_blue.clone(),
+            through_orange_other: other_orange.clone(),
             columns: columns.seen_from(vantage),
         })
+    };
+    let surface = &buffers.surface;
+    let seen = std::array::from_fn(|vantage| {
+        materials.add(material(
+            vantage,
+            FLYING,
+            (&surface.polished, &surface.indices, &surface.counters),
+        ))
     });
     // the surface's vertices and then the droplets' squares
     let placeholder = meshes.add(numbered_mesh(MAX_INDICES + MAX_DROPLETS * 6));
@@ -357,19 +429,11 @@ fn spawn(
 
     // the sheet has no parcels, and its count of them is always none
     let lying = std::array::from_fn(|vantage| {
-        materials.add(WaterMaterial {
-            water: water.clone(),
-            order: ORDER,
-            vertices: sheet.vertices.clone(),
-            indices: sheet.indices.clone(),
-            counters: sheet.counters.clone(),
-            droplets: buffers.surface.droplets.clone(),
-            figure: FigureUniform::default(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
-            columns: columns.seen_from(vantage),
-        })
+        materials.add(material(
+            vantage,
+            LYING,
+            (&sheet.vertices, &sheet.indices, &sheet.counters),
+        ))
     });
     let yet_to_fit = meshes.add(numbered_mesh(3));
     for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&lying) {
@@ -388,19 +452,11 @@ fn spawn(
     commands.insert_resource(LyingWater(lying));
 
     let jets = std::array::from_fn(|vantage| {
-        materials.add(WaterMaterial {
-            water: water.clone(),
-            order: ORDER,
-            vertices: sheet.jet_vertices.clone(),
-            indices: sheet.jet_indices.clone(),
-            counters: sheet.jet_counters.clone(),
-            droplets: buffers.surface.droplets.clone(),
-            figure: FigureUniform::default(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
-            columns: columns.seen_from(vantage),
-        })
+        materials.add(material(
+            vantage,
+            JETS,
+            (&sheet.jet_vertices, &sheet.jet_indices, &sheet.jet_counters),
+        ))
     });
     let ribbed = meshes.add(numbered_mesh(SHEET_JET_INDICES));
     for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&jets) {
@@ -418,15 +474,17 @@ fn spawn(
     }
     commands.insert_resource(JetWater(jets));
 
-    let spray = [(); VANTAGES].map(|()| {
-        sprays.add(SprayMaterial {
-            water: water.clone(),
+    let spray = std::array::from_fn(|vantage| {
+        sprays.add(InPlace(SprayMaterial {
+            water: told[vantage][FLYING].clone(),
             order: ORDER,
             motes: buffers.surface.motes.clone(),
-            mouths: MouthsUniform::default(),
-            through_blue: None,
-            through_orange: None,
-        })
+            mouths: mouths.seen_from(vantage),
+            through_blue: blue.clone(),
+            through_orange: orange.clone(),
+            through_blue_other: other_blue.clone(),
+            through_orange_other: other_orange.clone(),
+        }))
     });
     let squares = meshes.add(numbered_mesh(MAX_MOTES * 6));
     for (seen, material) in (0..VANTAGES).map(SeenFrom).zip(&spray) {
@@ -442,6 +500,7 @@ fn spawn(
         ));
     }
     commands.insert_resource(Spray(spray));
+    commands.insert_resource(Told(told));
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -449,10 +508,19 @@ fn tick(
     sim: Res<Simulation>,
     fluid: Res<Fluid>,
     vantages: Res<Vantages>,
-    pictures: Res<Pictures>,
     air: Res<Air>,
-    (water, lying, jets, spray): (Res<Water>, Res<LyingWater>, Res<JetWater>, Res<Spray>),
-    (mut materials, mut sprays): (ResMut<Assets<WaterMaterial>>, ResMut<Assets<SprayMaterial>>),
+    (water, lying, jets, spray, told): (
+        Res<Water>,
+        Res<LyingWater>,
+        Res<JetWater>,
+        Res<Spray>,
+        Res<Told>,
+    ),
+    (mut materials, mut sprays, mut buffers): (
+        ResMut<Assets<InPlace<WaterMaterial>>>,
+        ResMut<Assets<InPlace<SprayMaterial>>>,
+        ResMut<Assets<ShaderBuffer>>,
+    ),
     mut meshes: Query<(&SeenFrom, &mut Transform), (With<WaterMesh>, Without<LyingWaterMesh>)>,
     mut lying_meshes: Query<
         (&SeenFrom, &mut Transform),
@@ -482,59 +550,63 @@ fn tick(
         }
     }
     for (k, vantage) in vantages.0.iter().enumerate() {
-        let (Some(vantage), Some(mut material)) = (vantage, materials.get_mut(&water.0[k])) else {
+        let Some(vantage) = vantage else {
             continue;
         };
-        let seen = SeenFrom(k);
-        let rotation = pose(vantage).rotation;
-        material.order = if vantage.enclosed { ORDER } else { -ORDER };
-        material.mouths =
-            MouthsUniform::of(&sim.drum, vantage, pictures.found_from(seen.0), sim.time);
-        [material.through_blue, material.through_orange] = pictures.read_from(seen.0);
-        let uniform = &mut material.water;
-        uniform.air = air.uniform(sim.drum.spin);
-        let stars = vantage.sky.rotation.inverse();
-        uniform.to_stars = Vec4::new(stars.x, stars.y, stars.z, stars.w);
-        uniform.from_water = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);
-        let [x, y, z] = vantage.viewpoint.origin;
-        uniform.origin = Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0);
-        let ring = sim.drum.ring;
-        uniform.ring = Vec4::new(
-            ring.radius.0,
-            ring.half_width.0,
-            if vantage.enclosed { 1.0 } else { 0.0 },
-            0.0,
-        );
-        uniform.units = Vec4::new(metres_per_unit as f32, surface_cell(resolution).0, 0.0, 0.0);
-        uniform.clock = Vec4::new(
-            sim.time.0,
-            (metres_per_unit / resolution.time()) as f32,
-            droplet_radius(resolution) as f32,
-            0.0,
-        );
-        let shared = WaterMaterial::clone(&material);
-        drop(material);
-        // the sheet's water reaches the scene behind it, and a jet's is as thick as it says
-        for (handle, behind) in [(&lying.0[k], 1.0), (&jets.0[k], 2.0)] {
-            if let Some(mut material) = materials.get_mut(handle) {
-                material.order = shared.order;
-                material.mouths = shared.mouths.clone();
-                material.through_blue = shared.through_blue.clone();
-                material.through_orange = shared.through_orange.clone();
-                material.water = WaterUniform {
-                    units: Vec4::new(1.0, 0.0, behind, 0.0),
-                    clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
-                    ..shared.water.clone()
-                };
+        let order = if vantage.enclosed { ORDER } else { -ORDER };
+        for handle in [&water.0[k], &lying.0[k], &jets.0[k]] {
+            if let Some(mut material) = materials.get_mut(handle)
+                && material.order != order
+            {
+                material.order = order;
             }
         }
-        if let Some(mut mist) = sprays.get_mut(&spray.0[k]) {
-            let material = &shared;
-            mist.water = material.water.clone();
-            mist.order = material.order;
-            mist.mouths = material.mouths.clone();
-            mist.through_blue = material.through_blue.clone();
-            mist.through_orange = material.through_orange.clone();
+        if let Some(mut mist) = sprays.get_mut(&spray.0[k])
+            && mist.order != order
+        {
+            mist.order = order;
+        }
+        let rotation = pose(vantage).rotation;
+        let stars = vantage.sky.rotation.inverse();
+        let [x, y, z] = vantage.viewpoint.origin;
+        let ring = sim.drum.ring;
+        let flying = WaterUniform {
+            to_stars: Vec4::new(stars.x, stars.y, stars.z, stars.w),
+            from_water: Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w),
+            origin: Vec4::new(x as f32, (y + vantage.frame.site.y) as f32, z as f32, 0.0),
+            ring: Vec4::new(
+                ring.radius.0,
+                ring.half_width.0,
+                if vantage.enclosed { 1.0 } else { 0.0 },
+                0.0,
+            ),
+            ground: bed_albedo().to_vec4(),
+            background: SPACE.to_linear().to_vec4(),
+            units: Vec4::new(metres_per_unit as f32, surface_cell(resolution).0, 0.0, 0.0),
+            clock: Vec4::new(
+                sim.time.0,
+                (metres_per_unit / resolution.time()) as f32,
+                droplet_radius(resolution) as f32,
+                0.0,
+            ),
+            absorption: ABSORPTION.extend(0.0),
+            scatter: SCATTERING.extend(0.0),
+            air: air.uniform(sim.drum.spin),
+        };
+        // the sheet's water reaches the scene behind it, and a jet's is as thick as it says
+        let on_the_sheet = |behind: f32| WaterUniform {
+            units: Vec4::new(1.0, 0.0, behind, 0.0),
+            clock: Vec4::new(sim.time.0, 1.0, 0.0, 0.0),
+            ..flying.clone()
+        };
+        for (kind, uniform) in [
+            (LYING, on_the_sheet(1.0)),
+            (JETS, on_the_sheet(2.0)),
+            (FLYING, flying.clone()),
+        ] {
+            if let Some(mut buffer) = buffers.get_mut(&told.0[k][kind]) {
+                buffer.tell(&uniform);
+            }
         }
     }
 }
@@ -598,12 +670,6 @@ fn size_lying(
         if *visibility != shown {
             *visibility = shown;
         }
-    }
-}
-
-fn mirror(figure: Res<Figure>, water: Res<Water>, mut materials: ResMut<Assets<WaterMaterial>>) {
-    if let Some(mut material) = materials.get_mut(&water.0[0]) {
-        material.figure = figure.0.clone();
     }
 }
 
