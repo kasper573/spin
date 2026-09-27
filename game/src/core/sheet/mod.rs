@@ -80,7 +80,8 @@ pub struct SheetLie {
 /// cell then and now, and each of the sheet's grains as it is now, round the ring and along
 /// its axis, was one of its grains as it was or none of them. A grain keeps the water it had,
 /// which stands the deeper on it the smaller the grain has become: `spread` is how many times
-/// its area now its area was.
+/// its area now its area was. Water on a grain that is none of the grains now is swept onto
+/// the nearest that is, as a wall closing in sweeps it, so that none of it is lost.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SheetCarried {
     pub grains: [u32; 2],
@@ -398,14 +399,18 @@ impl Sheet {
 }
 
 impl SheetCarried {
-    /// `Carried` in `sheet.wgsl`.
+    /// `Carried` in `sheet.wgsl`: for each of the sheet's grains, the run of its grains as it
+    /// was that it gathers the water of.
     fn packed(&self, was: SheetLie, now: SheetLie) -> Arc<[u32]> {
         assert!(
             self.grains.iter().all(|grains| (1..=SHEET_MOST_GRAINS).contains(grains))
                 && (0..2).all(|axis| self.was[axis].len() == (now.cells[axis] * self.grains[1]) as usize),
             "every grain of the sheet's cells is carried, and a cell has no more than the most"
         );
-        let grain = |was: &Option<u32>| was.map_or(u32::MAX, |was| was);
+        let runs = |axis: usize| {
+            let grains = was.cells[axis] * self.grains[0];
+            swept_runs(&self.was[axis], grains, axis == 0 && was.closed)
+        };
         [
             was.cells[0],
             was.cells[1],
@@ -415,7 +420,7 @@ impl SheetCarried {
             self.was[0].len() as u32,
         ]
         .into_iter()
-        .chain(self.was.iter().flatten().map(grain))
+        .chain(runs(0).into_iter().chain(runs(1)).flatten())
         .collect()
     }
 }
@@ -683,4 +688,44 @@ fn receive_held(
         sheet.held = Litres((cubic_metres * 1000.0) as f32);
         sheet.flying = Litres(rows.last().map_or(0.0, |flying| flying * 1000.0));
     }
+}
+
+/// For each grain as it is now, the first of the grains as they were whose water it gathers and
+/// how many: the one it was, and those next to it that no grain now was and are nearer to it
+/// than to any other that one was, round and round if the grains as they were closed on
+/// themselves. A grain that was none gathers none.
+fn swept_runs(was: &[Option<u32>], grains: u32, closed: bool) -> Vec<[u32; 2]> {
+    let mut kept: Vec<(u32, usize)> = was
+        .iter()
+        .enumerate()
+        .filter_map(|(now, was)| was.map(|was| (was, now)))
+        .collect();
+    kept.sort_unstable();
+    kept.dedup_by_key(|(was, _)| *was);
+    let mut runs = vec![[0, 0]; was.len()];
+    let Some((&(first, _), &(last, _))) = kept.first().zip(kept.last()) else {
+        return runs;
+    };
+    let before_first = if closed {
+        (first + grains - last) / 2
+    } else {
+        first
+    };
+    let after_last = if closed {
+        (first + grains - last - 1) - before_first
+    } else {
+        grains - 1 - last
+    };
+    for (k, &(grain, now)) in kept.iter().enumerate() {
+        let below = match k {
+            0 => before_first,
+            _ => (grain - kept[k - 1].0 - 1) - (grain - kept[k - 1].0 - 1) / 2,
+        };
+        let above = match kept.get(k + 1) {
+            Some(&(next, _)) => (next - grain - 1) / 2,
+            None => after_last,
+        };
+        runs[now] = [(grain + grains - below) % grains, below + 1 + above];
+    }
+    runs
 }

@@ -87,7 +87,7 @@ pub fn create_buffers(assets: &mut Assets<ShaderBuffer>) -> SheetBuffers {
         crossing_along: make(cells * 16),
         clock: make(12 + rows * 4),
         threads: make(16),
-        carried: make((6 + grains) * 4),
+        carried: make((6 + 2 * grains) * 4),
         drained: make(cells * 16),
         hoops: make(HOOPS * (2 * RIM * 16 + 32)),
         flights: make(4 + 2 * DRAINS * 4),

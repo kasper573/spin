@@ -97,8 +97,9 @@ struct Carried {
     spread: f32,
     // how many of `was` are the grains round the ring, which those along it come after
     round: u32,
-    // the grain each of the sheet's grains was, or less than none
-    was: array<i32>,
+    // for each of the sheet's grains, the first grain of the run it gathers the water of, and
+    // how many there are of it
+    was: array<vec2<u32>>,
 }
 @group(0) @binding(13) var<storage, read> carried: Carried;
 
@@ -143,9 +144,12 @@ fn water_of(depth: f32, floor: f32) -> f32 {
     return depth * narrowing(floor + 0.5 * depth);
 }
 
+/// Water heaped over a cell past what reaches the axis, as a wall closing in or a jet coming
+/// down may heap it for a moment, stands no deeper than the axis, and runs off as that does.
 fn depth_of(water: f32, floor: f32) -> f32 {
     let narrow = narrowing(floor);
-    return 2.0 * water / (narrow + sqrt(max(narrow * narrow - 2.0 * water / sheet.radius, 0.0)));
+    let depth = 2.0 * water / (narrow + sqrt(max(narrow * narrow - 2.0 * water / sheet.radius, 0.0)));
+    return min(depth, narrow * sheet.radius);
 }
 
 /// How fast water runs, from its momentum: as that says, but for water too thin to trust.
@@ -395,12 +399,13 @@ fn pour(@builtin(global_invocation_id) id: vec3<u32>) {
 /// The water by the glass's area that a cell's grains along one axis had, of which `first` is
 /// the first, in the cells they were in along that axis and the cell's own along the other.
 fn carried_over(first: u32, cell: vec2<u32>, axis: u32) -> vec4<f32> {
+    let grains = carried.used[axis] * carried.grains.x;
     var had = vec4(0.0);
     for (var grain = 0u; grain < carried.grains.y; grain++) {
-        let was = carried.was[first + grain];
-        if (was >= 0) {
+        let run = carried.was[first + grain];
+        for (var k = 0u; k < run.y; k++) {
             var at = cell;
-            at[axis] = u32(was) / carried.grains.x;
+            at[axis] = (run.x + k) % grains / carried.grains.x;
             had += before[slot(at)];
         }
     }
