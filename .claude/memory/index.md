@@ -21,3 +21,5 @@ Read before the work they cover:
   e2e in headless Chrome
 - [lessons.md](lessons.md) — technical pitfalls, and approaches tried and refuted (so they are not
   tried again blind)
+- [realism.md](realism.md) — how what the game draws is judged real: references at matched scale,
+  checklists, blind judges, and where each kind of water stands; before any visual work

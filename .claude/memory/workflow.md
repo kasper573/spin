@@ -18,6 +18,11 @@ unwatched. Green tests meant nothing about the game the human plays.
 - No hidden state between steps: no long-lived scratch files, worktrees, stashes or background
   jobs. `plan.md` is rewritten, never appended to, and stays short.
 - Report honestly and briefly: what was seen, what is proven, what is not. Bad news first.
+- The human had to ask whether their report of a bad-looking waterfall had been dealt with,
+  while the agent went on committing other work: "You need to make sure you don't tunnel vision
+  and forget about things across compactions". What they report goes into `plan.md` as its
+  first item at once, and every report to them begins with that item's state (the rules of the
+  ledger are in `plan.md`).
 - Test the general case. The fixed gate scenes looked fine while the human, varying water level,
   portal positions and spin, found bugs quickly. Vary parameters (seeded random scenes built from
   the player's own inputs: dials, tools, thrusters) and give each bug found a fixed scene before
