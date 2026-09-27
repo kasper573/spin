@@ -20,10 +20,17 @@ use crate::systems::{
 pub fn build() -> App {
     web::install_script_hooks();
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(web::primary_window()),
-        ..default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(web::primary_window()),
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            }),
+    );
     simulation(&mut app);
     app.add_plugins((ControlsPlugin, PersistencePlugin, TestingPlugin))
         .add_systems(PreUpdate, sync_window);
@@ -43,6 +50,7 @@ pub fn build_headless(render: RenderCreation) -> App {
             })
             .set(RenderPlugin {
                 render_creation: render,
+                synchronous_pipeline_compilation: true,
                 ..default()
             })
             .disable::<WinitPlugin>(),

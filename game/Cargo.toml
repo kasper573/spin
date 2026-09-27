@@ -62,9 +62,10 @@ web-sys = { version = "0.3", features = [
 ] }
 num-complex = "0.4"
 
-# Native-only: the windowing backend the client needs to compile natively, and the lint's parser.
+# Native-only: the windowing backend the client needs to compile natively, systems run side by side
+# and frames rendered while the next is simulated, and the lint's parser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy = { workspace = true, features = ["x11"] }
+bevy = { workspace = true, features = ["x11", "multi_threaded"] }
 cargo_metadata = "0.19"
 syn = { version = "2", features = ["full", "visit"] }
 

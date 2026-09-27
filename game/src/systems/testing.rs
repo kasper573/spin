@@ -1,7 +1,7 @@
 //! Automation hooks: scripts push JSON commands through the platform and read back a status line;
 //! plus the headless app the bench and the tests drive frame by frame.
 use std::ops::{Deref, DerefMut};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -10,7 +10,6 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
 use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
-use bevy::render::RenderApp;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{
     CachedPipelineState, Extent3d, PipelineCache, PollType, TextureDimension, TextureFormat,
@@ -19,6 +18,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, initialize_renderer};
 use bevy::render::settings::{Backends, RenderCreation, RenderResources, WgpuSettings};
 use bevy::render::storage::ShaderBuffer;
+use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::time::TimeSystems;
 use serde::{Deserialize, Serialize};
 
@@ -400,6 +400,11 @@ pub fn headless() -> Headless {
     let mut app = app::build_headless(RenderCreation::Manual(device()));
     app.init_resource::<Step>()
         .add_systems(First, advance_clock.after(TimeSystems));
+    let broken = BrokenShaders::default();
+    app.insert_resource(broken.clone());
+    app.sub_app_mut(RenderApp)
+        .insert_resource(broken)
+        .add_systems(Render, report_broken_shaders.in_set(RenderSystems::Cleanup));
     app.finish();
     app.cleanup();
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
@@ -622,22 +627,39 @@ pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
 /// reads then is a hole in the frame rather than a broken shader, and what a recording keeps
 /// is a black ground nobody asked for.
 fn compiled(app: &App) {
-    let broken: Vec<String> = app
-        .sub_app(RenderApp)
+    let broken = app
         .world()
-        .resource::<PipelineCache>()
-        .pipelines()
-        .filter_map(|pipeline| match &pipeline.state {
-            CachedPipelineState::Err(err) => Some(err.to_string()),
-            _ => None,
-        })
-        .collect();
+        .resource::<BrokenShaders>()
+        .0
+        .lock()
+        .map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |broken| broken.clone(),
+        );
     assert!(
         broken.is_empty(),
         "{} shader(s) did not compile:\n{}",
         broken.len(),
         broken.join("\n")
     );
+}
+
+/// The shaders that did not compile, as the render world, on a thread of its own, last found
+/// them.
+#[derive(Resource, Clone, Default)]
+struct BrokenShaders(Arc<Mutex<Vec<String>>>);
+
+fn report_broken_shaders(cache: Res<PipelineCache>, broken: Res<BrokenShaders>) {
+    let found = cache
+        .pipelines()
+        .filter_map(|pipeline| match &pipeline.state {
+            CachedPipelineState::Err(err) => Some(err.to_string()),
+            _ => None,
+        })
+        .collect();
+    if let Ok(mut broken) = broken.0.lock() {
+        *broken = found;
+    }
 }
 
 /// The water's surface as last extracted: each vertex's position with its foam, read back from

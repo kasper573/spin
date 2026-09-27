@@ -19,7 +19,8 @@ test:
 # as the scenes play the driver is told to prefer the GPU's full performance, the display is kept
 # awake, and the GPU's clocks are kept beside what was measured: a run in which the GPU worked
 # below its full performance state measured the driver's thrift rather than the game, and fails.
-gate: idle
+# Scenes can be named to play only those.
+gate *scenes: idle
     #!/usr/bin/env bash
     powermizer=$(nvidia-settings -t -q '[gpu:0]/GpuPowerMizerMode')
     nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=1' > /dev/null
@@ -28,7 +29,7 @@ gate: idle
     nvidia-smi --query-gpu=pstate,utilization.gpu,clocks.gr --format=csv,noheader,nounits -l 2 \
       > target/playgate-gpu.csv & clocks=$!
     sleep 3
-    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1
+    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1 {{scenes}}
     status=$?
     kill $awake $clocks
     for scene in target/playgate/*/; do
