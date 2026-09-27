@@ -7,6 +7,7 @@
 //!
 //! A mouth seen through a mouth shows the picture of the frame before, since a picture cannot
 //! be drawn into while it is read, so each camera has two pictures and draws into them in turn.
+use bevy::anti_alias::smaa::Smaa;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget, SubCameraView, Viewport};
 use bevy::core_pipeline::prepass::DepthPrepass;
@@ -125,7 +126,8 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 steps: SEEN_THROUGH_LAYERS,
                 ..default()
             },
-            Msaa::Sample4,
+            Msaa::Off,
+            Smaa::default(),
             DepthPrepass,
             ShadowFilteringMethod::Gaussian,
         ));

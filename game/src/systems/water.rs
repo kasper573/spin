@@ -170,11 +170,12 @@ impl Material for WaterMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
         // the rim of a parcel of water covers only a share of a pixel, which its samples show
-        descriptor.multisample.alpha_to_coverage_enabled = true;
+        // where the view has more than one
+        descriptor.multisample.alpha_to_coverage_enabled = key.mesh_key.msaa_samples() > 1;
         Ok(())
     }
 }

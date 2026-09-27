@@ -2,6 +2,7 @@
 //! works in the drum's own frame about a site on its wall, which this moves along under the
 //! viewer: everything near the viewer then has small coordinates however far the wheel
 //! reaches, and the wheel stands still while the sky turns.
+use bevy::anti_alias::smaa::Smaa;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr};
@@ -536,7 +537,8 @@ fn spawn(
             steps: SEEN_THROUGH_LAYERS,
             ..default()
         },
-        Msaa::Sample4,
+        Msaa::Off,
+        Smaa::default(),
         DepthPrepass,
         ShadowFilteringMethod::Gaussian,
         IsDefaultUiCamera,
