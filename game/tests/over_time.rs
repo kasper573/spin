@@ -2,12 +2,15 @@
 //! what happens does not depend on how fast the machine draws it.
 use bevy::prelude::*;
 use game::core::avatar::Thruster;
+use game::core::fluid::Fluid;
 use game::core::math::{Vec3d, quat_rotate};
+use game::core::sheet::Sheet;
 use game::core::units::Seconds;
-use game::systems::drum::{Drum, Ring, Site};
+use game::systems::drum::{CELL, Drum, Ring, Site};
 use game::systems::player::{PilotInput, Player};
 use game::systems::sim::Simulation;
 use game::systems::testing;
+use game::systems::tools::Toolbelt;
 
 /// Frame rates a player's machine may draw at, from a slow one to a fast display's.
 const RATES: [f64; 3] = [60.0, 144.0, 240.0];
@@ -28,6 +31,32 @@ const FAST_DISPLAY: f64 = 240.0;
 /// How much the eye's move from one frame to the next may change, as a share of its mean move,
 /// while walking on: a hitch would show as whole frames without a move.
 const EVEN_MOVE: f64 = 0.25;
+/// A machine too slow for the world to keep up with real time: each of its frames lasts longer
+/// than the few substeps a frame may take.
+const SLOW_MACHINE: f64 = 10.0;
+/// The tools that put something out while held: which slot of the belt each is in, and how much
+/// of what it puts out the world holds.
+const PUTTING_OUT: [Tool; 2] = [
+    Tool {
+        name: "the water tool",
+        slot: 0,
+        amount: water_m3,
+    },
+    Tool {
+        name: "the land tool",
+        slot: 1,
+        amount: ground_m3,
+    },
+];
+/// How long the player looks down at their feet before a tool is worked there.
+const LOOKING_DOWN: f64 = 0.5;
+/// How long a tool is held, in the world's time.
+const HELD: f64 = 2.0;
+/// How long the world is left after a tool is put down for what it put out to be counted.
+const SETTLING: Seconds = Seconds(0.25);
+/// How far what a tool puts out may differ at two frame rates, as a share of it: a frame's worth
+/// of the slow machine's.
+const SAME_AMOUNT: f64 = 0.02;
 
 #[test]
 #[ignore = "wants a GPU"]
@@ -104,6 +133,77 @@ fn a_fast_display_sees_the_eye_move_evenly() {
         uneven < EVEN_MOVE,
         "walking at {FAST_DISPLAY} fps the eye's move changes by {uneven:.3} of its mean from one frame to the next"
     );
+}
+
+#[test]
+#[ignore = "wants a GPU"]
+fn a_tool_puts_out_as_much_at_any_frame_rate() {
+    for tool in PUTTING_OUT {
+        let name = tool.name;
+        let fast = held_at(RATES[0], &tool);
+        let slow = held_at(SLOW_MACHINE, &tool);
+        let off = (slow - fast).abs() / fast.abs().max(1e-9);
+        eprintln!(
+            "{name} held for {HELD} s of the world's time puts out {fast:.4} m3 at {} fps and {slow:.4} m3 at {SLOW_MACHINE} fps",
+            RATES[0]
+        );
+        assert!(
+            fast.abs() > 0.0 && off < SAME_AMOUNT,
+            "{name} held for {HELD} s of the world's time puts out {fast:.4} m3 at {} fps and {slow:.4} m3 at {SLOW_MACHINE} fps",
+            RATES[0]
+        );
+    }
+}
+
+struct Tool {
+    name: &'static str,
+    slot: usize,
+    amount: fn(&App) -> f64,
+}
+
+/// What a tool puts out, held for [`HELD`] of the world's time with frames drawn this many times
+/// a second, after the player has looked down at their feet.
+fn held_at(fps: f64, tool: &Tool) -> f64 {
+    let mut app = testing::headless();
+    testing::watch(&mut app, Seconds(0.5));
+    testing::tap(&mut app, Toolbelt::key(tool.slot));
+    let look_down = [Thruster::PitchDown];
+    for _ in 0..(LOOKING_DOWN * RATES[0]).round() as u32 {
+        let player = *app.world().resource::<Player>();
+        app.world_mut().resource_mut::<Simulation>().avatar_input =
+            player.input(PilotInput::firing(&look_down));
+        testing::frame_as_played(&mut app, Seconds((1.0 / RATES[0]) as f32));
+    }
+    let player = *app.world().resource::<Player>();
+    app.world_mut().resource_mut::<Simulation>().avatar_input =
+        player.input(PilotInput::firing(&[]));
+    let before = (tool.amount)(&app);
+    let start = app.world().resource::<Simulation>().time.0 as f64;
+    testing::button(&mut app, MouseButton::Left, true);
+    while (app.world().resource::<Simulation>().time.0 as f64) - start < HELD - 1e-3 {
+        testing::frame_as_played(&mut app, Seconds((1.0 / fps) as f32));
+    }
+    testing::button(&mut app, MouseButton::Left, false);
+    testing::watch(&mut app, SETTLING);
+    (tool.amount)(&app) - before
+}
+
+fn water_m3(app: &App) -> f64 {
+    let flying = app.world().resource::<Fluid>().litres().0;
+    let lying = app.world().resource::<Sheet>().held().0;
+    (flying + lying) as f64 / 1000.0
+}
+
+/// How much ground stands above the flat ground the ring starts with.
+fn ground_m3(app: &App) -> f64 {
+    let landscape = &app.world().resource::<Simulation>().drum.landscape;
+    let base = landscape.base() as f64;
+    landscape
+        .patches()
+        .filter_map(|(round, along)| landscape.patch(round, along))
+        .flatten()
+        .map(|&height| (height as f64 - base) * CELL * CELL)
+        .sum()
 }
 
 /// Where a flight ended: the eye and the way it looks, in the frame about the site of the wall

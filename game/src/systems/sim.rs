@@ -132,6 +132,7 @@ pub struct Simulation {
     /// Simulated time since the water last stepped.
     water_due: f64,
     queued: f32,
+    stepped: Seconds,
     window: (f32, f32),
     /// Whether the eye is under the water's surface.
     eye_under: bool,
@@ -186,6 +187,7 @@ impl Simulation {
             eye_lag: EyeLag::default(),
             water_due: 0.0,
             queued: 0.0,
+            stepped: Seconds(0.0),
             window: (0.0, 0.0),
             eye_under: false,
         }
@@ -326,7 +328,8 @@ impl Simulation {
             (1.0 - self.accumulator / dt as f64).max(0.0)
         };
         self.window.0 += real.0;
-        self.window.1 += steps as f32 * dt;
+        self.stepped = Seconds(steps as f32 * dt);
+        self.window.1 += self.stepped.0;
         if self.window.0 >= RATE_WINDOW.0 {
             self.rate = (self.window.1 / self.window.0).min(1.0);
             self.window = (0.0, 0.0);
@@ -386,6 +389,12 @@ impl Simulation {
     /// Requested time not yet simulated.
     pub fn queued(&self) -> Seconds {
         Seconds(self.queued)
+    }
+
+    /// How much of the world's time the last frame stepped: what the player's hands work for
+    /// over a frame, so that they do as much in the world's time however fast the machine is.
+    pub fn stepped(&self) -> Seconds {
+        self.stepped
     }
 
     /// Back to the initial ring world of the same size, but the settings, the target spin, the

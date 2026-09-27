@@ -247,7 +247,6 @@ fn operate(
     mut tool: ResMut<LandTool>,
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
-    time: Res<Time>,
     mut aim: ResMut<Aim>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
@@ -268,7 +267,7 @@ fn operate(
     tool.raising = aim.target.is_some() && mouse.pressed(MouseButton::Left);
     tool.lowering = aim.target.is_some() && mouse.pressed(MouseButton::Right);
     let way = f32::from(tool.raising) - f32::from(tool.lowering);
-    let cubic_metres = settings.build.0 / 1000.0 * time.delta_secs() * way;
+    let cubic_metres = settings.build.0 / 1000.0 * sim.stepped().0 * way;
     if let Some(target) = aim.target
         && cubic_metres != 0.0
     {

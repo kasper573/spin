@@ -31,6 +31,13 @@
   is past its size, 1 GB by default: every run of a new build then compiles mid-scene (~400 ms
   where water first shows), however often it is run. Copies of the gate binary for A/B runs fill
   it. The Justfile raises the limit; runs outside it need `__GL_SHADER_DISK_CACHE_SIZE` set too.
+- `Time` in tests advances by the requested simulated time, in the game by wall time, which
+  outruns the world once a frame outlasts the substeps it may take (the web, at ~12 fps, lives
+  40% of real time). Tools poured by `Time::delta` put out 3x per world second there; the gate
+  never showed it. What acts on the world takes `Simulation::stepped`.
+- `resite` must carry everything measured from the site, contact state too: dropping the
+  body's ground made the walking avatar lurch 28% faster for four substeps at every move of the
+  site.
 - The gate's settle and capture frames between timed runs still draw (without the player's view)
   and their GPU work can queue behind; the gate waits for the GPU before each timed run.
 

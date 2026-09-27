@@ -5,6 +5,16 @@
 The frame's origin is the site on the floor; the ring's axis runs through `[-radius, 0, 0]` along
 y. Scripted commands (Pour, Portal, Sculpt) take an absolute phi/y.
 
+## Time (`systems/sim.rs`)
+
+Bodies step by a fixed 1/120 s: a frame takes the whole substeps its real time holds (up to
+`MAX_SUBSTEPS_PER_FRAME`) and carries the rest; past that the world runs slow. `Simulation::eye`
+is drawn between the last two substeps (`EyeLag`), `stepped_eye` is where the bodies are.
+Tests' `request` steps whole substeps and draws as stepped; `testing::frame_as_played` takes the
+game's real-time path. `Simulation::stepped` is the world's time the last frame stepped: what
+anything acting on the world per frame (the tools) works over. `tests/over_time.rs` holds the
+frame-rate contracts (same flight, even eye motion, same tool output at 60/144/240 and 10 fps).
+
 ## The sheet (`core/sheet/`, glue in `systems/drum/sheet.rs`)
 
 Kurganov–Petrova (2007) central-upwind shallow water in the ring's frame, on the landscape's

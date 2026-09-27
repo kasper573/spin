@@ -192,7 +192,6 @@ fn operate(
     mut tool: ResMut<WaterTool>,
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
-    time: Res<Time>,
     aim: Res<Aim>,
     mut settings: ResMut<Settings>,
     mut sim: ResMut<Simulation>,
@@ -209,7 +208,7 @@ fn operate(
         tool.carry = Litres(0.0);
         return;
     };
-    tool.carry.0 += settings.flow.0 * time.delta_secs();
+    tool.carry.0 += settings.flow.0 * sim.stepped().0;
     // a round fall of water thinning to its rim is three times as wide as an even one of the
     // same flow would be: its mean is a third of what falls in its middle
     let even = settings.flow.0 / 1000.0 / FALL_SPEED.0;
