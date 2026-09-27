@@ -15,12 +15,15 @@ test:
 # that passes has only kept its numbers: whether the game looks and plays right is seen on the
 # sheets, which are there to be looked at.
 #
-# The driver holds the GPU at a fraction of its speed while the display sleeps, so the display
-# is kept awake for as long as the scenes play, and the GPU's clocks are kept beside what was
-# measured: a run in which the GPU worked below its full performance state measured the driver's
-# thrift rather than the game, and fails.
+# The driver holds the GPU at a fraction of its speed while the display sleeps, so for as long
+# as the scenes play the driver is told to prefer the GPU's full performance, the display is kept
+# awake, and the GPU's clocks are kept beside what was measured: a run in which the GPU worked
+# below its full performance state measured the driver's thrift rather than the game, and fails.
 gate: idle
     #!/usr/bin/env bash
+    powermizer=$(nvidia-settings -t -q '[gpu:0]/GpuPowerMizerMode')
+    nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=1' > /dev/null
+    trap "nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=$powermizer' > /dev/null" EXIT
     (while true; do xset dpms force on; sleep 20; done) & awake=$!
     nvidia-smi --query-gpu=pstate,utilization.gpu,clocks.gr --format=csv,noheader,nounits -l 2 \
       > target/playgate-gpu.csv & clocks=$!
