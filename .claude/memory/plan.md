@@ -36,7 +36,15 @@ random_7 5.7, big ring 7.5, land 8.2, random_1 8.4, wade 8.6, dials 9.3, random_
    Ihmsen et al. and drawn as soft clouds under and over the surface ("cotton candy"). What every
    judge named, in both: the jet a smooth ribbon to the pool (no lumps, streaks or frayed edges,
    not glassy at the mouth); no crown and no drops where it enters; a calm pool; white as an even
-   static texture or haze. Done when it passes `realism.md` for the plunge, stills and motion.
+   static texture or haze. Hypothesis 2, in progress, parked in `git stash` ("plunge hypothesis
+   2"): a churn field k (turbulent kinetic energy by mass) that landing jets feed and the sheet
+   carries and decays (reads 1–4 m²/s² at the entry, as a real plunge's), heaving the surface in
+   rising and sinking domes, drift with the water. The field and heave hold up; every way of
+   drawing the white from it so far fails by eye before any judge: white discs on the domes read
+   as popcorn, froth laced between the domes as a crisp cellular web (cracked glaze) over a milky
+   haze. Next: keep the field and the heave, draw the white with no regular cell network in it,
+   then judges; its p95 cost (~+0.6 ms at 4K) to be cut before a commit. Done when it passes
+   `realism.md` for the plunge, stills and motion.
 2. random_2 runs 30–44 ms a frame from 18 s on (p95 38): find what it is doing then.
 3. Toward 8.3 ms a frame: GPU per pass per scene with the labelled Nsight trace (tools.md), then
    cut the largest (water's transmissive pass, portal eyes, transmission copies, shadows). DLSS
