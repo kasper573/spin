@@ -32,3 +32,12 @@
 When the human asks for a demo video: record every gate scene (the portal waterfall included; it
 is a requirement), inspect it frame-sheet by frame-sheet, list every defect seen, and only then
 send it. State the frame rate.
+
+Progress videos must show the game's real speed: the human rejected videos built from the gate's
+stepped frames ("Capture at 60fps but run the full 120fps native game. Otherwise I can't see how
+it performs"). Make them with `just live` (tools.md), never from the gate's kept frames.
+
+Never drive the desktop with synthetic input (xdotool, XTest). While the human is away the session
+is locked, and scripted keys once went into the lock screen's password field.
+
+When the human asks for a report, send it at once, before any other work.

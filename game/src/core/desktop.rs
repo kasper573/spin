@@ -1,10 +1,14 @@
 //! The desktop window the native client runs in: it has no page, so there is no canvas to keep
 //! in step with, no storage between runs, nothing to drop the pointer lock and no script hooks.
 use bevy::prelude::*;
+use bevy::window::PresentMode;
 
 pub fn primary_window() -> Window {
     Window {
         title: "Spin-gravity wheel".to_owned(),
+        // drawn as fast as the machine can rather than at the display's pace, each refresh
+        // showing the newest frame whole
+        present_mode: PresentMode::Mailbox,
         ..default()
     }
 }

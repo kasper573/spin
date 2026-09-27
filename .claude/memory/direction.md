@@ -12,6 +12,10 @@ and otherwise act on gravity, mass, light, air and water exactly as physics pred
 
 ## Priorities (the human's decisions, newest first)
 
+- 2026-09-27: the visual fidelity of a still frame is enough ("a still frame at this fidelity
+  without rendering glitches has acceptable levels of visual realism"). Don't raise it further;
+  make it consistent, free of glitches and fast. What remains of realism is realism over time:
+  how things behave and move.
 - Look and physics first; speed stays parked until the game looks and behaves right. Visual
   glitches (white circles, large globules, spikes) outrank frame time.
 - The human was happy with the realism level of the 2026-09-21 demo, apart from specific defects

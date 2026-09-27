@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
+use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::diagnostic::{DiagnosticsStore, FrameCount};
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
@@ -505,6 +507,15 @@ pub fn frame(app: &mut App, seconds: Seconds) {
     watching(app, false);
 }
 
+/// Draw one frame that took this long, as the game itself runs a frame: the simulation makes of
+/// the time what it makes of any frame's, rather than being asked for exactly that much.
+pub fn frame_as_played(app: &mut App, seconds: Seconds) {
+    watching(app, true);
+    app.world_mut().resource_mut::<Step>().0 = seconds;
+    app.update();
+    watching(app, false);
+}
+
 fn advance(app: &mut App, seconds: Seconds) {
     let longest = SUBSTEP_RATE.period().0 * MAX_SUBSTEPS_PER_FRAME as f32;
     let mut left = seconds.0;
@@ -586,6 +597,69 @@ pub fn draw_into(app: &mut App, image: &Handle<Image>) {
 /// Point the player's camera at an offscreen image of this size, for reading frames back.
 pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> {
     app.update();
+    let handle = target_image(app, width, height);
+    draw_into(app, &handle);
+    handle
+}
+
+/// A copy of an image at this size, drawn from it on the GPU every frame after it is: frames
+/// are kept from the copy without reading the whole picture back.
+pub fn scaled_copy(app: &mut App, of: &Handle<Image>, width: u32, height: u32) -> Handle<Image> {
+    let copy = target_image(app, width, height);
+    let seen_by_the_copy_alone = RenderLayers::layer(COPY_LAYER);
+    app.world_mut().spawn((
+        Camera2d,
+        Camera {
+            order: COPY_ORDER,
+            ..default()
+        },
+        RenderTarget::from(copy.clone()),
+        Tonemapping::None,
+        DebandDither::Disabled,
+        seen_by_the_copy_alone.clone(),
+    ));
+    app.world_mut().spawn((
+        Sprite {
+            image: of.clone(),
+            custom_size: Some(Vec2::new(width as f32, height as f32)),
+            ..default()
+        },
+        seen_by_the_copy_alone,
+    ));
+    copy
+}
+
+/// Far past any layer the scene draws in, and after every camera that draws the scene.
+const COPY_LAYER: usize = 63;
+const COPY_ORDER: isize = 1;
+
+/// Read an image back as the coming frame draws it, without waiting for it: `receive` is handed
+/// its RGBA bytes, row by row, once the GPU has them, a frame or two later.
+pub fn read_back_later(
+    app: &mut App,
+    image: &Handle<Image>,
+    receive: impl Fn(Vec<u8>) + Send + Sync + 'static,
+) {
+    let width = width_of(app, image);
+    app.world_mut()
+        .spawn((Readback::texture(image.clone()), ReadOnce))
+        .observe(
+            move |mut event: On<ReadbackComplete>, mut commands: Commands| {
+                receive(unpadded(std::mem::take(&mut event.data), width));
+                commands.entity(event.entity).try_despawn();
+            },
+        );
+}
+
+/// Run frames until the image has been rendered and read back: RGBA bytes, row by row, with
+/// the padding the copy aligned each row to taken out.
+pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
+    let padded = read_back(app, Readback::texture(image.clone()));
+    compiled(app);
+    unpadded(padded, width_of(app, image))
+}
+
+fn target_image(app: &mut App, width: u32, height: u32) -> Handle<Image> {
     let mut image = Image::new_fill(
         Extent3d {
             width,
@@ -599,27 +673,27 @@ pub fn render_to_image(app: &mut App, width: u32, height: u32) -> Handle<Image> 
     );
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
-    let handle = app.world_mut().resource_mut::<Assets<Image>>().add(image);
-    draw_into(app, &handle);
-    handle
+    app.world_mut().resource_mut::<Assets<Image>>().add(image)
 }
 
-/// Run frames until the image has been rendered and read back: RGBA bytes, row by row, with
-/// the padding the copy aligned each row to taken out.
-pub fn capture(app: &mut App, image: &Handle<Image>) -> Vec<u8> {
-    let padded = read_back(app, Readback::texture(image.clone()));
-    compiled(app);
-    let width = app
-        .world()
+fn width_of(app: &App, image: &Handle<Image>) -> usize {
+    app.world()
         .resource::<Assets<Image>>()
         .get(image)
-        .map_or(0, |image| image.width() as usize);
+        .map_or(0, |image| image.width() as usize)
+}
+
+fn unpadded(padded: Vec<u8>, width: usize) -> Vec<u8> {
     let row = width * 4;
     let stride = row.div_ceil(ROW_ALIGNMENT) * ROW_ALIGNMENT;
-    padded
-        .chunks(stride)
-        .flat_map(|line| line[..row.min(line.len())].iter().copied())
-        .collect()
+    if stride == row {
+        return padded;
+    }
+    let mut rows = Vec::with_capacity(padded.len() / stride * row);
+    for line in padded.chunks(stride) {
+        rows.extend_from_slice(&line[..row.min(line.len())]);
+    }
+    rows
 }
 
 /// Every shader the frame wanted came out of the compiler. One that does not is logged and

@@ -10,6 +10,18 @@ workflow.md). Make its sheet with the ffmpeg line in the Justfile. To find frame
 keep every frame (temporarily set `KEPT_EVERY`, at 1080p) and diff consecutive frames; restore the
 consts after. To debug the sheet, temporarily print the `held` rows.
 
+## Live scenes (`just live`)
+
+`just live [scenes]` plays the gate's scenes (`live::` tests in `play_gate.rs`) in real time:
+each frame hands the game the wall time the last took, as the native client does
+(`testing::frame_as_played`, not `request`, whose whole 1/120 s steps run faster than real time
+above 120 fps), drawn at 4K as fast as the GPU goes, with a
+1080p copy read back every 1/60 s and piped to ffmpeg. It writes `target/playlive/<scene>.mp4` and
+`<scene>.txt` (frame ms, fps and worst ms by the second). Needs no display, so it works with the
+screen locked or asleep. The capture costs ~0.6 ms a frame (mound 3.6 ms without, 4.2 with). The
+same scenes play out differently live than stepped: frame times change what the avatar does.
+There is no 4K monitor on this machine (three 2560x1440 at 60 Hz).
+
 ## Nsight Systems
 
 No root needed for GPU traces. CPU sampling needs `kernel.perf_event_paranoid=1` and

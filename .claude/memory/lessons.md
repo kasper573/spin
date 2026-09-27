@@ -27,6 +27,10 @@
 - The same build does not play a random scene the same way twice: random_8 parted from itself
   about 10 s in (the eye under water in one run, above it in another), so pixel diffs of a scene
   compare different games from where it parts. Find where first, then compare only before it.
+- The NVIDIA driver's shader cache (`~/.cache/nvidia/GLCache`) stops keeping new shaders once it
+  is past its size, 1 GB by default: every run of a new build then compiles mid-scene (~400 ms
+  where water first shows), however often it is run. Copies of the gate binary for A/B runs fill
+  it. The Justfile raises the limit; runs outside it need `__GL_SHADER_DISK_CACHE_SIZE` set too.
 - The gate's settle and capture frames between timed runs still draw (without the player's view)
   and their GPU work can queue behind; the gate waits for the GPU before each timed run.
 

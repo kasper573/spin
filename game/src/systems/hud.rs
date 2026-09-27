@@ -205,7 +205,12 @@ fn hud_text(
     rate: FrameRate,
 ) -> String {
     if !settings.help {
-        return format!("{} help", Toggle::Help.key_label());
+        return format!(
+            "{} help | {:.0} fps, worst {:.0} ms",
+            Toggle::Help.key_label(),
+            rate.fps,
+            rate.worst.0 * 1000.0
+        );
     }
     let mut out = String::from("SPIN GRAVITY WHEEL\n");
     out.push_str(if engaged {

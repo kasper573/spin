@@ -3,7 +3,11 @@
 //! player would hold it to. Each scene leaves the frames it drew and what it measured in
 //! `target/playgate/<scene>/`, for whoever changed the game to look at before saying it works.
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore};
@@ -144,49 +148,46 @@ struct Measured {
     cpu_ms: Vec<(String, f64, f64)>,
 }
 
-fn play(scene: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Measured {
-    play_in(scene, DEFAULT_RING, seat, litres_per_second, stretches)
-}
-
-/// Play a scene in a ring the player has dialled to this size, and spun and equalized for it.
-fn play_in(
-    scene: &str,
+/// A scene as a player plays it: what they do, from where, in a ring of what size, with the
+/// water tool set to pour so much.
+struct Scene {
+    name: String,
     ring: Ring,
     seat: Seat,
     litres_per_second: f32,
-    stretches: &[Stretch],
-) -> Measured {
-    let out = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/playgate")).join(scene);
+    stretches: Vec<Stretch>,
+}
+
+impl Scene {
+    fn new(name: &str, seat: Seat, litres_per_second: f32, stretches: &[Stretch]) -> Scene {
+        Scene {
+            name: name.to_owned(),
+            ring: DEFAULT_RING,
+            seat,
+            litres_per_second,
+            stretches: stretches.to_vec(),
+        }
+    }
+
+    /// The scene played in a ring the player has dialled to this size, and spun and equalized
+    /// for it.
+    fn in_ring(self, ring: Ring) -> Scene {
+        Scene { ring, ..self }
+    }
+}
+
+/// Play a scene a frame of simulated time at a time, measuring what the frames cost and keeping
+/// every tenth.
+fn play(scene: &Scene) -> Measured {
+    let out =
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/playgate")).join(&scene.name);
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).expect("create the scene's folder");
-    fs::write(out.join("plan.txt"), plan(stretches)).expect("write what the scene plays");
+    fs::write(out.join("plan.txt"), plan(&scene.stretches)).expect("write what the scene plays");
     let mut app = testing::headless();
     let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
     let empty_ring_ms = empty_ring_ms(&mut app);
-    Dial::Flow.set(
-        &mut app.world_mut().resource_mut::<Settings>(),
-        litres_per_second,
-    );
-    if seat == Seat::OutsideTheCap {
-        app.world_mut().resource_mut::<Settings>().collisions = false;
-    }
-    if ring != DEFAULT_RING {
-        let mut settings = app.world_mut().resource_mut::<Settings>();
-        Dial::Diameter.set(&mut settings, ring.radius.0 * 2.0);
-        Dial::Width.set(&mut settings, ring.half_width.0 * 2.0);
-        Dial::Spin.set(&mut settings, standing_spin(ring).0);
-        settings.equalize_thrust();
-    }
-    testing::watch(&mut app, Seconds(0.5));
-    if seat == Seat::OutsideTheCap {
-        let (up, along) = (
-            DEFAULT_RING.radius.0 as f64,
-            DEFAULT_RING.half_width.0 as f64,
-        );
-        let mut player = *app.world().resource::<Player>();
-        let mut sim = app.world_mut().resource_mut::<Simulation>();
-        player.teleport(&mut sim, [2.0 - up, along + 12.0, 3.0], [-up, along, 0.0]);
-    }
+    set_up(&mut app, scene);
 
     let mut measured = Measured {
         empty_ring_ms,
@@ -202,40 +203,14 @@ fn play_in(
         gpu_ms: Vec::new(),
         cpu_ms: Vec::new(),
     };
-    let mut tool = None;
-    let mut button = None;
+    let mut hands = Hands::default();
     let mut frame = 0u32;
     let mut started = Instant::now();
-    for stretch in stretches {
-        if (button != stretch.button || tool != Some(stretch.tool))
-            && let Some(held) = button.take()
-        {
-            testing::button(&mut app, held, false);
-        }
-        if tool != Some(stretch.tool) {
-            testing::tap(&mut app, Toolbelt::key(stretch.tool));
-            tool = Some(stretch.tool);
-        }
-        if button != stretch.button {
-            if let Some(pressed) = stretch.button {
-                testing::button(&mut app, pressed, true);
-            }
-            button = stretch.button;
-        }
-        if let Some((dial, to)) = stretch.dial {
-            dial.set(&mut app.world_mut().resource_mut::<Settings>(), to);
-        }
+    for stretch in &scene.stretches {
+        hands.take_up(&mut app, stretch);
         let pouring = stretch.tool == WATER_TOOL && stretch.button == Some(MouseButton::Left);
-        let held: Vec<Thruster> = stretch
-            .pilot
-            .iter()
-            .chain(&stretch.held_too)
-            .copied()
-            .collect();
         for _ in 0..(stretch.seconds * FPS as f32).round() as u32 {
-            let player = *app.world().resource::<Player>();
-            app.world_mut().resource_mut::<Simulation>().avatar_input =
-                player.input(PilotInput::firing(&held));
+            fly(&mut app, stretch);
             if frame.is_multiple_of(KEPT_EVERY) {
                 // what the frames run to settle the water and capture the picture is no frame
                 // the game plays, and whatever of it the GPU has yet to do is not theirs
@@ -264,9 +239,219 @@ fn play_in(
     }
     measured.gpu_ms = passes(&app, "elapsed_gpu");
     measured.cpu_ms = passes(&app, "elapsed_cpu");
-    fs::write(out.join("measured.txt"), measured.report(scene)).expect("write what was measured");
-    eprintln!("{}", measured.report(scene));
+    fs::write(out.join("measured.txt"), measured.report(&scene.name))
+        .expect("write what was measured");
+    eprintln!("{}", measured.report(&scene.name));
     measured
+}
+
+/// A live scene is kept as a video of this many frames a second, this large.
+const VIDEO_FPS: f64 = 60.0;
+const VIDEO_WIDTH: u32 = 1920;
+const VIDEO_HEIGHT: u32 = 1080;
+/// How many frames the last pictures kept of a live scene are given to come back from the GPU.
+const DRAINING_FRAMES: u32 = 10;
+
+/// Play a scene as the game runs it: each frame simulates the time the one before it took, and
+/// begins as soon as that one has, as fast as the machine goes. What is on screen is kept every
+/// sixtieth of a second, a picture being kept again for every sixtieth it stood, so that the
+/// video runs as the scene ran and a slow frame shows as the stall it was.
+fn play_live(scene: &Scene) {
+    let out = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/playlive"));
+    fs::create_dir_all(&out).expect("create the videos' folder");
+    let mut app = testing::headless();
+    let image = testing::render_to_image(&mut app, WIDTH, HEIGHT);
+    let kept = testing::scaled_copy(&mut app, &image, VIDEO_WIDTH, VIDEO_HEIGHT);
+    set_up(&mut app, scene);
+    let video = Video::start(&out.join(format!("{}.mp4", scene.name)));
+    let mut frame_ms = Vec::new();
+    let mut hands = Hands::default();
+    let mut ends = 0.0;
+    let mut kept_to = 0;
+    let started = Instant::now();
+    let mut last = started;
+    for stretch in &scene.stretches {
+        hands.take_up(&mut app, stretch);
+        ends += stretch.seconds as f64;
+        while started.elapsed().as_secs_f64() < ends {
+            fly(&mut app, stretch);
+            let now = Instant::now();
+            let took = now - last;
+            last = now;
+            frame_ms.push(took.as_secs_f64() * 1000.0);
+            testing::frame_as_played(&mut app, Seconds(took.as_secs_f32()));
+            let due = (started.elapsed().as_secs_f64() * VIDEO_FPS) as u32;
+            if due > kept_to {
+                let frames = video.frames.clone();
+                testing::read_back_later(&mut app, &kept, move |pixels| {
+                    let _ = frames.send((due, pixels));
+                });
+                kept_to = due;
+            }
+        }
+    }
+    for _ in 0..DRAINING_FRAMES {
+        app.update();
+    }
+    // the pictures still on their way hold on to the video until the app is gone
+    drop(app);
+    video.finish();
+    let report = live_report(&scene.name, &frame_ms);
+    fs::write(out.join(format!("{}.txt", scene.name)), &report).expect("write how it ran");
+    eprintln!("{report}");
+}
+
+/// A video of a live scene, made by ffmpeg from the pictures kept, each handed over with the
+/// sixtieth of a second it was kept at.
+struct Video {
+    frames: Sender<(u32, Vec<u8>)>,
+    made: JoinHandle<()>,
+}
+
+impl Video {
+    fn start(path: &Path) -> Video {
+        // the encoder is kept out of the way of the game the video is of
+        let mut ffmpeg = Command::new("nice")
+            .args(["-n", "19", "ffmpeg", "-y", "-loglevel", "error"])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
+            .arg(format!("{VIDEO_WIDTH}x{VIDEO_HEIGHT}"))
+            .args(["-r", &VIDEO_FPS.to_string(), "-i", "-", "-c:v", "libx264"])
+            .args(["-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("run ffmpeg");
+        let mut into = ffmpeg.stdin.take().expect("ffmpeg takes pictures in");
+        let (frames, kept) = mpsc::channel::<(u32, Vec<u8>)>();
+        let made = thread::spawn(move || {
+            let mut shown = 0;
+            let mut on_screen: Option<Vec<u8>> = None;
+            for (due, pixels) in kept {
+                if due <= shown {
+                    continue;
+                }
+                if let Some(stood) = &on_screen {
+                    for _ in shown + 1..due {
+                        into.write_all(stood).expect("hand ffmpeg a picture");
+                    }
+                }
+                into.write_all(&pixels).expect("hand ffmpeg a picture");
+                shown = due;
+                on_screen = Some(pixels);
+            }
+            drop(into);
+            ffmpeg.wait().expect("ffmpeg finishes the video");
+        });
+        Video { frames, made }
+    }
+
+    fn finish(self) {
+        drop(self.frames);
+        self.made.join().expect("the video is made");
+    }
+}
+
+/// How fast a live scene ran: every frame's time, as the player would have had them.
+fn live_report(scene: &str, frame_ms: &[f64]) -> String {
+    let mut sorted = frame_ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |share: f64| sorted[((sorted.len() - 1) as f64 * share) as usize];
+    let (mut rates, mut worsts) = (Vec::new(), Vec::new());
+    let (mut frames, mut passed, mut worst) = (0, 0.0, 0.0f64);
+    for &ms in frame_ms {
+        frames += 1;
+        passed += ms;
+        worst = worst.max(ms);
+        if passed >= 1000.0 {
+            rates.push(format!("{:.0}", frames as f64 * 1000.0 / passed));
+            worsts.push(format!("{worst:.0}"));
+            (frames, passed, worst) = (0, 0.0, 0.0);
+        }
+    }
+    format!(
+        "LIVE {scene}: {} frames in {:.1} s | frame ms p50 {:.1} p95 {:.1} worst {:.1} | fps by the second: {} | worst ms by the second: {}",
+        frame_ms.len(),
+        frame_ms.iter().sum::<f64>() / 1000.0,
+        at(0.5),
+        at(0.95),
+        at(1.0),
+        rates.join(" "),
+        worsts.join(" ")
+    )
+}
+
+/// What the player has in hand: the tool out, and the button of it held.
+#[derive(Default)]
+struct Hands {
+    tool: Option<usize>,
+    button: Option<MouseButton>,
+}
+
+impl Hands {
+    /// Take up what a stretch has the player hold, letting go of what it does not, and turn
+    /// its dial.
+    fn take_up(&mut self, app: &mut App, stretch: &Stretch) {
+        if (self.button != stretch.button || self.tool != Some(stretch.tool))
+            && let Some(held) = self.button.take()
+        {
+            testing::button(app, held, false);
+        }
+        if self.tool != Some(stretch.tool) {
+            testing::tap(app, Toolbelt::key(stretch.tool));
+            self.tool = Some(stretch.tool);
+        }
+        if self.button != stretch.button {
+            if let Some(pressed) = stretch.button {
+                testing::button(app, pressed, true);
+            }
+            self.button = stretch.button;
+        }
+        if let Some((dial, to)) = stretch.dial {
+            dial.set(&mut app.world_mut().resource_mut::<Settings>(), to);
+        }
+    }
+}
+
+/// Fire the thrusters a stretch holds for the coming frame.
+fn fly(app: &mut App, stretch: &Stretch) {
+    let held: Vec<Thruster> = stretch
+        .pilot
+        .iter()
+        .chain(&stretch.held_too)
+        .copied()
+        .collect();
+    let player = *app.world().resource::<Player>();
+    app.world_mut().resource_mut::<Simulation>().avatar_input =
+        player.input(PilotInput::firing(&held));
+}
+
+/// The game as a scene finds it: the water tool's flow set, the ring dialled, the player seated,
+/// and a moment passed for the eye to settle.
+fn set_up(app: &mut App, scene: &Scene) {
+    Dial::Flow.set(
+        &mut app.world_mut().resource_mut::<Settings>(),
+        scene.litres_per_second,
+    );
+    if scene.seat == Seat::OutsideTheCap {
+        app.world_mut().resource_mut::<Settings>().collisions = false;
+    }
+    if scene.ring != DEFAULT_RING {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        Dial::Diameter.set(&mut settings, scene.ring.radius.0 * 2.0);
+        Dial::Width.set(&mut settings, scene.ring.half_width.0 * 2.0);
+        Dial::Spin.set(&mut settings, standing_spin(scene.ring).0);
+        settings.equalize_thrust();
+    }
+    testing::watch(app, Seconds(0.5));
+    if scene.seat == Seat::OutsideTheCap {
+        let (up, along) = (
+            DEFAULT_RING.radius.0 as f64,
+            DEFAULT_RING.half_width.0 as f64,
+        );
+        let mut player = *app.world().resource::<Player>();
+        let mut sim = app.world_mut().resource_mut::<Simulation>();
+        player.teleport(&mut sim, [2.0 - up, along + 12.0, 3.0], [-up, along, 0.0]);
+    }
 }
 
 /// Each stretch of a scene with the second it starts at.
@@ -448,6 +633,12 @@ impl Measured {
         assert!(failures.is_empty(), "{}", failures.join("; "));
     }
 
+    /// The world the scene left is sound, however fast it ran.
+    fn sound(&self) {
+        let failures = self.unsound();
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
+
     /// What is wrong with the world the scene left, however fast it ran.
     fn unsound(&self) -> Vec<String> {
         let last = self.water_m3.last().copied().unwrap_or(0.0);
@@ -479,66 +670,79 @@ impl Measured {
     }
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_trickle_poured_from_the_body() {
-    let scene = [
+/// Every scene, played two ways: by the gate, stepped a frame at a time and measured, and live,
+/// as the game runs it, into a video. The gate holds a scene to its frame budget as well as to
+/// the world staying sound, or to the world staying sound alone.
+macro_rules! scenes {
+    ($($test:ident: $scene:expr, $judged:ident;)*) => {
+        mod gate {
+            use super::*;
+            $(
+                #[test]
+                #[ignore = "wants a GPU"]
+                fn $test() {
+                    play(&$scene).$judged();
+                }
+            )*
+        }
+        mod live {
+            use super::*;
+            $(
+                #[test]
+                #[ignore = "wants a GPU"]
+                fn $test() {
+                    play_live(&$scene);
+                }
+            )*
+        }
+    };
+}
+
+scenes! {
+    a_trickle_poured_from_the_body: poured("trickle", Seat::Body, 5_000.0), hold;
+    a_stream_poured_from_the_body: poured("stream", Seat::Body, 50_000.0), hold;
+    a_flood_poured_from_the_body: poured("flood", Seat::Body, 175_000.0), hold;
+    a_flood_poured_from_outside_the_cap: poured("flood_from_outside", Seat::OutsideTheCap, 175_000.0), hold;
+    a_pool_poured_at_the_feet_and_waded_through: wade(), hold;
+    a_stream_poured_into_a_portal_in_the_ground: portals(), hold;
+    a_pool_falling_through_a_portal_in_its_bed_out_of_one_in_the_cap_over_it: waterfall(), hold;
+    a_portal_pair_opened_in_a_dry_ring: dry_portals(), hold;
+    a_hill_raised_and_a_pit_dug_and_water_poured_between_them: land(), hold;
+    a_mound_raised_at_the_feet_and_the_horizon_looked_at_again: mound(), hold;
+    a_ring_with_water_in_it_widened_and_grown_and_spun_down: dials(), hold;
+    a_flood_poured_in_a_ring_two_kilometres_across: big_ring(), hold;
+    a_scene_played_at_random_1: random(1), sound;
+    a_scene_played_at_random_2: random(2), sound;
+    a_scene_played_at_random_3: random(3), sound;
+    a_scene_played_at_random_4: random(4), sound;
+    a_scene_played_at_random_5: random(5), sound;
+    a_scene_played_at_random_6: random(6), sound;
+    a_scene_played_at_random_7: random(7), sound;
+    a_scene_played_at_random_8: random(8), sound;
+}
+
+/// Water poured straight ahead for a while, and watched as it settles.
+fn poured(name: &str, seat: Seat, litres_per_second: f32) -> Scene {
+    let stretches = [
         Stretch::idle(1.0),
         Stretch::pouring(8.0),
         Stretch::idle(5.0),
     ];
-    play("trickle", Seat::Body, 5_000.0, &scene).hold();
+    Scene::new(name, seat, litres_per_second, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_stream_poured_from_the_body() {
-    let scene = [
-        Stretch::idle(1.0),
-        Stretch::pouring(8.0),
-        Stretch::idle(5.0),
-    ];
-    play("stream", Seat::Body, 50_000.0, &scene).hold();
-}
-
-#[test]
-#[ignore = "wants a GPU"]
-fn a_flood_poured_from_the_body() {
-    let scene = [
-        Stretch::idle(1.0),
-        Stretch::pouring(8.0),
-        Stretch::idle(5.0),
-    ];
-    play("flood", Seat::Body, 175_000.0, &scene).hold();
-}
-
-#[test]
-#[ignore = "wants a GPU"]
-fn a_flood_poured_from_outside_the_cap() {
-    let scene = [
-        Stretch::idle(1.0),
-        Stretch::pouring(8.0),
-        Stretch::idle(5.0),
-    ];
-    play("flood_from_outside", Seat::OutsideTheCap, 175_000.0, &scene).hold();
-}
-
-#[test]
-#[ignore = "wants a GPU"]
-fn a_pool_poured_at_the_feet_and_waded_through() {
-    let scene = [
+fn wade() -> Scene {
+    let stretches = [
         Stretch::flying(1.0, Thruster::PitchDown),
         Stretch::pouring(6.0),
         Stretch::flying(1.0, Thruster::PitchUp),
         Stretch::flying(6.0, Thruster::Forward),
     ];
-    play("wade", Seat::Body, 50_000.0, &scene).hold();
+    Scene::new("wade", Seat::Body, 50_000.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_stream_poured_into_a_portal_in_the_ground() {
-    let scene = [
+fn portals() -> Scene {
+    let stretches = [
         Stretch::flying(0.35, Thruster::PitchDown).with(PORTAL_TOOL),
         Stretch::shooting(MouseButton::Left),
         Stretch::flying(0.7, Thruster::YawLeft).with(PORTAL_TOOL),
@@ -548,14 +752,12 @@ fn a_stream_poured_into_a_portal_in_the_ground() {
         Stretch::flying(0.35, Thruster::YawRight),
         Stretch::idle(4.0),
     ];
-    play("portals", Seat::Body, 50_000.0, &scene).hold();
+    Scene::new("portals", Seat::Body, 50_000.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_pool_falling_through_a_portal_in_its_bed_out_of_one_in_the_cap_over_it() {
+fn waterfall() -> Scene {
     let braced = |stretch: Stretch| stretch.holding(Thruster::Down);
-    let scene = [
+    let stretches = [
         // facing a cap from well back, a small mouth let into the ground ahead and the other
         // into the cap straight over it, a metre clear of where the pool will stand
         Stretch::flying(0.98, Thruster::YawLeft).with(PORTAL_TOOL),
@@ -582,26 +784,22 @@ fn a_pool_falling_through_a_portal_in_its_bed_out_of_one_in_the_cap_over_it() {
         braced(Stretch::flying(0.12, Thruster::PitchUp)),
         braced(Stretch::idle(12.0)),
     ];
-    play("waterfall", Seat::Body, 20_000.0, &scene).hold();
+    Scene::new("waterfall", Seat::Body, 20_000.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_portal_pair_opened_in_a_dry_ring() {
-    let scene = [
+fn dry_portals() -> Scene {
+    let stretches = [
         Stretch::flying(0.35, Thruster::PitchDown).with(PORTAL_TOOL),
         Stretch::shooting(MouseButton::Left),
         Stretch::flying(0.7, Thruster::YawLeft).with(PORTAL_TOOL),
         Stretch::shooting(MouseButton::Right),
         Stretch::idle(4.0),
     ];
-    play("dry_portals", Seat::Body, 0.0, &scene).hold();
+    Scene::new("dry_portals", Seat::Body, 0.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_hill_raised_and_a_pit_dug_and_water_poured_between_them() {
-    let scene = [
+fn land() -> Scene {
+    let stretches = [
         Stretch::flying(0.2, Thruster::PitchDown).with(LAND_TOOL),
         Stretch::sculpting(2.5, MouseButton::Left),
         Stretch::flying(0.5, Thruster::YawLeft).with(LAND_TOOL),
@@ -610,26 +808,22 @@ fn a_hill_raised_and_a_pit_dug_and_water_poured_between_them() {
         Stretch::pouring(6.0),
         Stretch::idle(4.0),
     ];
-    play("land", Seat::Body, 20_000.0, &scene).hold();
+    Scene::new("land", Seat::Body, 20_000.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_mound_raised_at_the_feet_and_the_horizon_looked_at_again() {
-    let scene = [
+fn mound() -> Scene {
+    let stretches = [
         Stretch::idle(1.0).with(LAND_TOOL),
         Stretch::flying(0.5, Thruster::PitchDown).with(LAND_TOOL),
         Stretch::sculpting(1.5, MouseButton::Left),
         Stretch::flying(0.5, Thruster::PitchUp).with(LAND_TOOL),
         Stretch::idle(2.0).with(LAND_TOOL),
     ];
-    play("mound", Seat::Body, 0.0, &scene).hold();
+    Scene::new("mound", Seat::Body, 0.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_ring_with_water_in_it_widened_and_grown_and_spun_down() {
-    let scene = [
+fn dials() -> Scene {
+    let stretches = [
         Stretch::flying(0.3, Thruster::PitchDown).with(LAND_TOOL),
         Stretch::sculpting(3.0, MouseButton::Right),
         Stretch::pouring(3.0),
@@ -638,50 +832,33 @@ fn a_ring_with_water_in_it_widened_and_grown_and_spun_down() {
         Stretch::dialling(4.0, Dial::Diameter, 30.0),
         Stretch::dialling(4.0, Dial::Spin, 0.4),
     ];
-    play("dials", Seat::Body, 5_000.0, &scene).hold();
+    Scene::new("dials", Seat::Body, 5_000.0, &stretches)
 }
 
-#[test]
-#[ignore = "wants a GPU"]
-fn a_flood_poured_in_a_ring_two_kilometres_across() {
-    let ring = Ring {
-        radius: Metres(1000.0),
-        half_width: Metres(100.0),
-    };
-    let scene = [
+fn big_ring() -> Scene {
+    let stretches = [
         Stretch::idle(1.0),
         Stretch::pouring(10.0),
         Stretch::flying(1.0, Thruster::PitchUp),
         Stretch::idle(4.0),
     ];
-    play_in("big_ring", ring, Seat::Body, 999_000.0, &scene).hold();
+    Scene::new("big_ring", Seat::Body, 999_000.0, &stretches).in_ring(Ring {
+        radius: Metres(1000.0),
+        half_width: Metres(100.0),
+    })
 }
 
-/// Scenes no one wrote: a player turning any dial to anything, pouring, digging, raising and
-/// letting portals into whatever is before them, from wherever they have flown to, each drawn
-/// from its seed and then left to settle. What is asked of them is only that the world stays
-/// sound; what they look like is for their sheets to show.
-macro_rules! scenes_played_at_random {
-    ($($name:ident: $seed:expr),* $(,)?) => {$(
-        #[test]
-        #[ignore = "wants a GPU"]
-        fn $name() {
-            let scene = format!("random_{}", $seed);
-            let failures = play(&scene, Seat::Body, 20_000.0, &random_scene($seed)).unsound();
-            assert!(failures.is_empty(), "{}", failures.join("; "));
-        }
-    )*};
-}
-
-scenes_played_at_random! {
-    a_scene_played_at_random_1: 1,
-    a_scene_played_at_random_2: 2,
-    a_scene_played_at_random_3: 3,
-    a_scene_played_at_random_4: 4,
-    a_scene_played_at_random_5: 5,
-    a_scene_played_at_random_6: 6,
-    a_scene_played_at_random_7: 7,
-    a_scene_played_at_random_8: 8,
+/// A scene no one wrote: a player turning any dial to anything, pouring, digging, raising and
+/// letting portals into whatever is before them, from wherever they have flown to, drawn from
+/// its seed and then left to settle. What is asked of it is only that the world stays sound;
+/// what it looks like is for its sheet to show.
+fn random(seed: u64) -> Scene {
+    Scene::new(
+        &format!("random_{seed}"),
+        Seat::Body,
+        20_000.0,
+        &random_scene(seed),
+    )
 }
 
 const RANDOM_SECONDS: f32 = 20.0;

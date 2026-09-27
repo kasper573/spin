@@ -1,5 +1,9 @@
 set shell := ["bash", "-c"]
 
+# The NVIDIA driver keeps compiled shaders only up to its cache's size, 1 GB by default: past that
+# a build compiles every pipeline afresh in every run, mid-scene, and its scenes measure that.
+export __GL_SHADER_DISK_CACHE_SIZE := "8000000000"
+
 lint:
     cargo fmt --check
     cargo run --release --quiet -p game --bin lint
@@ -30,7 +34,7 @@ gate *scenes: idle
     nvidia-smi --query-gpu=pstate,utilization.gpu,clocks.gr --format=csv,noheader,nounits -l 2 \
       > target/playgate-gpu.csv & clocks=$!
     sleep 3
-    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1 {{scenes}}
+    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1 --skip live:: {{scenes}}
     status=$?
     kill $awake $clocks
     for scene in target/playgate/*/; do
@@ -42,6 +46,29 @@ gate *scenes: idle
     throttled=$(awk -F', ' '$2 > 50 && $1 != "P0"' target/playgate-gpu.csv | wc -l)
     if [ "$throttled" -gt 0 ]; then
       echo "the GPU worked below its full performance state $throttled times: nothing measured is to be kept"
+      exit 1
+    fi
+    exit $status
+
+# The gate's scenes played as the game runs them, in time as it passes, each frame begun as soon
+# as the one before it is done: what was on screen every sixtieth of a second is kept as a video,
+# and how fast it ran beside it, in target/playlive/. The GPU is held at its full performance as
+# for the gate. Scenes can be named to play only those.
+live *scenes: idle
+    #!/usr/bin/env bash
+    powermizer=$(nvidia-settings -t -q '[gpu:0]/GpuPowerMizerMode')
+    nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=1' > /dev/null
+    trap "nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=$powermizer' > /dev/null" EXIT
+    (while true; do xset dpms force on; sleep 20; done) & awake=$!
+    nvidia-smi --query-gpu=pstate,utilization.gpu,clocks.gr --format=csv,noheader,nounits -l 2 \
+      > target/playlive-gpu.csv & clocks=$!
+    sleep 3
+    cargo test --release -p game --test play_gate --no-fail-fast -- --ignored --test-threads=1 --skip gate:: {{scenes}}
+    status=$?
+    kill $awake $clocks
+    throttled=$(awk -F', ' '$2 > 50 && $1 != "P0"' target/playlive-gpu.csv | wc -l)
+    if [ "$throttled" -gt 0 ]; then
+      echo "the GPU worked below its full performance state $throttled times: the videos show the driver's thrift"
       exit 1
     fi
     exit $status
