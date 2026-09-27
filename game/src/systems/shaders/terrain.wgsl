@@ -26,7 +26,8 @@ struct Terrain {
     // the site everything is drawn about, from the water's: how far round the ring and along
     // the axis, in metres; the glass radius; and the mask of the survey's table
     site: vec4<f32>,
-    // where the point everything is drawn about lies in the site's frame, in metres
+    // where the point everything is drawn about lies in the site's frame, in metres, and the
+    // refractive index of what the eye is in, air or water
     origin: vec4<f32>,
     // a surveyed column's arc round the ring and width along the axis, the drum's half width,
     // in metres, and the water each particle of a column adds over its footprint
@@ -425,10 +426,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) from_above: bool) -> @locat
     let reach = length(away);
     let toward = -away / max(reach, 1e-6);
 #ifdef DISTANCE_FOG
-    // with the eye under water, everything is seen through it rather than through the air
-    let rise = -dot(toward, ring_up(view.world_position + terrain.origin.xyz, terrain.site.z));
-    return vec4(through_water(colour, fog.base_color.rgb, fog.be, rise, reach), 1.0);
-#else
-    return vec4(through_ring_air(colour, terrain.air, p + mouths.about.xyz, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
+    if (terrain.origin.w > 1.0) {
+        // with the eye under water, everything is seen through it rather than through the air
+        let rise = -dot(toward, ring_up(view.world_position + terrain.origin.xyz, terrain.site.z));
+        return vec4(through_water(colour, fog.base_color.rgb, fog.be, rise, reach), 1.0);
+    }
 #endif
+    return vec4(through_ring_air(colour, terrain.air, p + mouths.about.xyz, toward, reach, vec2(terrain.site.z, terrain.grid.z)), 1.0);
 }

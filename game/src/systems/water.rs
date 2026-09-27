@@ -614,7 +614,9 @@ fn droplet_radius(resolution: Resolution) -> f64 {
 }
 
 /// With the eye under water, everything seen is seen through water: dimmed and coloured by
-/// how far off it is.
+/// how far off it is. Above water the fog stays, clear: whether a view has fog is part of what
+/// every material in it is compiled for, so fog put on as the eye went under would have them all
+/// compiled anew in that frame.
 fn submerge(
     mut commands: Commands,
     sim: Res<Simulation>,
@@ -630,25 +632,26 @@ fn submerge(
     let up = Vec3::new(-outward[0] as f32, -outward[1] as f32, -outward[2] as f32);
     let downwelling = scene::bounce_light(&ambient) + scene::sunlight() * sky.sun.dot(up).max(0.0);
     let glow = SCATTERING / extinction() * downwelling;
+    // the light coming down turns with the ring, so the water it lights turns with it
     let colour = Color::linear_rgb(glow.x, glow.y, glow.z);
-    for (camera, fog) in &mut cameras {
-        match (under, fog) {
-            // the light coming down turns with the ring, so the water it lights turns with it
-            (true, Some(mut fog)) => fog.color = colour,
-            (true, None) => {
-                commands.entity(camera).insert(DistanceFog {
-                    color: colour,
-                    falloff: FogFalloff::Atmospheric {
-                        extinction: extinction(),
-                        inscattering: extinction(),
-                    },
-                    ..default()
-                });
+    let fog = DistanceFog {
+        color: if under {
+            colour
+        } else {
+            colour.with_alpha(0.0)
+        },
+        falloff: FogFalloff::Atmospheric {
+            extinction: extinction(),
+            inscattering: extinction(),
+        },
+        ..default()
+    };
+    for (camera, held) in &mut cameras {
+        match held {
+            Some(mut held) => *held = fog.clone(),
+            None => {
+                commands.entity(camera).insert(fog.clone());
             }
-            (false, Some(_)) => {
-                commands.entity(camera).remove::<DistanceFog>();
-            }
-            (false, None) => {}
         }
     }
 }

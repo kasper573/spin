@@ -126,10 +126,19 @@ fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 steps: SEEN_THROUGH_LAYERS,
                 ..default()
             },
-            Msaa::Off,
-            Smaa::default(),
-            DepthPrepass,
-            ShadowFilteringMethod::Gaussian,
+            (
+                Msaa::Off,
+                Smaa::default(),
+                DepthPrepass,
+                ShadowFilteringMethod::Gaussian,
+                // every view carries a fog, clear unless its eye is under water, so that what
+                // is drawn in one is compiled as it is in any other, and nothing is compiled
+                // anew when a mouth is first looked through
+                DistanceFog {
+                    color: Color::NONE,
+                    ..default()
+                },
+            ),
         ));
     }
     commands.insert_resource(pictures);

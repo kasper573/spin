@@ -188,10 +188,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let reach = length(away);
     let toward = -away / max(reach, 1e-6);
 #ifdef DISTANCE_FOG
-    // with the eye under water, the glass is seen through it rather than through the air
-    let rise = -dot(toward, ring_up(view.world_position + glass.origin.xyz, glass.ring.x));
-    return vec4(through_water(out.rgb, fog.base_color.rgb, fog.be, rise, reach), out.a);
-#else
-    return vec4(through_ring_air(out.rgb, glass.air, p + glass.origin.xyz, toward, reach, glass.ring.xy), out.a);
+    if (glass.ring.w > 1.0) {
+        // with the eye under water, the glass is seen through it rather than through the air
+        let rise = -dot(toward, ring_up(view.world_position + glass.origin.xyz, glass.ring.x));
+        return vec4(through_water(out.rgb, fog.base_color.rgb, fog.be, rise, reach), out.a);
+    }
 #endif
+    return vec4(through_ring_air(out.rgb, glass.air, p + glass.origin.xyz, toward, reach, glass.ring.xy), out.a);
 }

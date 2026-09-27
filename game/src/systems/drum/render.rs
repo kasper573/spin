@@ -201,7 +201,8 @@ struct TerrainMaterial {
     /// the axis, in metres; the glass radius; and the mask of the survey's table.
     #[uniform(0)]
     site: Vec4,
-    /// Where the point everything is drawn about lies in the site's frame, in metres.
+    /// Where the point everything is drawn about lies in the site's frame, in metres, and the
+    /// refractive index of what the eye is in, air or water.
     #[uniform(0)]
     origin: Vec4,
     /// A surveyed column's arc round the ring and width along the axis, and the drum's half
@@ -552,7 +553,8 @@ fn wet(
             (SURVEY_SLOTS - 1) as f32,
         );
         let [x, y, z] = vantage.viewpoint.origin;
-        material.origin = Vec4::new(x as f32, y as f32, z as f32, 0.0);
+        let medium = if vantage.submerged { WATER_IOR } else { 1.0 };
+        material.origin = Vec4::new(x as f32, y as f32, z as f32, medium);
         material.lying_cells = Vec4::ZERO;
         if let Some(lie) = sheet.lie().filter(|_| !sheet.is_empty()) {
             let [round, along] = sheet.origin();
